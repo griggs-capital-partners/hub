@@ -22,8 +22,6 @@ export const GROUP_STATUSES = [
   { value: "backlog",     label: "Backlog",     color: "#666666", bg: "rgba(102,102,102,0.14)", border: "rgba(102,102,102,0.3)" },
   { value: "research",   label: "Research",    color: "#FBBA00", bg: "rgba(251,186,0,0.14)",   border: "rgba(251,186,0,0.3)" },
   { value: "in-progress", label: "In Progress", color: "#F7941D", bg: "rgba(247,148,29,0.14)",  border: "rgba(247,148,29,0.3)" },
-  { value: "in-qa",       label: "In QA",       color: "#3B82F6", bg: "rgba(59,130,246,0.14)",  border: "rgba(59,130,246,0.3)" },
-  { value: "po-review",  label: "PO Review",   color: "#EAB308", bg: "rgba(234,179,8,0.14)",   border: "rgba(234,179,8,0.3)" },
   { value: "done",        label: "Done",        color: "#22C55E", bg: "rgba(34,197,94,0.14)",   border: "rgba(34,197,94,0.3)" },
   { value: "blocked",     label: "Blocked",     color: "#EF4444", bg: "rgba(239,68,68,0.14)",   border: "rgba(239,68,68,0.3)" },
 ] as const;

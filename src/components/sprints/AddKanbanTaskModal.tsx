@@ -3,12 +3,11 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  X, Zap, Loader2, ChevronLeft, Search, Tag, UserRound,
+  X, Zap, Loader2, Search, Tag,
   LayoutGrid, List, ExternalLink,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Avatar } from "@/components/ui/Avatar";
-import { ACTIVE_COLUMN, BACKLOG_COLUMN, PO_REVIEW_COLUMN, QA_COLUMN, normalizeKanbanColumnName } from "@/lib/kanban-columns";
+import { ACTIVE_COLUMN, BACKLOG_COLUMN, normalizeKanbanColumnName } from "@/lib/kanban-columns";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -92,8 +91,6 @@ const PRIORITY_BG: Record<string, string> = {
 const COLUMN_ORDER = [
   BACKLOG_COLUMN,
   ACTIVE_COLUMN,
-  QA_COLUMN,
-  PO_REVIEW_COLUMN,
 ];
 
 // ─── Main Component ───────────────────────────────────────────────────────────

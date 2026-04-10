@@ -17,18 +17,18 @@ export const PRIMARY_KANBAN_COLUMNS = [
 
 export const ALL_KANBAN_COLUMNS = [
   ...PRIMARY_KANBAN_COLUMNS,
-  QA_COLUMN,
-  PO_REVIEW_COLUMN,
   DONE_COLUMN,
 ] as const;
 
 export const DEFAULT_KANBAN_COLUMN_DEFINITIONS = [
   { name: BACKLOG_COLUMN, color: "#333333", position: 0 },
   { name: ACTIVE_COLUMN, color: "#F7941D", position: 1 },
-  { name: QA_COLUMN, color: "#3B82F6", position: 2 },
-  { name: PO_REVIEW_COLUMN, color: "#EAB308", position: 3 },
-  { name: DONE_COLUMN, color: "#22C55E", position: 4 },
+  { name: DONE_COLUMN, color: "#22C55E", position: 2 },
 ] as const;
+
+export function isLegacyDoneColumnName(name: string) {
+  return name === QA_COLUMN || name === PO_REVIEW_COLUMN;
+}
 
 export function isLegacyActiveColumnName(name: string) {
   return (LEGACY_ACTIVE_COLUMN_NAMES as readonly string[]).includes(name);
@@ -39,5 +39,7 @@ export function isActiveColumnName(name: string) {
 }
 
 export function normalizeKanbanColumnName(name: string) {
-  return isActiveColumnName(name) ? ACTIVE_COLUMN : name;
+  if (isActiveColumnName(name)) return ACTIVE_COLUMN;
+  if (isLegacyDoneColumnName(name)) return DONE_COLUMN;
+  return name;
 }

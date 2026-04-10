@@ -105,8 +105,8 @@ const GROUP_STATUS_TO_COLUMN: Record<string, string> = {
   backlog: BACKLOG_COLUMN,
   research: ACTIVE_COLUMN,
   "in-progress": ACTIVE_COLUMN,
-  "in-qa": QA_COLUMN,
-  "po-review": PO_REVIEW_COLUMN,
+  "in-qa": DONE_COLUMN,
+  "po-review": DONE_COLUMN,
   done: DONE_COLUMN,
   blocked: BACKLOG_COLUMN,
 };
@@ -115,8 +115,6 @@ const GROUP_STATUS_TO_COLUMN: Record<string, string> = {
 const COLUMN_TO_GROUP_STATUS: Record<string, string> = {
   [BACKLOG_COLUMN]: "backlog",
   [ACTIVE_COLUMN]: "in-progress",
-  [QA_COLUMN]: "in-qa",
-  [PO_REVIEW_COLUMN]: "po-review",
   [DONE_COLUMN]: "done",
 };
 
@@ -187,9 +185,7 @@ const PRIORITY_COLORS: Record<string, string> = {
 const LIST_COLUMN_POSITION: Record<string, number> = {
   [BACKLOG_COLUMN]: 0,
   [ACTIVE_COLUMN]: 1,
-  [QA_COLUMN]: 2,
-  [PO_REVIEW_COLUMN]: 3,
-  [DONE_COLUMN]: 4,
+  [DONE_COLUMN]: 2,
 };
 
 function getPriorityRank(priority: string) {
@@ -1968,7 +1964,7 @@ export function GlobalKanbanClient({ cards, repos, sprints, users, customers, cu
 
   // ── Group into columns (exclude grouped cards) ─────────────────────────────
   const columnMap = useMemo(() => {
-    const allCols = [...COLUMN_ORDER, QA_COLUMN, PO_REVIEW_COLUMN, COMPLETED_COLUMN];
+    const allCols = [...COLUMN_ORDER, COMPLETED_COLUMN];
     const map: Record<string, GlobalCard[]> = {};
     for (const col of allCols) map[col] = [];
     for (const card of filteredCards) {
@@ -1991,7 +1987,7 @@ export function GlobalKanbanClient({ cards, repos, sprints, users, customers, cu
 
   // ── Map task groups into columns (all 5, including QA + Done) ─────────────
   const groupColumnMap = useMemo(() => {
-    const allCols = [...COLUMN_ORDER, QA_COLUMN, PO_REVIEW_COLUMN, COMPLETED_COLUMN];
+    const allCols = [...COLUMN_ORDER, COMPLETED_COLUMN];
     const map: Record<string, Array<{ group: TaskGroupData; cards: GlobalCard[] }>> = {};
     for (const col of allCols) map[col] = [];
     for (const group of localTaskGroups) {
@@ -2344,7 +2340,7 @@ export function GlobalKanbanClient({ cards, repos, sprints, users, customers, cu
   }
 
   function handleDoneDropZoneDragLeave() {
-    if (dragOverColumn === QA_COLUMN || dragOverColumn === PO_REVIEW_COLUMN || dragOverColumn === COMPLETED_COLUMN) {
+    if (dragOverColumn === COMPLETED_COLUMN) {
       setDragOverColumn(null);
     }
   }
@@ -2865,46 +2861,16 @@ export function GlobalKanbanClient({ cards, repos, sprints, users, customers, cu
             </div>
           ))}
 
-          {/* ── QA / Done drop zones ─────────────────────────────────────── */}
+          {/* ── Done drop zone ───────────────────────────────────────────── */}
           <div className="flex snap-start items-stretch gap-3 sm:gap-4 sm:flex-none sm:w-52">
             <div className="hidden self-stretch py-1 sm:block">
               <div className="h-full w-px rounded-full bg-[linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.14),rgba(34,197,94,0.18),rgba(255,255,255,0.08))]" />
             </div>
-            <div className="flex flex-1 min-w-0 flex-col gap-3 sm:gap-4">
+            <div className="flex flex-1 min-w-0 flex-col">
               <motion.div
                 initial={{ opacity: 0, y: 16 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: COLUMN_ORDER.length * 0.06, duration: 0.3, ease: "easeOut" }}
-              >
-                <QaDropZone
-                  cardCount={(columnMap[QA_COLUMN] ?? []).length}
-                  isDragOver={dragOverColumn === QA_COLUMN}
-                  isDraggingActive={draggingCardId !== null || draggingGroupId !== null}
-                  onDragOver={(event) => handleColumnDragOver(event, QA_COLUMN)}
-                  onDrop={(event) => void handleColumnDrop(event, QA_COLUMN)}
-                  onDragLeave={handleDoneDropZoneDragLeave}
-                  onClick={() => setQaDrawerOpen(true)}
-                />
-              </motion.div>
-              <motion.div
-                initial={{ opacity: 0, y: 16 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: (COLUMN_ORDER.length + 1) * 0.06, duration: 0.3, ease: "easeOut" }}
-              >
-                <PoReviewDropZone
-                  cardCount={(columnMap[PO_REVIEW_COLUMN] ?? []).length}
-                  isDragOver={dragOverColumn === PO_REVIEW_COLUMN}
-                  isDraggingActive={draggingCardId !== null || draggingGroupId !== null}
-                  onDragOver={(event) => handleColumnDragOver(event, PO_REVIEW_COLUMN)}
-                  onDrop={(event) => void handleColumnDrop(event, PO_REVIEW_COLUMN)}
-                  onDragLeave={handleDoneDropZoneDragLeave}
-                  onClick={() => setPoReviewDrawerOpen(true)}
-                />
-              </motion.div>
-              <motion.div
-                initial={{ opacity: 0, y: 16 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: (COLUMN_ORDER.length + 2) * 0.06, duration: 0.3, ease: "easeOut" }}
               >
                 <DoneDropZone
                   cardCount={(columnMap[COMPLETED_COLUMN] ?? []).length}
@@ -2951,51 +2917,6 @@ export function GlobalKanbanClient({ cards, repos, sprints, users, customers, cu
           />
         )}
       </AnimatePresence>
-
-      <QaTasksDrawer
-        open={qaDrawerOpen}
-        onClose={() => setQaDrawerOpen(false)}
-        cards={columnMap[QA_COLUMN] ?? []}
-        repos={repos}
-        users={users}
-        onDelete={handleDelete}
-        onDragStart={handleDragStart}
-        onDragEnd={handleDragEnd}
-        availableCustomers={customers}
-        onUpdate={handleCardUpdate}
-        sprints={sprints}
-        onSprintChange={handleSprintChange}
-        currentUserId={currentUserId}
-        onReject={handleQaReject}
-        onMoveToPo={handleQaMoveToPoReview}
-        onComplete={handleQaComplete}
-        actioningCardId={qaActioningCardId}
-        actioningCardAction={qaActioningCardAction}
-        taskGroupEntries={groupColumnMap[QA_COLUMN] ?? []}
-        onOpenGroup={setOpenGroupId}
-      />
-
-      <PoReviewTasksDrawer
-        open={poReviewDrawerOpen}
-        onClose={() => setPoReviewDrawerOpen(false)}
-        cards={columnMap[PO_REVIEW_COLUMN] ?? []}
-        repos={repos}
-        users={users}
-        onDelete={handleDelete}
-        onDragStart={handleDragStart}
-        onDragEnd={handleDragEnd}
-        availableCustomers={customers}
-        onUpdate={handleCardUpdate}
-        sprints={sprints}
-        onSprintChange={handleSprintChange}
-        currentUserId={currentUserId}
-        onReject={handlePoReviewReject}
-        onComplete={handlePoReviewComplete}
-        actioningCardId={poActioningCardId}
-        actioningCardAction={poActioningCardAction}
-        taskGroupEntries={groupColumnMap[PO_REVIEW_COLUMN] ?? []}
-        onOpenGroup={setOpenGroupId}
-      />
 
       <CompletedTasksDrawer
         open={completedDrawerOpen}

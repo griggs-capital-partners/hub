@@ -4,6 +4,8 @@ import { GlobalKanbanClient } from "@/components/kanban/GlobalKanbanClient";
 import {
   ACTIVE_COLUMN,
   DEFAULT_KANBAN_COLUMN_DEFINITIONS,
+  DONE_COLUMN,
+  isLegacyDoneColumnName,
   isLegacyActiveColumnName,
   normalizeKanbanColumnName,
 } from "@/lib/kanban-columns";
@@ -136,6 +138,52 @@ async function syncBoardColumns(boardId: string, tx: Parameters<Parameters<typeo
     });
   }
 
+  const doneColumns = columns.filter((column) => normalizeKanbanColumnName(column.name) === DONE_COLUMN);
+  let primaryDoneColumn = doneColumns.find((column) => column.name === DONE_COLUMN)
+    ?? doneColumns.find((column) => isLegacyDoneColumnName(column.name))
+    ?? doneColumns[0];
+
+  if (primaryDoneColumn) {
+    await tx.kanbanColumn.update({
+      where: { id: primaryDoneColumn.id },
+      data: { name: DONE_COLUMN, color: "#22C55E" },
+    });
+
+    let nextPosition = (
+      await tx.kanbanCard.aggregate({
+        where: { columnId: primaryDoneColumn.id },
+        _max: { position: true },
+      })
+    )._max.position ?? -1;
+
+    for (const legacyColumn of doneColumns) {
+      if (legacyColumn.id === primaryDoneColumn.id || !isLegacyDoneColumnName(legacyColumn.name)) continue;
+
+      const legacyCards = await tx.kanbanCard.findMany({
+        where: { columnId: legacyColumn.id },
+        select: { id: true },
+        orderBy: { position: "asc" },
+      });
+
+      for (const card of legacyCards) {
+        nextPosition += 1;
+        await tx.kanbanCard.update({
+          where: { id: card.id },
+          data: {
+            columnId: primaryDoneColumn.id,
+            position: nextPosition,
+          },
+        });
+      }
+
+      await tx.kanbanColumn.delete({ where: { id: legacyColumn.id } });
+    }
+  } else {
+    primaryDoneColumn = await tx.kanbanColumn.create({
+      data: { boardId, name: DONE_COLUMN, color: "#22C55E", position: 2 },
+    });
+  }
+
   const existingColumnNames = new Set(columns.map((column) => normalizeKanbanColumnName(column.name)));
 
   for (const column of DEFAULT_KANBAN_COLUMN_DEFINITIONS) {
@@ -180,9 +228,10 @@ export default async function PlannerPage() {
   const boardsNeedingColumnSync = await prisma.kanbanBoard.findMany({
     where: {
       OR: [
-        { columns: { none: { name: "QA Testing" } } },
-        { columns: { none: { name: "PO Review" } } },
+        { columns: { some: { name: "QA Testing" } } },
+        { columns: { some: { name: "PO Review" } } },
         { columns: { none: { name: ACTIVE_COLUMN } } },
+        { columns: { none: { name: DONE_COLUMN } } },
         { columns: { some: { name: "In Review" } } },
         { columns: { some: { name: "In Progress" } } },
         { columns: { some: { name: "Research & Investigation" } } },
@@ -359,6 +408,7 @@ export default async function PlannerPage() {
 
   const taskGroups = taskGroupsRaw.map((group) => ({
     ...group,
+    status: group.status === "in-qa" || group.status === "po-review" ? "done" : group.status,
     cardIds: group.cards.map((card) => card.id),
   }));
 

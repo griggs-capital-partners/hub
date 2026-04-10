@@ -7,6 +7,8 @@ import { sanitizeKanbanSubtasks, serializeKanbanSubtasks } from "@/lib/kanban-su
 import {
   ACTIVE_COLUMN,
   DEFAULT_KANBAN_COLUMN_DEFINITIONS,
+  DONE_COLUMN,
+  isLegacyDoneColumnName,
   isLegacyActiveColumnName,
   normalizeKanbanColumnName,
 } from "@/lib/kanban-columns";
@@ -197,6 +199,61 @@ async function ensureBoardColumns(boardId: string) {
           name: ACTIVE_COLUMN,
           color: "#F7941D",
           position: 1,
+        },
+      });
+    }
+
+    const doneColumns = existingColumns.filter((column) => normalizeKanbanColumnName(column.name) === DONE_COLUMN);
+    let primaryDoneColumn = doneColumns.find((column) => column.name === DONE_COLUMN)
+      ?? doneColumns.find((column) => isLegacyDoneColumnName(column.name))
+      ?? doneColumns[0];
+
+    if (primaryDoneColumn) {
+      await tx.kanbanColumn.update({
+        where: { id: primaryDoneColumn.id },
+        data: {
+          name: DONE_COLUMN,
+          color: "#22C55E",
+          position: 2,
+        },
+      });
+
+      let nextPosition = (
+        await tx.kanbanCard.aggregate({
+          where: { columnId: primaryDoneColumn.id },
+          _max: { position: true },
+        })
+      )._max.position ?? -1;
+
+      for (const legacyColumn of doneColumns) {
+        if (legacyColumn.id === primaryDoneColumn.id || !isLegacyDoneColumnName(legacyColumn.name)) continue;
+
+        const legacyCards = await tx.kanbanCard.findMany({
+          where: { columnId: legacyColumn.id },
+          select: { id: true },
+          orderBy: { position: "asc" },
+        });
+
+        for (const card of legacyCards) {
+          nextPosition += 1;
+          await tx.kanbanCard.update({
+            where: { id: card.id },
+            data: {
+              columnId: primaryDoneColumn.id,
+              position: nextPosition,
+            },
+          });
+        }
+
+        await tx.kanbanColumn.delete({ where: { id: legacyColumn.id } });
+      }
+    } else {
+      primaryDoneColumn = await tx.kanbanColumn.create({
+        data: {
+          boardId,
+          name: DONE_COLUMN,
+          color: "#22C55E",
+          position: 2,
         },
       });
     }
