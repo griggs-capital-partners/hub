@@ -2,6 +2,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { notFound } from "next/navigation";
 import { RepoDetailClient } from "@/components/repos/RepoDetailClient";
+import { mapWellToCustomerRef } from "@/lib/well-compat";
 
 export default async function RepoDetailPage({
   params,
@@ -11,7 +12,7 @@ export default async function RepoDetailPage({
   const session = await auth();
   const { id } = await params;
 
-  const [repo, users, awsLinks, awsAccount, customers] = await Promise.all([
+  const [repo, users, awsLinks, awsAccount, wells] = await Promise.all([
     prisma.repo.findUnique({ where: { id } }),
     prisma.user.findMany({
       orderBy: { name: "asc" },
@@ -31,9 +32,9 @@ export default async function RepoDetailPage({
           where: { userId: session.user.id, provider: "aws" },
         })
       : null,
-    prisma.customer.findMany({
+    prisma.oilWell.findMany({
       orderBy: { name: "asc" },
-      select: { id: true, name: true, logoUrl: true, status: true },
+      select: { id: true, name: true, status: true, priority: true },
     }),
   ]);
 
@@ -48,7 +49,7 @@ export default async function RepoDetailPage({
     <RepoDetailClient
       repo={repo}
       users={usersWithGitHub}
-      customers={customers}
+      customers={wells.map(mapWellToCustomerRef)}
       awsLinks={awsLinks.map((l) => ({
         id: l.id,
         service: l.service,

@@ -1,4 +1,5 @@
 import { prisma } from "./prisma";
+import { mapWellPriorityToTier } from "./well-compat";
 
 function parseJsonArray(raw: string): string[] {
   try {
@@ -10,7 +11,7 @@ function parseJsonArray(raw: string): string[] {
 }
 
 export async function buildOrgContext(): Promise<string> {
-  const [users, repos, knowledgeRepo, customers, agents, boards] = await Promise.all([
+  const [users, repos, knowledgeRepo, wells, agents, boards] = await Promise.all([
     prisma.user.findMany({
       select: { name: true, displayName: true },
       orderBy: { name: "asc" },
@@ -23,10 +24,10 @@ export async function buildOrgContext(): Promise<string> {
     prisma.knowledgeRepo.findFirst({
       select: { repoOwner: true, repoName: true, branch: true, description: true },
     }),
-    prisma.customer.findMany({
+    prisma.oilWell.findMany({
       where: { status: { not: "inactive" } },
-      select: { name: true, tier: true, status: true },
-      orderBy: [{ tier: "asc" }, { name: "asc" }],
+      select: { name: true, priority: true, status: true },
+      orderBy: [{ priority: "asc" }, { name: "asc" }],
     }),
     prisma.aIAgent.findMany({
       select: { name: true, role: true, status: true },
@@ -158,17 +159,18 @@ export async function buildOrgContext(): Promise<string> {
     sections.push(`### Knowledge Base\n${kbLines.join("\n")}`);
   }
 
-  // ── Customers (name + tier only — call get_customer_details for full info) ─
-  if (customers.length > 0) {
-    const lines = customers.map((c) => {
-      let line = `- ${c.name} (${c.tier})`;
-      if (c.status !== "active") line += ` [${c.status}]`;
+  // ── Oil Wells (name + priority tier only — call get_customer_details for full info)
+  if (wells.length > 0) {
+    const lines = wells.map((well) => {
+      let line = `- ${well.name} (${mapWellPriorityToTier(well.priority)})`;
+      if (well.priority) line += ` [priority: ${well.priority}]`;
+      if (well.status !== "active") line += ` [${well.status}]`;
       return line;
     });
     sections.push(
-      `### Customers (${customers.length} active)\n` +
+      `### Oil Wells (${wells.length} active)\n` +
       `${lines.join("\n")}\n` +
-      `_Call \`get_customer_details\` for contacts, health scores, and notes on any customer._`
+      `_Call \`get_customer_details\` for contacts and notes on any well._`
     );
   }
 

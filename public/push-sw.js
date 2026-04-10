@@ -2,7 +2,7 @@ self.addEventListener("push", (event) => {
   if (!event.data) return;
 
   const payload = event.data.json();
-  const title = payload.title || "Smart Hub";
+  const title = payload.title || "Griggs Hub";
   const options = {
     body: payload.body,
     icon: payload.icon || "/logo.png",
@@ -18,7 +18,7 @@ self.addEventListener("push", (event) => {
       actionUrl: payload.url || "/",
     },
     actions: Array.isArray(payload.actions) ? payload.actions : [
-      { action: "open", title: "Open Smart Hub" },
+      { action: "open", title: "Open Griggs Hub" },
     ],
   };
 

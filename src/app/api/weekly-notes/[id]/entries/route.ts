@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { mapWellToWeeklyCustomerSnap } from "@/lib/well-compat";
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   await auth();
@@ -19,10 +20,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     },
     include: {
       customer: {
-        select: { id: true, name: true, logoUrl: true, healthScore: true, tier: true, status: true },
+        select: { id: true, name: true, status: true, priority: true },
       },
     },
   });
 
-  return NextResponse.json(entry, { status: 201 });
+  return NextResponse.json({
+    ...entry,
+    customer: mapWellToWeeklyCustomerSnap(entry.customer),
+  }, { status: 201 });
 }

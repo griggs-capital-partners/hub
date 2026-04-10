@@ -131,9 +131,9 @@ async function buildEmail(args: {
   const notesHtml = notesValue ? await markdownToEmailHtml(notesValue) : "";
 
   return {
-    subject: `Smart Hub | ${args.agentName} ${statusLabel} ${args.actionLabel}`,
+    subject: `Griggs Hub | ${args.agentName} ${statusLabel} ${args.actionLabel}`,
     text: [
-      "Smart Hub Agent Execution",
+      "Griggs Hub Agent Execution",
       "",
       preview,
       "",
@@ -151,7 +151,7 @@ async function buildEmail(args: {
       "",
       `${responseLabel}:\n${toPlainText(rawResponse)}`,
       "",
-      "Open Smart Hub: /agents/executions",
+      "Open Griggs Hub: /agents/executions",
     ].filter(Boolean).join("\n"),
     html: `
 <!DOCTYPE html>
@@ -188,7 +188,7 @@ async function buildEmail(args: {
               </table>
               <h1 style="margin:16px 0 0;font-size:26px;line-height:1.2;letter-spacing:-0.03em;color:#FFFFFF;font-weight:700;">${escapeHtml(args.agentName)} <span style="color:#F7941D;">${escapeHtml(statusLabel.toLowerCase())}</span> ${escapeHtml(args.actionLabel)}</h1>
               <p style="margin:12px 0 0;font-size:14px;line-height:1.7;color:#AAAAAA;">
-                Smart Hub recorded a ${escapeHtml(statusLabel.toLowerCase())} execution for <strong style="color:#FFFFFF;">${escapeHtml(args.cardTitle)}</strong>.
+                Griggs Hub recorded a ${escapeHtml(statusLabel.toLowerCase())} execution for <strong style="color:#FFFFFF;">${escapeHtml(args.cardTitle)}</strong>.
               </p>
             </td>
           </tr>
@@ -260,9 +260,9 @@ async function buildEmail(args: {
                 <div style="margin-bottom:10px;display:flex;align-items:center;gap:10px;">
                   <span style="font-size:10px;letter-spacing:0.14em;text-transform:uppercase;color:#6B6B6B;">${escapeHtml(responseLabel)}</span>
                   ${args.status === "completed"
-                    ? `<span style="display:inline-block;border-radius:999px;background:rgba(74,222,128,0.12);border:1px solid rgba(74,222,128,0.25);padding:2px 10px;font-size:10px;letter-spacing:0.06em;text-transform:uppercase;color:#4ADE80;">Success</span>`
-                    : `<span style="display:inline-block;border-radius:999px;background:rgba(248,113,113,0.12);border:1px solid rgba(248,113,113,0.25);padding:2px 10px;font-size:10px;letter-spacing:0.06em;text-transform:uppercase;color:#F87171;">Error</span>`
-                  }
+        ? `<span style="display:inline-block;border-radius:999px;background:rgba(74,222,128,0.12);border:1px solid rgba(74,222,128,0.25);padding:2px 10px;font-size:10px;letter-spacing:0.06em;text-transform:uppercase;color:#4ADE80;">Success</span>`
+        : `<span style="display:inline-block;border-radius:999px;background:rgba(248,113,113,0.12);border:1px solid rgba(248,113,113,0.25);padding:2px 10px;font-size:10px;letter-spacing:0.06em;text-transform:uppercase;color:#F87171;">Error</span>`
+      }
                 </div>
                 <div style="border-radius:16px;border:1px solid rgba(255,255,255,0.07);background:#0D0D0E;padding:20px 22px;word-break:break-word;">
                   ${responseHtml}
@@ -271,7 +271,7 @@ async function buildEmail(args: {
 
               <!-- Footer -->
               <div style="border-top:1px solid rgba(255,255,255,0.07);padding-top:16px;font-size:12px;line-height:1.6;color:#555555;">
-                Sent by Smart Hub &bull; Griggs Capital Partners
+                Sent by Griggs Hub &bull; Griggs Capital Partners
               </div>
 
             </td>

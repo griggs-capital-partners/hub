@@ -154,7 +154,7 @@ export function ReposClient({ initialRepos, teamUsers }: Props) {
             Codebase
           </h1>
           <p className="text-sm text-[#606060] mt-0.5">
-            {repos.length} repositories from summit-smart-farms
+            {repos.length} repositories
           </p>
         </div>
         <div className="flex items-center gap-3">

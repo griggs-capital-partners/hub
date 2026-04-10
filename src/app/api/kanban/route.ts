@@ -46,8 +46,8 @@ function getCardSelect(includeSubtasks: boolean) {
     assignees: true,
     updatedAt: true,
     taskGroupId: true,
-    customers: {
-      select: { id: true, name: true, logoUrl: true, status: true },
+    wells: {
+      select: { id: true, name: true, status: true },
       orderBy: { name: "asc" as const },
     },
     notes: {
@@ -121,7 +121,21 @@ function getBoardSelect(includeSubtasks: boolean) {
 function withSubtasksFallback<T extends { subtasks?: string | null }>(card: T, includeSubtasks: boolean) {
   return {
     ...card,
+    customers: "wells" in card && Array.isArray(card.wells) ? card.wells : [],
     subtasks: includeSubtasks ? (card.subtasks ?? "[]") : "[]",
+  };
+}
+
+function normalizeBoardPayload<T extends { columns: Array<{ cards: Array<Record<string, unknown> & { subtasks?: string | null }> }> }>(
+  board: T,
+  includeSubtasks: boolean
+) {
+  return {
+    ...board,
+    columns: board.columns.map((column) => ({
+      ...column,
+      cards: column.cards.map((card) => withSubtasksFallback(card, includeSubtasks)),
+    })),
   };
 }
 
@@ -269,7 +283,7 @@ export async function GET(request: Request) {
     select: boardSelect,
   });
 
-  return NextResponse.json({ board });
+  return NextResponse.json({ board: board ? normalizeBoardPayload(board, includeSubtasks) : null });
 }
 
 // POST /api/kanban - create card
@@ -305,7 +319,7 @@ export async function POST(request: Request) {
       position: (maxCard?.position ?? -1) + 1,
       githubIssueId: githubIssueId ?? null,
       githubIssueUrl: githubIssueUrl ?? null,
-      customers: customerIds?.length
+      wells: customerIds?.length
         ? { connect: customerIds.map((id: string) => ({ id })) }
         : undefined,
       linkedRepos: linkedRepoIds?.length
@@ -384,7 +398,7 @@ export async function PATCH(request: Request) {
       ...(body.priority !== undefined && { priority: body.priority }),
       ...(body.state !== undefined && { state: isKanbanTaskState(body.state) ? body.state : "normal" }),
       ...(body.customerIds !== undefined && {
-        customers: {
+        wells: {
           set: body.customerIds.map((id: string) => ({ id })),
         },
       }),

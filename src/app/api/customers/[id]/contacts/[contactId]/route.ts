@@ -6,18 +6,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   const session = await auth();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { id: customerId, contactId } = await params;
+  const { id: wellId, contactId } = await params;
   const body = await req.json();
   const { name, email, phone, title, isPrimary, notes } = body;
 
   if (isPrimary) {
-    await prisma.customerContact.updateMany({
-      where: { customerId, isPrimary: true },
+    await prisma.wellContact.updateMany({
+      where: { wellId, isPrimary: true },
       data: { isPrimary: false },
     });
   }
 
-  const contact = await prisma.customerContact.update({
+  const contact = await prisma.wellContact.update({
     where: { id: contactId },
     data: {
       ...(name !== undefined && { name }),
@@ -37,7 +37,7 @@ export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ 
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const { contactId } = await params;
-  await prisma.customerContact.delete({ where: { id: contactId } });
+  await prisma.wellContact.delete({ where: { id: contactId } });
 
   return NextResponse.json({ ok: true });
 }

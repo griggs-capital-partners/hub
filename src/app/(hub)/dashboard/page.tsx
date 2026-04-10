@@ -66,8 +66,15 @@ export default async function DashboardPage() {
   );
 
   // Customer counts
-  const customerCount = await prisma.customer.count();
-  const atRisk = await prisma.customer.count({ where: { status: "at-risk" } });
+  const customerCount = await prisma.oilWell.count();
+  const atRisk = await prisma.oilWell.count({
+    where: {
+      OR: [
+        { status: { in: ["inactive", "plugged"] } },
+        { priority: { in: ["critical", "high"] } },
+      ],
+    },
+  });
 
   // Recent agent executions (full data for drawer)
   const rawExecutions = await prisma.agentTaskExecution.findMany({

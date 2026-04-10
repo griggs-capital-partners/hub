@@ -30,8 +30,8 @@ model User {
   updatedAt   DateTime @updatedAt
 
   connectedAccounts ConnectedAccount[]
-  customerDocs      CustomerDocument[]
-  customerNotes     CustomerNote[]
+  wellDocs          WellDocument[]
+  wellNotes         WellNote[]
   issueNotes        IssueNote[]
   hostedJams        JamSession[]    @relation("JamHost")
   jamListeners      JamListener[]   @relation("JamListeners")
@@ -148,38 +148,15 @@ model Repo {
   connected       Boolean  @default(true)  // whether this repo is active in the workspace
   pushedAt        DateTime? // last time someone pushed to GitHub
   lastSyncedAt    DateTime @default(now())
-  roadmapOrder    Int      @default(0)     // order in the roadmap view
-  showInRoadmap   Boolean  @default(true)  // whether this repo appears on the roadmap
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   boards       KanbanBoard[]
   awsLinks     RepoAwsLink[]
   customPages  CustomPage[]
-  roadmapCards RoadmapCard[]
   linkedCards  KanbanCardRepo[]
 
   @@map("repos")
-}
-
-// ─── Roadmap ──────────────────────────────────────────────────────────────────
-// One card per repo per quarter — tracks milestones, releases, and concepts.
-
-model RoadmapCard {
-  id          String   @id @default(cuid())
-  repoId      String
-  repo        Repo     @relation(fields: [repoId], references: [id], onDelete: Cascade)
-  quarter     Int      // 1–4
-  year        Int
-  title       String
-  description String?
-  status      String   @default("planning") // "por" | "planning" | "concept"
-  uid         String?  // optional label/identifier shown on card
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-
-  @@unique([repoId, quarter, year])
-  @@map("roadmap_cards")
 }
 
 // ─── Kanban ──────────────────────────────────────────────────────────────────
@@ -243,7 +220,7 @@ model KanbanCard {
 
   column          KanbanColumn         @relation(fields: [columnId], references: [id], onDelete: Cascade)
   taskGroup       TaskGroup?           @relation(fields: [taskGroupId], references: [id], onDelete: SetNull)
-  customers       Customer[]
+  wells           OilWell[]
   notes           IssueNote[]
   sprintTask      SprintTask?
   linkedRepos     KanbanCardRepo[]
@@ -277,69 +254,64 @@ model IssueNote {
   @@map("issue_notes")
 }
 
-// ─── Customers (company/account level) ───────────────────────────────────────
+// ─── Oil Wells ───────────────────────────────────────────────────────────────
 
-model Customer {
-  id             String   @id @default(cuid())
-  name           String                        // Company name (e.g. "Hanor", "Oracle")
-  logoUrl        String?                       // base64 data URL or https URL
-  website        String?
-  productionUrls String   @default("[]")       // JSON array of { label, url }
-  status         String   @default("active")   // "active" | "at-risk" | "inactive"
-  healthScore    Int      @default(3)           // 1–5 happiness/health level
-  tier           String   @default("standard") // "enterprise" | "standard" | "startup"
-  priority       String   @default("medium")   // "critical" | "high" | "medium" | "low"
-  industry       String?
-  notes          String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+model OilWell {
+  id        String   @id @default(cuid())
+  name      String                        // Well name (e.g. "Griggs #1", "Section 14 Well")
+  address   String?                       // Physical address / legal description
+  status    String   @default("active")   // "active" | "inactive" | "plugged"
+  priority  String   @default("medium")   // "critical" | "high" | "medium" | "low"
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  contacts         CustomerContact[]
-  documents        CustomerDocument[]
-  kanbanCards      KanbanCard[]
-  noteItems        CustomerNote[]
+  contacts          WellContact[]
+  documents         WellDocument[]
+  kanbanCards       KanbanCard[]
+  noteItems         WellNote[]
   weeklyNoteEntries WeeklyNoteEntry[]
 
-  @@map("customers")
+  @@map("oil_wells")
 }
 
-// People within a customer org
-model CustomerContact {
-  id         String   @id @default(cuid())
-  customerId String
-  name       String
-  email      String?
-  phone      String?
-  title      String?
-  isPrimary  Boolean  @default(false)
-  notes      String?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+// People associated with a well (operators, owners, engineers, etc.)
+model WellContact {
+  id        String   @id @default(cuid())
+  wellId    String
+  name      String
+  email     String?
+  phone     String?
+  title     String?
+  isPrimary Boolean  @default(false)
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  well OilWell @relation(fields: [wellId], references: [id], onDelete: Cascade)
 
-  @@map("customer_contacts")
+  @@map("well_contacts")
 }
 
-// Notes, history, feature requests at the company level
-model CustomerNote {
-  id         String   @id @default(cuid())
-  customerId String
-  authorId   String
-  // "general" | "feature-request" | "issue" | "meeting"
-  type       String   @default("general")
-  body       String
-  createdAt  DateTime @default(now())
+// Field notes, inspection logs, meeting notes at the well level
+model WellNote {
+  id        String   @id @default(cuid())
+  wellId    String
+  authorId  String
+  // "general" | "inspection" | "issue" | "meeting"
+  type      String   @default("general")
+  body      String
+  createdAt DateTime @default(now())
 
-  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  author   User     @relation(fields: [authorId], references: [id])
+  well   OilWell @relation(fields: [wellId], references: [id], onDelete: Cascade)
+  author User    @relation(fields: [authorId], references: [id])
 
-  @@map("customer_notes")
+  @@map("well_notes")
 }
 
-model CustomerDocument {
+model WellDocument {
   id          String   @id @default(cuid())
-  customerId  String?
+  wellId      String?
   uploadedBy  String
   filename    String
   fileType    String
@@ -349,10 +321,10 @@ model CustomerDocument {
   tags        String   @default("[]")
   createdAt   DateTime @default(now())
 
-  customer Customer? @relation(fields: [customerId], references: [id])
-  uploader User      @relation(fields: [uploadedBy], references: [id])
+  well     OilWell? @relation(fields: [wellId], references: [id])
+  uploader User     @relation(fields: [uploadedBy], references: [id])
 
-  @@map("customer_documents")
+  @@map("well_documents")
 }
 
 // ─── Team Jam (Spotify Jam sessions) ────────────────────────────────────────
@@ -456,14 +428,14 @@ model WeeklyNote {
   @@map("weekly_notes")
 }
 
-// One entry per customer per week — items stored as flat JSON array
+// One entry per well per week — items stored as flat JSON array
 model WeeklyNoteEntry {
   id           String     @id @default(cuid())
   weeklyNoteId String
   weeklyNote   WeeklyNote @relation(fields: [weeklyNoteId], references: [id], onDelete: Cascade)
   customerId   String?
-  customer     Customer?  @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  customerName String     // denormalized for display even if customer is deleted
+  customer     OilWell?   @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customerName String     // denormalized well name for display even if well is deleted
   order        Int        @default(0)
   items        String     @default("[]") // JSON: { id, content, isChecked, indent }[]
   createdAt    DateTime   @default(now())

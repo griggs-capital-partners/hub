@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { mapWellToWeeklyCustomerSnap } from "@/lib/well-compat";
 
 export async function PUT(
   req: NextRequest,
@@ -19,12 +20,15 @@ export async function PUT(
     },
     include: {
       customer: {
-        select: { id: true, name: true, logoUrl: true, healthScore: true, tier: true, status: true },
+        select: { id: true, name: true, status: true, priority: true },
       },
     },
   });
 
-  return NextResponse.json(entry);
+  return NextResponse.json({
+    ...entry,
+    customer: mapWellToWeeklyCustomerSnap(entry.customer),
+  });
 }
 
 export async function DELETE(

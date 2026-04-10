@@ -1,5 +1,6 @@
 import { prisma } from "./prisma";
 import { parseKanbanSubtasks } from "./kanban-subtasks";
+import { mapWellPriorityToHealthScore, mapWellPriorityToTier } from "./well-compat";
 
 export const AGENT_ACTION_TYPES = {
   generate_docs: {
@@ -211,7 +212,7 @@ export async function buildTaskContext(kanbanCardId: string): Promise<TaskContex
         },
       },
       taskGroup: { select: { name: true, status: true, description: true } },
-      customers: {
+      wells: {
         include: {
           contacts: {
             where: { isPrimary: true },
@@ -291,12 +292,12 @@ export async function buildTaskContext(kanbanCardId: string): Promise<TaskContex
       language: lr.repo.language,
       description: lr.repo.description,
     })),
-    customers: card.customers.map((c) => ({
+    customers: card.wells.map((c) => ({
       name: c.name,
-      tier: c.tier,
-      healthScore: c.healthScore,
+      tier: mapWellPriorityToTier(c.priority),
+      healthScore: mapWellPriorityToHealthScore(c.priority),
       status: c.status,
-      industry: c.industry,
+      industry: c.address,
       contacts: c.contacts.map((contact) => ({ name: contact.name, title: contact.title })),
       recentNotes: c.noteItems.map((n) => ({ type: n.type, body: n.body })),
     })),

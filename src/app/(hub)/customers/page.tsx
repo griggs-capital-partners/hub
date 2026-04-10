@@ -1,11 +1,12 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { CustomersClient } from "@/components/customers/CustomersClient";
+import { mapWellToCustomerSummary } from "@/lib/well-compat";
 
 export default async function CustomersPage() {
   await auth();
 
-  const customers = await prisma.customer.findMany({
+  const wells = await prisma.oilWell.findMany({
     orderBy: { updatedAt: "desc" },
     include: {
       contacts: { orderBy: [{ isPrimary: "desc" }, { name: "asc" }], take: 5 },
@@ -14,5 +15,5 @@ export default async function CustomersPage() {
     },
   });
 
-  return <CustomersClient customers={customers} />;
+  return <CustomersClient customers={wells.map(mapWellToCustomerSummary)} />;
 }

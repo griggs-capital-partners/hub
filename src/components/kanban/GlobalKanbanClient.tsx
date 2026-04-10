@@ -2071,8 +2071,8 @@ export function GlobalKanbanClient({ cards, repos, sprints, users, customers, cu
   }, [selectedAssigneeIds, sortedAssignees]);
 
   const selectedCustomerLabel = useMemo(() => {
-    if (!selectedCustomerId) return "All Customers";
-    return sortedCustomers.find((customer) => customer.id === selectedCustomerId)?.name ?? "All Customers";
+    if (!selectedCustomerId) return "All Wells";
+    return sortedCustomers.find((customer) => customer.id === selectedCustomerId)?.name ?? "All Wells";
   }, [selectedCustomerId, sortedCustomers]);
 
   // ── Stats ───────────────────────────────────────────────────────────────────
@@ -2161,6 +2161,8 @@ export function GlobalKanbanClient({ cards, repos, sprints, users, customers, cu
     setLocalCards((prev) => [
       {
         ...task,
+        customers: task.customers ?? task.wells ?? [],
+        wells: task.wells ?? task.customers ?? [],
         updatedAt: new Date().toISOString(),
         notes: task.notes.map((note) => ({
           ...note,
@@ -2732,7 +2734,7 @@ export function GlobalKanbanClient({ cards, repos, sprints, users, customers, cu
                             selectedCustomerId === null ? "text-[#B8E7FF]" : "text-[#D0D0D0]"
                           )}
                         >
-                          <span>All Customers</span>
+                          <span>All Wells</span>
                           {selectedCustomerId === null ? <CheckCircle2 size={13} /> : null}
                         </button>
 

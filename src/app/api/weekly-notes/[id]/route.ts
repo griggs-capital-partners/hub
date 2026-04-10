@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { mapWellToWeeklyCustomerSnap } from "@/lib/well-compat";
 
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   await auth();
@@ -13,7 +14,7 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
         orderBy: { order: "asc" },
         include: {
           customer: {
-            select: { id: true, name: true, logoUrl: true, healthScore: true, tier: true, status: true },
+            select: { id: true, name: true, status: true, priority: true },
           },
         },
       },
@@ -21,7 +22,13 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
   });
 
   if (!note) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  return NextResponse.json(note);
+  return NextResponse.json({
+    ...note,
+    entries: note.entries.map((entry) => ({
+      ...entry,
+      customer: mapWellToWeeklyCustomerSnap(entry.customer),
+    })),
+  });
 }
 
 export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {

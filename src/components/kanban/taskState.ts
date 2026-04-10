@@ -32,8 +32,8 @@ export const KANBAN_TASK_STATE_META: Record<
     border: "rgba(56,189,248,0.24)",
   },
   waiting_on_customer: {
-    label: "Waiting on Customer",
-    shortLabel: "Waiting: Customer",
+    label: "Waiting on Well",
+    shortLabel: "Waiting: Well",
     color: "#F59E0B",
     background: "rgba(245,158,11,0.14)",
     border: "rgba(245,158,11,0.24)",

@@ -1,6 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { WildfiresClient } from "@/components/activity/WildfiresClient";
+import { mapWellPriorityToHealthScore, mapWellStatusToCustomerStatus } from "@/lib/well-compat";
 
 export default async function ActivityPage() {
   await auth();
@@ -37,10 +38,15 @@ export default async function ActivityPage() {
     take: 20,
   });
 
-  const atRiskCustomers = await prisma.customer.findMany({
-    where: { status: { in: ["at-risk", "inactive"] } },
-    orderBy: { healthScore: "asc" }, // lowest health first
-    select: { id: true, name: true, industry: true, status: true, healthScore: true },
+  const atRiskWells = await prisma.oilWell.findMany({
+    where: {
+      OR: [
+        { status: { in: ["inactive", "plugged"] } },
+        { priority: { in: ["critical", "high"] } },
+      ],
+    },
+    orderBy: [{ priority: "asc" }, { updatedAt: "desc" }],
+    select: { id: true, name: true, address: true, status: true, priority: true },
   });
 
   const activity = await prisma.activityEvent.findMany({
@@ -53,7 +59,13 @@ export default async function ActivityPage() {
     <WildfiresClient
       repos={repos}
       criticalCards={criticalCards}
-      atRiskCustomers={atRiskCustomers}
+      atRiskCustomers={atRiskWells.map((well) => ({
+        id: well.id,
+        name: well.name,
+        industry: well.address,
+        status: mapWellStatusToCustomerStatus(well.status, well.priority),
+        healthScore: mapWellPriorityToHealthScore(well.priority),
+      }))}
       activity={activity}
     />
   );

@@ -140,7 +140,7 @@ function LoginForm() {
         </div>
         <div>
           <div className="text-xs font-bold text-[#F7941D] tracking-widest uppercase">Griggs Capital Partners</div>
-          <div className="text-xl font-black text-[#F0F0F0]">Smart Hub</div>
+          <div className="text-xl font-black text-[#F0F0F0]">Griggs Hub</div>
         </div>
       </div>
 
@@ -161,8 +161,8 @@ function LoginForm() {
               setNotice(null);
             }}
             className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ${tab === t
-                ? "bg-gradient-to-r from-[#F7941D] to-[#FBBA00] text-[#0D0D0D]"
-                : "text-[#606060] hover:text-[#F0F0F0]"
+              ? "bg-gradient-to-r from-[#F7941D] to-[#FBBA00] text-[#0D0D0D]"
+              : "text-[#606060] hover:text-[#F0F0F0]"
               }`}
           >
             {t === "signin" ? <LogIn size={14} /> : <UserPlus size={14} />}
@@ -359,7 +359,7 @@ function LoginForm() {
       </AnimatePresence>
 
       <p className="text-center text-xs text-[#404040] mt-6">
-        © {new Date().getFullYear()} Griggs Capital Partners. Smart Hub.
+        © {new Date().getFullYear()} Griggs Capital Partners. Griggs Hub.
       </p>
     </motion.div>
   );
@@ -404,7 +404,7 @@ export default function LoginPage() {
           </div>
           <div>
             <div className="text-xs font-bold text-[#F7941D] tracking-[0.3em] uppercase">Griggs Capital Partners</div>
-            <div className="text-2xl font-black text-[#F0F0F0] tracking-tight">Smart Hub</div>
+            <div className="text-2xl font-black text-[#F0F0F0] tracking-tight">Griggs Hub</div>
           </div>
         </motion.div>
 
@@ -447,7 +447,7 @@ export default function LoginPage() {
           transition={{ delay: 0.8 }}
           className="text-xs text-[#404040]"
         >
-          © {new Date().getFullYear()} Griggs Capital Partners. Smart Hub.
+          © {new Date().getFullYear()} Griggs Capital Partners. Griggs Hub.
         </motion.p>
       </div>
 

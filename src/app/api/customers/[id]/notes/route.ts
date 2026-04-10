@@ -6,15 +6,15 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
   const session = await auth();
   if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { id: customerId } = await params;
+  const { id: wellId } = await params;
   const body = await req.json();
   const { type, body: noteBody } = body;
 
   if (!noteBody?.trim()) return NextResponse.json({ error: "body required" }, { status: 400 });
 
-  const note = await prisma.customerNote.create({
+  const note = await prisma.wellNote.create({
     data: {
-      customerId,
+      wellId,
       authorId: session.user.id,
       type: type || "general",
       body: noteBody.trim(),
@@ -31,13 +31,13 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
   const session = await auth();
   if (!session?.user?.id) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { id: customerId } = await params;
+  const { id: wellId } = await params;
   const { noteId } = await req.json();
 
   // Only allow deletion of own notes (or admin can delete any)
-  const note = await prisma.customerNote.findFirst({ where: { id: noteId, customerId } });
+  const note = await prisma.wellNote.findFirst({ where: { id: noteId, wellId } });
   if (!note) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  await prisma.customerNote.delete({ where: { id: noteId } });
+  await prisma.wellNote.delete({ where: { id: noteId } });
   return NextResponse.json({ ok: true });
 }

@@ -1,6 +1,6 @@
 # Team Agent Chat Architecture
 
-This document explains how AI chat on the `/team` page works in Smart Hub, with a focus on:
+This document explains how AI chat on the `/team` page works in Griggs Hub, with a focus on:
 
 - conversation initialization
 - agent readiness checks
@@ -312,7 +312,7 @@ When processing a chat turn, the server reads `agent.disabledTools`, filters `ag
 
 ```mermaid
 flowchart LR
-    A["User prompt"] --> B["Smart Hub server"]
+    A["User prompt"] --> B["Griggs Hub server"]
     B --> C["Read-only GitHub / knowledge helpers"]
     B --> D["Workspace DB — kanban tool executor"]
     B --> E["Model endpoint"]
@@ -382,9 +382,9 @@ These are the kinds of prompts the current system handles well:
 
 **Code / repo awareness:**
 - "What repos do we have connected?"
-- "What changed recently in `summit-smart-farms/portal`?"
-- "Show me the latest PR activity in `smart-hub`."
-- "Read `src/components/team/TeamClient.tsx` in `smart-hub` and explain the chat bootstrap."
+- "What changed recently in `griggs-capital-partners/portal`?"
+- "Show me the latest PR activity in `hub`."
+- "Read `src/components/team/TeamClient.tsx` in `hub` and explain the chat bootstrap."
 - "What docs do we have about Oracle tasks in the knowledge repo?"
 
 **Knowledge retrieval:**

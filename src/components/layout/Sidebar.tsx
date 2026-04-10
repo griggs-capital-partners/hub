@@ -28,7 +28,6 @@ import {
   User,
   Menu,
   Bot,
-  Map,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Avatar } from "@/components/ui/Avatar";
@@ -43,6 +42,20 @@ const NAV_ITEMS = [
     icon: LayoutDashboard,
     label: "Home",
     description: "Today's focus & overview",
+  },
+  {
+    href: "/knowledge",
+    icon: Library,
+    label: "Knowledge",
+    description: "Docs & knowledge base",
+  },
+  {
+    href: "/agents",
+    icon: Bot,
+    label: "Agents",
+    description: "AI execution layer",
+    accent: "#4B9CD3",
+    activeBg: "rgba(75,156,211,0.14)",
   },
   {
     href: "/planner",
@@ -75,33 +88,15 @@ const NAV_ITEMS = [
   //   label: "Team Chat",
   //   description: "Messages & team",
   // },
-  {
-    href: "/agents",
-    icon: Bot,
-    label: "Agents",
-    description: "AI execution layer",
-    accent: "#4B9CD3",
-    activeBg: "rgba(75,156,211,0.14)",
-  },
-  {
-    href: "/customers",
-    icon: Users,
-    label: "Customers",
-    description: "Intelligence & docs",
-  },
 
   {
-    href: "/roadmap",
-    icon: Map,
-    label: "Roadmap",
-    description: "Product milestones",
+    href: "/wells",
+    icon: Users,
+    label: "Oil Wells",
+    description: "Well tracking & docs",
   },
-  {
-    href: "/knowledge",
-    icon: Library,
-    label: "Knowledge",
-    description: "Docs & knowledge base",
-  },
+
+
 
   {
     href: "/weekly-notes",
@@ -382,7 +377,7 @@ function DesktopSidebar() {
               className="w-full flex items-center justify-center"
               title="Expand menu"
             >
-              <Image src="/logo.png" alt="Smart Hub" width={36} height={28} style={{ width: 36, height: 28 }} className="rounded-lg" />
+              <Image src="/logo.png" alt="Griggs Hub" width={36} height={28} style={{ width: 36, height: 28 }} className="rounded-lg" />
             </motion.button>
           ) : (
             <motion.div
@@ -392,9 +387,9 @@ function DesktopSidebar() {
               exit={{ opacity: 0, x: -6 }}
               className="flex items-center gap-3 min-w-0"
             >
-              <Image src="/logo.png" alt="Smart Hub" width={38} height={28} style={{ width: 38, height: 28 }} className="rounded-lg flex-shrink-0" />
+              <Image src="/logo.png" alt="Griggs Hub" width={38} height={28} style={{ width: 38, height: 28 }} className="rounded-lg flex-shrink-0" />
               <div className="leading-tight min-w-0">
-                <div className="text-sm font-black text-[#F7941D] tracking-widest uppercase leading-none">Smart</div>
+                <div className="text-sm font-black text-[#F7941D] tracking-widest uppercase leading-none">Griggs</div>
                 <div className="text-sm font-black text-[#F0F0F0] tracking-widest uppercase leading-none mt-0.5">Hub</div>
               </div>
             </motion.div>
@@ -544,13 +539,13 @@ export function MobileTopBar() {
         <div className="flex min-w-0 items-center gap-2.5">
           <Image
             src="/logo.png"
-            alt="Smart Hub"
+            alt="Griggs Hub"
             width={28}
             height={28}
             className="rounded-md opacity-90"
           />
           <div className="leading-tight">
-            <div className="text-[12px] font-black uppercase tracking-[0.24em] text-[#F7941D]">Smart</div>
+            <div className="text-[12px] font-black uppercase tracking-[0.24em] text-[#F7941D]">Griggs</div>
             <div className="text-[12px] font-black uppercase tracking-[0.24em] text-[#F0F0F0]">Hub</div>
           </div>
         </div>
@@ -604,7 +599,7 @@ function MobileDrawer() {
               <div className="flex items-center gap-2.5">
                 <Image src="/logo.png" alt="Griggs Capital Partners" width={32} height={24} style={{ width: 32, height: 24 }} className="rounded" />
                 <div className="leading-tight">
-                  <div className="text-xs font-bold text-[#F7941D] tracking-widest uppercase">Smart</div>
+                  <div className="text-xs font-bold text-[#F7941D] tracking-widest uppercase">Griggs</div>
                   <div className="text-xs font-bold text-[#F0F0F0] tracking-widest uppercase">Hub</div>
                 </div>
               </div>

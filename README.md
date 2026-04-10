@@ -1,6 +1,6 @@
-# Smart Hub
+# Griggs Hub
 
- Smart Hub is a specialized management platform originally designed for **Griggs Capital Partners**. It serves as an all-in-one "command center" to oversee system infrastructure, project development, customer relationships, and AI intelligence.
+ Griggs Hub is a specialized management platform originally designed for **Griggs Capital Partners**. It serves as an all-in-one "command center" to oversee system infrastructure, project development, customer relationships, and AI intelligence.
 
 Built with a focus on modern aesthetics, real-time collaboration, and data-driven insights, the Hub enables teams to move faster and stay synchronized.
 
@@ -34,8 +34,8 @@ Built with a focus on modern aesthetics, real-time collaboration, and data-drive
 
 1. **Clone and Install**:
    ```bash
-   git clone https://github.com/summit-smart-farms/smart-hub.git
-   cd smart-hub
+   git clone https://github.com/griggs-capital-partners/hub.git
+   cd hub
    npm install
    ```
 
@@ -61,7 +61,7 @@ Built with a focus on modern aesthetics, real-time collaboration, and data-drive
 
 ## Deployment & Requirements
 
-To spin up a separate instance of the Smart Hub, you will need:
+To spin up a separate instance of the Griggs Hub, you will need:
 
 1. **Authentication**: A GitHub OAuth application with a configured callback URL (e.g., `https://your-hub.com/api/auth/callback/github`).
 2. **Access Control**: Configure the `ALLOWED_GITHUB_USERS` environment variable to restrict access to specific team members.

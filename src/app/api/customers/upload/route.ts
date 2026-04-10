@@ -36,9 +36,9 @@ export async function POST(request: Request) {
   const filePath = join(uploadsDir, filename);
   await writeFile(filePath, buffer);
 
-  const doc = await prisma.customerDocument.create({
+  const doc = await prisma.wellDocument.create({
     data: {
-      customerId: customerId || null,
+      wellId: customerId || null,
       uploadedBy: session.user.id,
       filename: file.name,
       fileType,

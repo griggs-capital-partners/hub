@@ -9,8 +9,8 @@ import { cn } from "@/lib/utils";
 export interface KanbanCustomer {
   id: string;
   name: string;
-  logoUrl: string | null;
   status?: string;
+  logoUrl?: string | null;
 }
 
 interface CustomerFieldProps {
@@ -19,7 +19,7 @@ interface CustomerFieldProps {
   onToggleCustomer: (customerId: string) => void;
 }
 
-function CustomerChip({ customer, compact = false }: { customer: KanbanCustomer; compact?: boolean }) {
+function WellChip({ well, compact = false }: { well: KanbanCustomer; compact?: boolean }) {
   return (
     <span
       className={cn(
@@ -34,20 +34,12 @@ function CustomerChip({ customer, compact = false }: { customer: KanbanCustomer;
         borderColor: "rgba(14,165,233,0.22)",
       }}
     >
-      {customer.logoUrl ? (
-        <img
-          src={customer.logoUrl}
-          alt={customer.name}
-          className={compact ? "h-3.5 w-3.5 rounded-full object-cover" : "h-4 w-4 rounded-full object-cover"}
-        />
-      ) : (
-        <Avatar
-          name={customer.name}
-          size="xs"
-          className={compact ? "!w-3.5 !h-3.5 text-[7px]" : "!w-4 !h-4 text-[7px]"}
-        />
-      )}
-      <span className="truncate max-w-[110px]">{customer.name}</span>
+      <Avatar
+        name={well.name}
+        size="xs"
+        className={compact ? "!w-3.5 !h-3.5 text-[7px]" : "!w-4 !h-4 text-[7px]"}
+      />
+      <span className="truncate max-w-[110px]">{well.name}</span>
     </span>
   );
 }
@@ -57,8 +49,8 @@ export function CustomerPills({ customers, compact = false }: { customers: Kanba
 
   return (
     <div className="flex flex-wrap gap-1.5">
-      {customers.slice(0, compact ? 2 : 3).map((customer) => (
-        <CustomerChip key={customer.id} customer={customer} compact={compact} />
+      {customers.slice(0, compact ? 2 : 3).map((well) => (
+        <WellChip key={well.id} well={well} compact={compact} />
       ))}
       {customers.length > (compact ? 2 : 3) && (
         <span className="inline-flex items-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] px-2 py-1 text-[10px] text-[#B0B0B0]">
@@ -73,13 +65,13 @@ export function KanbanCustomerField({ customers, selectedCustomerIds, onToggleCu
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
 
-  const filteredCustomers = useMemo(() => {
+  const filteredWells = useMemo(() => {
     const term = query.trim().toLowerCase();
     if (!term) return customers;
-    return customers.filter((customer) => customer.name.toLowerCase().includes(term));
+    return customers.filter((w) => w.name.toLowerCase().includes(term));
   }, [customers, query]);
 
-  const selectedCustomers = customers.filter((customer) => selectedCustomerIds.includes(customer.id));
+  const selectedWells = customers.filter((w) => selectedCustomerIds.includes(w.id));
 
   return (
     <div className="relative">
@@ -93,13 +85,13 @@ export function KanbanCustomerField({ customers, selectedCustomerIds, onToggleCu
             <Building2 size={14} />
           </div>
           <div className="min-w-0 flex-1">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#6A6A6A]">Customers</div>
-            {selectedCustomers.length > 0 ? (
+            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#6A6A6A]">Oil Wells</div>
+            {selectedWells.length > 0 ? (
               <div className="mt-1">
-                <CustomerPills customers={selectedCustomers} compact />
+                <CustomerPills customers={selectedWells} compact />
               </div>
             ) : (
-              <div className="mt-0.5 text-xs text-[#8A8A8A]">Link one or more customers</div>
+              <div className="mt-0.5 text-xs text-[#8A8A8A]">Link one or more wells</div>
             )}
           </div>
         </div>
@@ -119,7 +111,7 @@ export function KanbanCustomerField({ customers, selectedCustomerIds, onToggleCu
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search customers..."
+                  placeholder="Search wells..."
                   className="w-full bg-transparent text-xs text-[#F0F0F0] outline-none placeholder:text-[#5A5A5A]"
                 />
                 {query && (
@@ -131,16 +123,16 @@ export function KanbanCustomerField({ customers, selectedCustomerIds, onToggleCu
             </div>
 
             <div className="max-h-64 overflow-y-auto p-2">
-              {filteredCustomers.length === 0 ? (
-                <div className="px-3 py-5 text-center text-xs text-[#606060]">No matching customers</div>
+              {filteredWells.length === 0 ? (
+                <div className="px-3 py-5 text-center text-xs text-[#606060]">No matching wells</div>
               ) : (
-                filteredCustomers.map((customer) => {
-                  const selected = selectedCustomerIds.includes(customer.id);
+                filteredWells.map((well) => {
+                  const selected = selectedCustomerIds.includes(well.id);
                   return (
                     <button
-                      key={customer.id}
+                      key={well.id}
                       type="button"
-                      onClick={() => onToggleCustomer(customer.id)}
+                      onClick={() => onToggleCustomer(well.id)}
                       className={cn(
                         "mb-1 flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left transition-all",
                         selected
@@ -148,12 +140,8 @@ export function KanbanCustomerField({ customers, selectedCustomerIds, onToggleCu
                           : "border-transparent bg-[rgba(255,255,255,0.02)] hover:border-[rgba(255,255,255,0.06)] hover:bg-[rgba(255,255,255,0.04)]",
                       )}
                     >
-                      {customer.logoUrl ? (
-                        <img src={customer.logoUrl} alt={customer.name} className="h-6 w-6 rounded-full object-cover" />
-                      ) : (
-                        <Avatar name={customer.name} size="xs" className="!w-6 !h-6 text-[8px]" />
-                      )}
-                      <span className="min-w-0 flex-1 truncate text-xs font-medium text-[#F0F0F0]">{customer.name}</span>
+                      <Avatar name={well.name} size="xs" className="!w-6 !h-6 text-[8px]" />
+                      <span className="min-w-0 flex-1 truncate text-xs font-medium text-[#F0F0F0]">{well.name}</span>
                       <span
                         className={cn(
                           "flex h-5 w-5 items-center justify-center rounded-full border",

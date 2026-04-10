@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { isDoneColumn, parseJsonArray, parseWeeklyItems, formatWeekStart } from "@/lib/agent-context";
+import { mapWellPriorityToHealthScore, mapWellPriorityToTier } from "@/lib/well-compat";
 
 // ─── Tool Definition (OpenAI function-calling format) ─────────────────────────
 
@@ -555,7 +556,7 @@ export async function executeAgentTool(
       twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 16);
 
       const [customer, weeklyNotes] = await Promise.all([
-        prisma.customer.findFirst({
+        prisma.oilWell.findFirst({
           where: { name: { contains: nameQuery, mode: "insensitive" } },
           include: {
             contacts: {
@@ -575,10 +576,9 @@ export async function executeAgentTool(
       if (!customer) return `No customer found matching "${nameQuery}".`;
 
       const lines: string[] = [
-        `Customer: ${customer.name}`,
-        `  Tier: ${customer.tier}  Health: ${customer.healthScore}/5  Status: ${customer.status}`,
+        `Oil Well: ${customer.name}`,
+        `  Tier: ${mapWellPriorityToTier(customer.priority)}  Health: ${mapWellPriorityToHealthScore(customer.priority)}/5  Status: ${customer.status}`,
       ];
-      if (customer.industry) lines.push(`  Industry: ${customer.industry}`);
 
       if (customer.contacts.length > 0) {
         lines.push("  Contacts:");

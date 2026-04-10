@@ -1,6 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { mapWellToWeeklyCustomerSnap } from "@/lib/well-compat";
+
+function serializeNote<T extends { entries: Array<{ customer: { id: string; name: string; status: string; priority: string | null } | null }> }>(note: T) {
+  return {
+    ...note,
+    entries: note.entries.map((entry) => ({
+      ...entry,
+      customer: mapWellToWeeklyCustomerSnap(entry.customer),
+    })),
+  };
+}
 
 export async function GET() {
   await auth();
@@ -12,14 +23,14 @@ export async function GET() {
         orderBy: { order: "asc" },
         include: {
           customer: {
-            select: { id: true, name: true, logoUrl: true, healthScore: true, tier: true, status: true },
+            select: { id: true, name: true, status: true, priority: true },
           },
         },
       },
     },
   });
 
-  return NextResponse.json(notes);
+  return NextResponse.json(notes.map(serializeNote));
 }
 
 export async function POST(req: NextRequest) {
@@ -39,12 +50,12 @@ export async function POST(req: NextRequest) {
         orderBy: { order: "asc" },
         include: {
           customer: {
-            select: { id: true, name: true, logoUrl: true, healthScore: true, tier: true, status: true },
+            select: { id: true, name: true, status: true, priority: true },
           },
         },
       },
     },
   });
 
-  return NextResponse.json(note, { status: 201 });
+  return NextResponse.json(serializeNote(note), { status: 201 });
 }

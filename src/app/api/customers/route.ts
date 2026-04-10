@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { mapWellToCustomerSummary } from "@/lib/well-compat";
 
 export async function GET() {
   const session = await auth();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const customers = await prisma.customer.findMany({
+  const wells = await prisma.oilWell.findMany({
     orderBy: { updatedAt: "desc" },
     include: {
       contacts: { orderBy: { isPrimary: "desc" }, take: 5 },
@@ -15,7 +16,7 @@ export async function GET() {
     },
   });
 
-  return NextResponse.json({ customers });
+  return NextResponse.json({ customers: wells.map(mapWellToCustomerSummary) });
 }
 
 export async function POST(request: Request) {
@@ -23,21 +24,24 @@ export async function POST(request: Request) {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();
-  const { name, website, industry, tier, status, healthScore, notes, productionUrls, logoUrl } = body;
+  const { name, industry, status, healthScore, notes } = body;
 
   if (!name) return NextResponse.json({ error: "name required" }, { status: 400 });
 
-  const customer = await prisma.customer.create({
+  const well = await prisma.oilWell.create({
     data: {
       name,
-      website: website || null,
-      industry: industry || null,
-      tier: tier || "standard",
-      status: status || "active",
-      healthScore: healthScore ?? 3,
+      address: industry || null,
+      status: status === "inactive" ? "inactive" : "active",
+      priority:
+        healthScore !== undefined && healthScore <= 1
+          ? "critical"
+          : healthScore !== undefined && healthScore <= 2
+            ? "high"
+            : healthScore !== undefined && healthScore >= 4
+              ? "low"
+              : "medium",
       notes: notes || null,
-      productionUrls: productionUrls ? JSON.stringify(productionUrls) : "[]",
-      logoUrl: logoUrl || null,
     },
     include: {
       contacts: true,
@@ -46,5 +50,5 @@ export async function POST(request: Request) {
     },
   });
 
-  return NextResponse.json({ customer });
+  return NextResponse.json({ customer: mapWellToCustomerSummary(well) });
 }

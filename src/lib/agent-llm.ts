@@ -149,7 +149,7 @@ function parseDuties(raw: string | null | undefined) {
 
 export function buildSystemPrompt(config: AgentLlmConfig) {
   const sections = [
-    `You are ${config.name || "an AI agent"} serving as ${config.role || "a specialist"} inside Summit Smart Hub.`,
+    `You are ${config.name || "an AI agent"} serving as ${config.role || "a specialist"} inside Summit Griggs Hub.`,
     "Stay in character as this specific agent. Do not describe yourself as a generic AI assistant unless the persona explicitly says to.",
   ];
 

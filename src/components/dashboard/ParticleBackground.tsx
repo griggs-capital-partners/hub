@@ -1,207 +1,85 @@
 "use client";
 
-import React, { useEffect, useRef } from "react";
-import * as THREE from "three";
+import { useEffect, useRef } from "react";
 
 export function ParticleBackground() {
-  const containerRef = useRef<HTMLDivElement>(null);
+  const layerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    const layer = layerRef.current;
+    if (!layer) return;
 
-    const container = containerRef.current;
-    
-    // Scene setup
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(
-      75,
-      window.innerWidth / window.innerHeight,
-      0.1,
-      1000
-    );
-    camera.position.z = 5;
+    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let pointerX = 0;
+    let pointerY = 0;
+    let currentX = 0;
+    let currentY = 0;
+    let animationFrame = 0;
 
-    const renderer = new THREE.WebGLRenderer({ 
-      alpha: true, 
-      antialias: true 
-    });
-    renderer.setPixelRatio(window.devicePixelRatio);
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    container.appendChild(renderer.domElement);
-
-    // Plexus Configuration (Refined visibility)
-    const nodeCount = 100;
-    const maxDistance = 2.5; // Distance to connect nodes
-    const driftSpeed = 0.003; // Base drift speed (slow and professional)
-    const particlePositions = new Float32Array(nodeCount * 3);
-    const particleVelocities: THREE.Vector3[] = [];
-
-    // Initialize nodes and velocities
-    for (let i = 0; i < nodeCount; i++) {
-        // Position within a 12x12x12 cube
-        particlePositions[i * 3] = (Math.random() - 0.5) * 12;
-        particlePositions[i * 3 + 1] = (Math.random() - 0.5) * 12;
-        particlePositions[i * 3 + 2] = (Math.random() - 0.5) * 12;
-
-        // Random velocity vector
-        particleVelocities.push(
-            new THREE.Vector3(
-                (Math.random() - 0.5) * driftSpeed,
-                (Math.random() - 0.5) * driftSpeed,
-                (Math.random() - 0.5) * driftSpeed
-            )
-        );
-    }
-
-    const nodeGeometry = new THREE.BufferGeometry();
-    nodeGeometry.setAttribute("position", new THREE.BufferAttribute(particlePositions, 3));
-
-    // Create a smooth circular texture for the nodes
-    const nodeCanvas = document.createElement("canvas");
-    nodeCanvas.width = 64;
-    nodeCanvas.height = 64;
-    const nodeCtx = nodeCanvas.getContext("2d");
-    if (nodeCtx) {
-      const gradient = nodeCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
-      gradient.addColorStop(0, "rgba(255, 255, 255, 1)");
-      gradient.addColorStop(0.4, "rgba(255, 255, 255, 0.4)");
-      gradient.addColorStop(1, "rgba(255, 255, 255, 0)");
-      nodeCtx.fillStyle = gradient;
-      nodeCtx.fillRect(0, 0, 64, 64);
-    }
-    const nodeTexture = new THREE.CanvasTexture(nodeCanvas);
-
-    // Points Material (Nodes)
-    const nodeMaterial = new THREE.PointsMaterial({
-      size: 0.05,
-      color: new THREE.Color("#F7941D"),
-      map: nodeTexture,
-      transparent: true,
-      opacity: 0.6, // Increased visibility
-      sizeAttenuation: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
-
-    const nodeMesh = new THREE.Points(nodeGeometry, nodeMaterial);
-    scene.add(nodeMesh);
-
-    // Line Geometry (Connections)
-    const maxConnections = nodeCount * 5;
-    const linePositions = new Float32Array(maxConnections * 2 * 3);
-    const lineOpacities = new Float32Array(maxConnections * 2);
-
-    const lineGeometry = new THREE.BufferGeometry();
-    lineGeometry.setAttribute("position", new THREE.BufferAttribute(linePositions, 3));
-    lineGeometry.setAttribute("opacity", new THREE.BufferAttribute(lineOpacities, 1));
-
-    const lineMaterial = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      uniforms: {
-        color: { value: new THREE.Color("#F7941D") },
-      },
-      vertexShader: `
-        attribute float opacity;
-        varying float vOpacity;
-        void main() {
-          vOpacity = opacity;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform vec3 color;
-        varying float vOpacity;
-        void main() {
-          gl_FragColor = vec4(color, vOpacity);
-        }
-      `,
-    });
-
-    const lineMesh = new THREE.LineSegments(lineGeometry, lineMaterial);
-    scene.add(lineMesh);
-
-    const handleResize = () => {
-      camera.aspect = window.innerWidth / window.innerHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
-    };
-
-    window.addEventListener("resize", handleResize);
-
-    // Animation loop
     const animate = () => {
-      requestAnimationFrame(animate);
+      currentX += (pointerX - currentX) * 0.08;
+      currentY += (pointerY - currentY) * 0.08;
 
-      const positions = nodeGeometry.attributes.position.array as Float32Array;
-      
-      for (let i = 0; i < nodeCount; i++) {
-          // Apply velocity (pure drift now)
-          positions[i * 3] += particleVelocities[i].x;
-          positions[i * 3 + 1] += particleVelocities[i].y;
-          positions[i * 3 + 2] += particleVelocities[i].z;
-
-          // Wrap around with soft bounds
-          if (positions[i * 3] > 6 || positions[i * 3] < -6) particleVelocities[i].x *= -1;
-          if (positions[i * 3 + 1] > 6 || positions[i * 3 + 1] < -6) particleVelocities[i].y *= -1;
-          if (positions[i * 3 + 2] > 6 || positions[i * 3 + 2] < -6) particleVelocities[i].z *= -1;
-      }
-      nodeGeometry.attributes.position.needsUpdate = true;
-
-      // Update connections
-      let vertexIdx = 0;
-      let opacityIdx = 0;
-
-      for (let i = 0; i < nodeCount; i++) {
-          for (let j = i + 1; j < nodeCount; j++) {
-              const dx = positions[i * 3] - positions[j * 3];
-              const dy = positions[i * 3 + 1] - positions[j * 3 + 1];
-              const dz = positions[i * 3 + 2] - positions[j * 3 + 2];
-              const distSq = dx * dx + dy * dy + dz * dz;
-
-              if (distSq < maxDistance * maxDistance && vertexIdx < linePositions.length) {
-                  const dist = Math.sqrt(distSq);
-                  const opacity = 1 - dist / maxDistance;
-
-                  linePositions[vertexIdx++] = positions[i * 3];
-                  linePositions[vertexIdx++] = positions[i * 3 + 1];
-                  linePositions[vertexIdx++] = positions[i * 3 + 2];
-                  lineOpacities[opacityIdx++] = opacity * 0.4; // Boosted line visibility
-
-                  linePositions[vertexIdx++] = positions[j * 3];
-                  linePositions[vertexIdx++] = positions[j * 3 + 1];
-                  linePositions[vertexIdx++] = positions[j * 3 + 2];
-                  lineOpacities[opacityIdx++] = opacity * 0.4;
-              }
-          }
-      }
-
-      lineGeometry.setDrawRange(0, vertexIdx / 3);
-      lineGeometry.attributes.position.needsUpdate = true;
-      lineGeometry.attributes.opacity.needsUpdate = true;
-
-      renderer.render(scene, camera);
+      layer.style.transform = `translate3d(${currentX}px, ${currentY}px, 0) scale(1.08)`;
+      animationFrame = window.requestAnimationFrame(animate);
     };
 
-    animate();
+    const handlePointerMove = (event: MouseEvent) => {
+      if (mediaQuery.matches) return;
+
+      const x = (event.clientX / window.innerWidth - 0.5) * 18;
+      const y = (event.clientY / window.innerHeight - 0.5) * 12;
+      pointerX = x;
+      pointerY = y;
+    };
+
+    const handleDeviceTilt = (event: DeviceOrientationEvent) => {
+      if (mediaQuery.matches) return;
+
+      const gamma = Math.max(-10, Math.min(10, event.gamma ?? 0));
+      const beta = Math.max(-10, Math.min(10, event.beta ?? 0));
+      pointerX = gamma * 0.8;
+      pointerY = beta * 0.45;
+    };
+
+    const resetMotion = () => {
+      pointerX = 0;
+      pointerY = 0;
+    };
+
+    animationFrame = window.requestAnimationFrame(animate);
+    window.addEventListener("mousemove", handlePointerMove);
+    window.addEventListener("deviceorientation", handleDeviceTilt);
+    window.addEventListener("mouseleave", resetMotion);
 
     return () => {
-      window.removeEventListener("resize", handleResize);
-      container.removeChild(renderer.domElement);
-      nodeGeometry.dispose();
-      nodeMaterial.dispose();
-      lineGeometry.dispose();
-      lineMaterial.dispose();
-      renderer.dispose();
+      window.cancelAnimationFrame(animationFrame);
+      window.removeEventListener("mousemove", handlePointerMove);
+      window.removeEventListener("deviceorientation", handleDeviceTilt);
+      window.removeEventListener("mouseleave", resetMotion);
     };
   }, []);
 
   return (
-    <div 
-      ref={containerRef} 
-      className="fixed inset-0 pointer-events-none z-0"
-      aria-hidden="true"
-    />
+    <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden" aria-hidden="true">
+      <div
+        ref={layerRef}
+        className="absolute -inset-[6%] will-change-transform"
+        style={{
+          backgroundImage: "url('/mountains.avif')",
+          backgroundPosition: "center center",
+          backgroundRepeat: "no-repeat",
+          backgroundSize: "cover",
+          filter: "saturate(0.82) brightness(0.58) contrast(0.98)",
+          opacity: 0.9,
+          transform: "translate3d(0, 0, 0) scale(1.08)",
+        }}
+      />
+
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(247,148,29,0.14),transparent_44%)]" />
+      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(8,8,8,0.38)_0%,rgba(10,10,10,0.22)_28%,rgba(11,11,11,0.52)_72%,rgba(8,8,8,0.76)_100%)]" />
+      <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(13,13,13,0.42)_0%,rgba(13,13,13,0.14)_35%,rgba(13,13,13,0.1)_65%,rgba(13,13,13,0.38)_100%)]" />
+      <div className="absolute inset-0 backdrop-blur-[0.75px]" />
+    </div>
   );
 }

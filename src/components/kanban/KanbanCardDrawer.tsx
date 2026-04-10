@@ -115,7 +115,8 @@ type EditableCard = {
   githubIssueId: number | null;
   githubIssueUrl: string | null;
   assignees: string;
-  customers: KanbanCustomer[];
+  wells?: KanbanCustomer[];
+  customers?: KanbanCustomer[];
   notes: {
     id: string;
     body: string;
@@ -413,7 +414,7 @@ export function KanbanCardDrawer({
   card,
   users,
   sprints,
-  customers,
+  customers: wells,
   mode = "edit",
   repoOptions = [],
   initialRepoId = null,
@@ -455,7 +456,7 @@ export function KanbanCardDrawer({
     card ? (JSON.parse(card.assignees || "[]") as string[]) : []
   );
   const [selectedCustomerIds, setSelectedCustomerIds] = useState<string[]>(() =>
-    card?.customers.map((customer) => customer.id) ?? []
+    (card?.wells ?? card?.customers ?? []).map((w) => w.id)
   );
   const [selectedLinkedRepoIds, setSelectedLinkedRepoIds] = useState<string[]>(() =>
     card?.linkedRepoIds ?? []
@@ -510,8 +511,8 @@ export function KanbanCardDrawer({
   const [expandedExecutionId, setExpandedExecutionId] = useState<string | null>(null);
 
   const linkedCustomers = useMemo(
-    () => customers.filter((customer) => selectedCustomerIds.includes(customer.id)),
-    [customers, selectedCustomerIds]
+    () => wells.filter((w) => selectedCustomerIds.includes(w.id)),
+    [wells, selectedCustomerIds]
   );
   const orderedNotes = useMemo(
     () =>
@@ -913,6 +914,8 @@ export function KanbanCardDrawer({
         agentExecutions: [],
         sprintTask: null,
         subtasks: serializeKanbanSubtasks(subtasks),
+        wells: data.card.wells ?? linkedCustomers,
+        customers: data.card.customers ?? linkedCustomers,
         repoId: selectedRepo.id,
         repoName: selectedRepo.name,
         repoFullName: selectedRepo.fullName ?? selectedRepo.name,
@@ -971,6 +974,7 @@ export function KanbanCardDrawer({
       state: taskState,
       labels: JSON.stringify(selectedLabels),
       assignees: JSON.stringify(selectedAssigneeIds),
+      wells: linkedCustomers,
       customers: linkedCustomers,
       repoId: selectedRepo?.id,
       repoName: selectedRepo?.name,
@@ -1359,26 +1363,22 @@ export function KanbanCardDrawer({
                                 {selectedCustomerIds.length > 0 ? (
                                   <>
                                     {(() => {
-                                      const firstCustomer = customers.find((customer) => customer.id === selectedCustomerIds[0]);
-                                      return firstCustomer ? (
+                                      const firstWell = wells.find((w) => w.id === selectedCustomerIds[0]);
+                                      return firstWell ? (
                                         <>
-                                          {firstCustomer.logoUrl ? (
-                                            <img src={firstCustomer.logoUrl} alt={firstCustomer.name} className="h-4 w-4 rounded-full object-cover" />
-                                          ) : (
-                                            <Avatar name={firstCustomer.name} size="xs" className="!h-4 !w-4 text-[7px]" />
-                                          )}
-                                          <span className="max-w-[96px] truncate">{firstCustomer.name}</span>
+                                          <Avatar name={firstWell.name} size="xs" className="!h-4 !w-4 text-[7px]" />
+                                          <span className="max-w-[96px] truncate">{firstWell.name}</span>
                                           {selectedCustomerIds.length > 1 ? (
                                             <span className="text-[#9BDCFD]">+{selectedCustomerIds.length - 1}</span>
                                           ) : null}
                                         </>
                                       ) : (
-                                        <span>Customers</span>
+                                        <span>Oil Wells</span>
                                       );
                                     })()}
                                   </>
                                 ) : (
-                                  <span>No Customers</span>
+                                  <span>No Wells</span>
                                 )}
                                 <ChevronDown size={12} />
                               </button>
@@ -1392,10 +1392,10 @@ export function KanbanCardDrawer({
                                     className="absolute left-0 top-full z-20 mt-2 w-72 max-w-[calc(100vw-2rem)] overflow-hidden rounded-2xl border border-[rgba(255,255,255,0.08)] bg-[#151515] p-2 shadow-2xl md:left-auto md:right-0"
                                   >
                                     <div className="mb-2 px-2 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#6A6A6A]">
-                                      Customers
+                                      Oil Wells
                                     </div>
                                     <div className="flex max-h-56 flex-wrap gap-2 overflow-y-auto p-1">
-                                      {customers.map((customer) => {
+                                      {wells.map((customer) => {
                                         const selected = selectedCustomerIds.includes(customer.id);
                                         return (
                                           <CustomerToggle

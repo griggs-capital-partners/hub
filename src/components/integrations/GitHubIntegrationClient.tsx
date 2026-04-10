@@ -116,11 +116,10 @@ function WorkspaceRepoRow({
 }) {
   return (
     <div
-      className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-all duration-200 ${
-        repo.connected
+      className={`flex items-center gap-3 px-4 py-3 rounded-xl border transition-all duration-200 ${repo.connected
           ? "bg-[#161616] border-[rgba(255,255,255,0.06)]"
           : "bg-[#111111] border-[rgba(255,255,255,0.03)] opacity-50"
-      }`}
+        }`}
     >
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
@@ -192,23 +191,21 @@ function DiscoverRow({
     <button
       onClick={() => !repo.alreadyAdded && onToggleSelect(repo.id)}
       disabled={repo.alreadyAdded}
-      className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all duration-150 ${
-        repo.alreadyAdded
+      className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl border text-left transition-all duration-150 ${repo.alreadyAdded
           ? "bg-[#111111] border-[rgba(255,255,255,0.04)] opacity-40 cursor-default"
           : selected
-          ? "bg-[rgba(247,148,29,0.08)] border-[rgba(247,148,29,0.3)] cursor-pointer"
-          : "bg-[#161616] border-[rgba(255,255,255,0.06)] hover:border-[rgba(255,255,255,0.12)] cursor-pointer"
-      }`}
+            ? "bg-[rgba(247,148,29,0.08)] border-[rgba(247,148,29,0.3)] cursor-pointer"
+            : "bg-[#161616] border-[rgba(255,255,255,0.06)] hover:border-[rgba(255,255,255,0.12)] cursor-pointer"
+        }`}
     >
       {/* Checkbox */}
       <div
-        className={`w-4 h-4 rounded flex-shrink-0 flex items-center justify-center border transition-all ${
-          repo.alreadyAdded
+        className={`w-4 h-4 rounded flex-shrink-0 flex items-center justify-center border transition-all ${repo.alreadyAdded
             ? "bg-[#222222] border-[#404040]"
             : selected
-            ? "bg-[#F7941D] border-[#F7941D]"
-            : "border-[#404040]"
-        }`}
+              ? "bg-[#F7941D] border-[#F7941D]"
+              : "border-[#404040]"
+          }`}
       >
         {repo.alreadyAdded ? (
           <Check size={10} className="text-[#606060]" />
@@ -444,8 +441,8 @@ export function GitHubIntegrationClient({
                     {discovering
                       ? "Searching GitHub..."
                       : discovered !== null
-                      ? `Found ${discovered.length} ${discovered.length === 1 ? "repo" : "repos"}`
-                      : "Discovery failed"}
+                        ? `Found ${discovered.length} ${discovered.length === 1 ? "repo" : "repos"}`
+                        : "Discovery failed"}
                   </span>
                   <button
                     onClick={() => { setDiscovered(null); setDiscoverError(null); setSelectedIds(new Set()); }}
@@ -543,11 +540,10 @@ export function GitHubIntegrationClient({
                       <motion.div
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
-                        className={`text-xs px-3 py-2 rounded-lg ${
-                          addMsg.ok
+                        className={`text-xs px-3 py-2 rounded-lg ${addMsg.ok
                             ? "bg-[rgba(34,197,94,0.1)] text-[#22C55E] border border-[rgba(34,197,94,0.2)]"
                             : "bg-[rgba(239,68,68,0.1)] text-[#EF4444] border border-[rgba(239,68,68,0.2)]"
-                        }`}
+                          }`}
                       >
                         {addMsg.text}
                       </motion.div>
@@ -567,7 +563,7 @@ export function GitHubIntegrationClient({
                     <p className="text-xs text-[#404040]">
                       Missing repos from your org?{" "}
                       <span className="text-[#606060]">
-                        Create a GitHub PAT with <code className="text-[#F0F0F0]">summit-smart-farms</code> as the resource owner, or use a classic PAT with <code className="text-[#F0F0F0]">repo</code> scope authorized for SSO.
+                        Create a GitHub PAT with <code className="text-[#F0F0F0]">griggs-capital-partners</code> as the resource owner, or use a classic PAT with <code className="text-[#F0F0F0]">repo</code> scope authorized for SSO.
                       </span>
                     </p>
                   </div>
@@ -714,9 +710,9 @@ export function GitHubIntegrationClient({
           <div className="mt-3 p-4 bg-[#111111] rounded-xl border border-[rgba(255,255,255,0.05)] space-y-4 text-xs text-[#606060]">
             <div className="space-y-2">
               <p className="font-semibold text-[#F0F0F0]">Repo sync token (GITHUB_TOKEN)</p>
-              <p>To access private org repos, create a fine-grained PAT with <strong className="text-[#F0F0F0]">summit-smart-farms</strong> as the resource owner — or use a classic PAT with <code className="text-[#F0F0F0]">repo</code> scope, then authorize it for SSO in the org settings.</p>
+              <p>To access private org repos, create a fine-grained PAT with <strong className="text-[#F0F0F0]">griggs-capital-partners</strong> as the resource owner — or use a classic PAT with <code className="text-[#F0F0F0]">repo</code> scope, then authorize it for SSO in the org settings.</p>
               <pre className="bg-[#0D0D0D] rounded-lg p-3 text-[#F0F0F0] overflow-x-auto">{`GITHUB_TOKEN=your_pat_here
-GITHUB_ORG=summit-smart-farms   # filter by this owner`}</pre>
+GITHUB_ORG=griggs-capital-partners   # filter by this owner`}</pre>
             </div>
             <div className="space-y-2">
               <p className="font-semibold text-[#F0F0F0]">User account OAuth App (GITHUB_CLIENT_ID)</p>

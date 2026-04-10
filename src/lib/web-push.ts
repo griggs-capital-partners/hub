@@ -141,7 +141,7 @@ export async function notifyTaskAssigned(args: {
   assignedByName: string;
 }) {
   await sendNotificationToUser(args.userId, "taskAssignedPush", {
-    title: "Smart Hub",
+    title: "Griggs Hub",
     body: `${args.assignedByName} assigned you "${args.taskTitle}" in ${args.contextLabel}.`,
     url: args.url ?? `/sprints`,
     tag: `task-assigned:${args.taskId}`,
@@ -167,7 +167,7 @@ export async function notifyAgentExecutionStatus(args: {
 }) {
   const statusLabel = args.status === "completed" ? "completed" : "failed";
   await sendNotificationToUser(args.userId, "agentExecutionPush", {
-    title: "Smart Hub",
+    title: "Griggs Hub",
     body: `${args.agentName} ${statusLabel} ${args.actionLabel} for "${args.cardTitle}".`,
     url: `/agents/executions`,
     tag: `agent-execution:${args.executionId}`,

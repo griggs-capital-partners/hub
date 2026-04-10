@@ -7,7 +7,7 @@ export async function GET(request: Request) {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const { searchParams } = new URL(request.url);
-  const owner = searchParams.get("owner") ?? "summit-smart-farms";
+  const owner = searchParams.get("owner") ?? "griggs-capital-partners";
   const repo = searchParams.get("repo");
   const state = (searchParams.get("state") ?? "open") as "open" | "closed" | "all";
 
@@ -22,7 +22,7 @@ export async function POST(request: Request) {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await request.json();
-  const { owner = "summit-smart-farms", repo, title, body: issueBody, labels } = body;
+  const { owner = "griggs-capital-partners", repo, title, body: issueBody, labels } = body;
 
   if (!repo || !title) {
     return NextResponse.json({ error: "repo and title required" }, { status: 400 });

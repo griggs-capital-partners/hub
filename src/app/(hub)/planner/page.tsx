@@ -21,9 +21,9 @@ const BASE_BOARD_CARD_SELECT = {
   assignees: true,
   updatedAt: true,
   taskGroupId: true,
-  customers: {
+  wells: {
     orderBy: { name: "asc" as const },
-    select: { id: true, name: true, logoUrl: true, status: true },
+    select: { id: true, name: true, status: true },
   },
   notes: {
     orderBy: { createdAt: "desc" as const },
@@ -199,7 +199,7 @@ export default async function PlannerPage() {
     );
   }
 
-  const [repos, users, customers, taskGroupsRaw] = await Promise.all([
+  const [repos, users, wells, taskGroupsRaw] = await Promise.all([
     prisma.repo.findMany({
       where: { connected: true },
       orderBy: { name: "asc" },
@@ -231,9 +231,9 @@ export default async function PlannerPage() {
       orderBy: { name: "asc" },
       select: { id: true, name: true, displayName: true, email: true, image: true },
     }),
-    prisma.customer.findMany({
+    prisma.oilWell.findMany({
       orderBy: { name: "asc" },
-      select: { id: true, name: true, logoUrl: true, status: true },
+      select: { id: true, name: true, status: true },
     }),
     prisma.taskGroup.findMany({
       orderBy: { createdAt: "asc" },
@@ -321,6 +321,7 @@ export default async function PlannerPage() {
           isSprintOnly: false as const,
           linkedRepoIds: card.linkedRepos.map((lr) => lr.repoId),
           taskGroupId: card.taskGroupId ?? null,
+          customers: card.wells,
           subtasks: includeSubtasks && "subtasks" in card ? card.subtasks : "[]",
         }))
       )
@@ -351,6 +352,7 @@ export default async function PlannerPage() {
       isSprintOnly: false as const,
       linkedRepoIds: card.linkedRepos.map((lr) => lr.repoId),
       taskGroupId: card.taskGroupId ?? null,
+      customers: card.wells,
       subtasks: includeSubtasks && "subtasks" in card ? card.subtasks : "[]",
     }))
   );
@@ -393,7 +395,7 @@ export default async function PlannerPage() {
       repos={plannerRepos}
       sprints={[]}
       users={users}
-      customers={customers}
+      customers={wells.map((well) => ({ id: well.id, name: well.name, status: well.status }))}
       currentUserId={session?.user?.id ?? null}
       taskGroups={taskGroups}
     />

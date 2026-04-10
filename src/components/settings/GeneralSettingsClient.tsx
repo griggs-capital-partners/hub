@@ -158,7 +158,7 @@ export function GeneralSettingsClient({
         });
       }
       if (smtpChanged) {
-        setSmtpMessage({ text: "SMTP settings saved. Smart Hub email is ready to send.", ok: true });
+        setSmtpMessage({ text: "SMTP settings saved. Griggs Hub email is ready to send.", ok: true });
       }
     } catch {
       if (locationChanged) {
@@ -277,11 +277,10 @@ export function GeneralSettingsClient({
               type="button"
               onClick={() => setWeatherLocationMode("hub")}
               disabled={saving || locating}
-              className={`rounded-2xl border px-4 py-3 text-left transition-colors ${
-                weatherLocationMode === "hub"
+              className={`rounded-2xl border px-4 py-3 text-left transition-colors ${weatherLocationMode === "hub"
                   ? "border-[rgba(247,148,29,0.35)] bg-[rgba(247,148,29,0.08)]"
                   : "border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.03)] hover:border-[rgba(247,148,29,0.22)]"
-              }`}
+                }`}
             >
               <div className="text-sm font-semibold text-[#F0F0F0]">Set a location</div>
               <div className="mt-1 text-xs leading-5 text-[#808080]">
@@ -292,11 +291,10 @@ export function GeneralSettingsClient({
               type="button"
               onClick={() => setWeatherLocationMode("user")}
               disabled={saving || locating}
-              className={`rounded-2xl border px-4 py-3 text-left transition-colors ${
-                weatherLocationMode === "user"
+              className={`rounded-2xl border px-4 py-3 text-left transition-colors ${weatherLocationMode === "user"
                   ? "border-[rgba(247,148,29,0.35)] bg-[rgba(247,148,29,0.08)]"
                   : "border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.03)] hover:border-[rgba(247,148,29,0.22)]"
-              }`}
+                }`}
             >
               <div className="text-sm font-semibold text-[#F0F0F0]">Use each user&apos;s location</div>
               <div className="mt-1 text-xs leading-5 text-[#808080]">
@@ -372,7 +370,7 @@ export function GeneralSettingsClient({
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-[#F0F0F0]">Hub Email (SMTP)</p>
             <p className="mt-1 max-w-2xl text-xs leading-5 text-[#8B8172]">
-              Connect Smart Hub to your outbound mail server for branded team emails and agent run notifications.
+              Connect Griggs Hub to your outbound mail server for branded team emails and agent run notifications.
             </p>
           </div>
           <div className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#D7B58C]">

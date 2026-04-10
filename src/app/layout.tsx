@@ -16,7 +16,7 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "Smart Hub — Griggs Capital Partners",
+  title: "Griggs Hub — Griggs Capital Partners",
   description: "The central command hub for the Griggs Capital Partners dev team",
 };
 

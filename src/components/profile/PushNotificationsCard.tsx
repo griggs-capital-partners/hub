@@ -271,14 +271,14 @@ export function PushNotificationsCard() {
         {!isSupported && (
           <div className="rounded-xl border border-[rgba(239,68,68,0.25)] bg-[rgba(239,68,68,0.08)] px-4 py-3 text-sm text-[#FCA5A5]">
             {requiresHomeScreenInstall
-              ? "On iPhone and iPad, web push only works after Smart Hub is added to the Home Screen and opened as an installed web app."
+              ? "On iPhone and iPad, web push only works after Griggs Hub is added to the Home Screen and opened as an installed web app."
               : "This browser does not support service workers or the Push API."}
           </div>
         )}
 
         {requiresHomeScreenInstall && (
           <div className="rounded-xl border border-[rgba(251,186,0,0.25)] bg-[rgba(251,186,0,0.08)] px-4 py-3 text-sm text-[#FCD34D]">
-            Open this site in Safari, tap Share, choose Add to Home Screen, then launch Smart Hub from the Home Screen before enabling push notifications.
+            Open this site in Safari, tap Share, choose Add to Home Screen, then launch Griggs Hub from the Home Screen before enabling push notifications.
           </div>
         )}
 

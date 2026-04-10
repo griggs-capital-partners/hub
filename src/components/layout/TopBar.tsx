@@ -39,7 +39,7 @@ export function TopBar() {
 
   const pageInfo =
     Object.entries(PAGE_TITLES).find(([key]) => pathname.startsWith(key))?.[1] ??
-    { title: "Smart Hub", subtitle: "Griggs Capital Partners" };
+    { title: "Griggs Hub", subtitle: "Griggs Capital Partners" };
 
   return (
     <header className="relative h-16 flex items-center justify-between px-4 md:px-6 border-b border-[rgba(255,255,255,0.06)] flex-shrink-0 bg-[#0D0D0D] z-20">
