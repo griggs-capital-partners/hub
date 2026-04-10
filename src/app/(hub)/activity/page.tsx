@@ -50,7 +50,6 @@ export default async function ActivityPage() {
   });
 
   const activity = await prisma.activityEvent.findMany({
-    where: { type: { not: "jam.vibe" } },
     orderBy: { createdAt: "desc" },
     take: 20,
   });

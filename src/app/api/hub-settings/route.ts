@@ -73,8 +73,6 @@ export async function GET() {
       latitude: null,
       longitude: null,
       timezone: null,
-      spotifyClientId: null,
-      spotifyClientSecret: null,
       ...getDefaultHubEmailSettings(),
     },
   });
@@ -91,16 +89,11 @@ export async function PATCH(req: NextRequest) {
   const hasLatitudeField = Object.prototype.hasOwnProperty.call(body ?? {}, "latitude");
   const hasLongitudeField = Object.prototype.hasOwnProperty.call(body ?? {}, "longitude");
   const hasWeatherLocationModeField = Object.prototype.hasOwnProperty.call(body ?? {}, "weatherLocationMode");
-  const hasSpotifyField = ["spotifyClientId", "spotifyClientSecret"].some((key) =>
-    Object.prototype.hasOwnProperty.call(body ?? {}, key)
-  );
   const hasSmtpField = ["smtpHost", "smtpPort", "smtpUser", "smtpPass", "smtpFrom", "agentExecutionEmailEnabled"].some((key) =>
     Object.prototype.hasOwnProperty.call(body ?? {}, key)
   );
   const weatherLocationMode = body?.weatherLocationMode === "user" ? "user" : "hub";
   const rawLocation = typeof body?.locationName === "string" ? body.locationName.trim() : "";
-  const spotifyClientId = typeof body?.spotifyClientId === "string" ? body.spotifyClientId.trim() : "";
-  const spotifyClientSecret = typeof body?.spotifyClientSecret === "string" ? body.spotifyClientSecret.trim() : "";
   const latitude = typeof body?.latitude === "number" ? body.latitude : null;
   const longitude = typeof body?.longitude === "number" ? body.longitude : null;
   const smtpHost = typeof body?.smtpHost === "string" ? body.smtpHost.trim() : "";
@@ -120,7 +113,7 @@ export async function PATCH(req: NextRequest) {
     return NextResponse.json({ error: "Location must be 120 characters or fewer" }, { status: 400 });
   }
 
-  if (spotifyClientId.length > 255 || spotifyClientSecret.length > 255 || smtpHost.length > 255 || smtpUser.length > 255 || smtpFrom.length > 255) {
+  if (smtpHost.length > 255 || smtpUser.length > 255 || smtpFrom.length > 255) {
     return NextResponse.json({ error: "One or more settings fields are too long" }, { status: 400 });
   }
 
@@ -142,20 +135,10 @@ export async function PATCH(req: NextRequest) {
   const smtpFields = [smtpHost, smtpUser, smtpPass, smtpFrom];
   const smtpHasAnyValue = smtpFields.some(Boolean) || smtpPort !== null;
   const smtpHasAllValues = smtpFields.every(Boolean) && smtpPort !== null;
-  const spotifyHasAnyValue = Boolean(spotifyClientId || spotifyClientSecret);
-  const spotifyHasAllValues = Boolean(spotifyClientId && spotifyClientSecret);
-  const spotifyShouldClear = hasSpotifyField && !spotifyClientId && !spotifyClientSecret;
 
   if (smtpHasAnyValue && !smtpHasAllValues) {
     return NextResponse.json(
       { error: "SMTP host, port, user, password, and from address are all required together" },
-      { status: 400 }
-    );
-  }
-
-  if (spotifyHasAnyValue && !spotifyHasAllValues) {
-    return NextResponse.json(
-      { error: "Spotify client ID and client secret are required together" },
       { status: 400 }
     );
   }
@@ -171,8 +154,6 @@ export async function PATCH(req: NextRequest) {
   }) {
     return saveHubSettings({
       ...locationSettings,
-      spotifyClientId: spotifyShouldClear ? null : spotifyHasAnyValue ? spotifyClientId : existingSettings?.spotifyClientId ?? null,
-      spotifyClientSecret: spotifyShouldClear ? null : spotifyHasAnyValue ? spotifyClientSecret : existingSettings?.spotifyClientSecret ?? null,
       smtpHost: smtpHasAnyValue ? smtpHost : existingSettings?.smtpHost ?? null,
       smtpPort: smtpHasAnyValue ? smtpPort : existingSettings?.smtpPort ?? null,
       smtpUser: smtpHasAnyValue ? smtpUser : existingSettings?.smtpUser ?? null,
@@ -182,7 +163,7 @@ export async function PATCH(req: NextRequest) {
     });
   }
 
-  if ((hasSmtpField || hasSpotifyField) && !hasLocationField && !hasLatitudeField && !hasLongitudeField) {
+  if (hasSmtpField && !hasLocationField && !hasLatitudeField && !hasLongitudeField) {
     const settings = await persistSettings({
       weatherLocationMode: hasWeatherLocationModeField ? weatherLocationMode : existingSettings?.weatherLocationMode ?? "hub",
       locationName: existingSettings?.locationName ?? null,

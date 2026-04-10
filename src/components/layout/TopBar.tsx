@@ -2,32 +2,15 @@
 
 import { useState } from "react";
 import { Bell, Menu, LogOut, User } from "lucide-react";
-import { usePathname } from "next/navigation";
 import { useMobileNav } from "@/components/layout/MobileNav";
 import { Avatar } from "@/components/ui/Avatar";
 import { authClient } from "@/lib/auth-client";
 import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
-import { cn } from "@/lib/utils";
-import { TeamJamWidget } from "@/components/jam/TeamJamWidget";
-
-const PAGE_TITLES: Record<string, { title: string; subtitle: string }> = {
-  "/dashboard": { title: "Home", subtitle: "Team collaboration hub" },
-  "/chat": { title: "Team Chat", subtitle: "Griggs Capital Partners" },
-  "/repos": { title: "Codebase", subtitle: "GitHub repositories & systems" },
-  "/customers": { title: "Customer Intelligence", subtitle: "Knowledge base & insights" },
-  "/activity": { title: "Wildfires", subtitle: "Active issues & critical alerts" },
-  "/intelligence": { title: "Intelligence", subtitle: "AI-powered analysis" },
-  "/weekly-notes": { title: "Weekly Notes", subtitle: "Customer focused activities" },
-  "/settings": { title: "Settings", subtitle: "Hub configuration" },
-  "/mqtt-portal": { title: "MQTT Portal", subtitle: "Broker security — clients, roles & user mappings" },
-  "/pages/": { title: "Tools", subtitle: "Custom pages" },
-};
 
 export function TopBar() {
   const [hasNotifications] = useState(true);
   const [isProfileOpen, setIsProfileOpen] = useState(false);
-  const pathname = usePathname();
   const { toggle } = useMobileNav();
   const session = authClient.useSession();
   const user = session.data?.user;
@@ -36,10 +19,6 @@ export function TopBar() {
     await authClient.signOut();
     window.location.href = "/login";
   }
-
-  const pageInfo =
-    Object.entries(PAGE_TITLES).find(([key]) => pathname.startsWith(key))?.[1] ??
-    { title: "Griggs Hub", subtitle: "Griggs Capital Partners" };
 
   return (
     <header className="relative h-16 flex items-center justify-between px-4 md:px-6 border-b border-[rgba(255,255,255,0.06)] flex-shrink-0 bg-[#0D0D0D] z-20">
@@ -59,9 +38,6 @@ export function TopBar() {
       </div>
 
       <div className="flex items-center gap-3">
-        {/* Team Jam */}
-        <TeamJamWidget />
-
         {/* Notifications */}
         <button className="relative p-2 text-[#9A9A9A] hover:text-[#F0F0F0] hover:bg-[rgba(255,255,255,0.05)] rounded-lg transition-all">
           <Bell size={18} />

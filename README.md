@@ -10,7 +10,6 @@ Built with a focus on modern aesthetics, real-time collaboration, and data-drive
 - **Project Tracking (GitHub Sync)**: Deep integration with GitHub to pull repositories, issues, and sync them with internal Kanban boards for seamless developer-to-operator coordination.
 - **Customer & Document Management**: Centralized CRM for managing farm partners and their critical documentation (machine learning summaries and tagging supported).
 - **Activity Stream**: A persistent log of all major actions across the platform to ensure auditability and team awareness.
-- **Team Jam**: Spotify Jam integration that lets teammates listen to music together while they work. One person starts a Jam in Spotify, pastes the join link into the Hub, and a live notification appears for everyone else with a one-click "Join in Spotify" button. Listener presence is tracked in real-time and a **Team Jam node** can be placed in any architecture diagram to visualize who is listening.
 
 ## Tech Stack
 
@@ -71,4 +70,3 @@ To spin up a separate instance of the Griggs Hub, you will need:
 ---
 
 Managed by [Griggs Capital Partners](https://summitsmartfarms.com).
-

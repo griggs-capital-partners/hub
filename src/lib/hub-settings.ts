@@ -8,8 +8,6 @@ export interface HubSettingsRecord {
   latitude: number | null;
   longitude: number | null;
   timezone: string | null;
-  spotifyClientId: string | null;
-  spotifyClientSecret: string | null;
   smtpHost: string | null;
   smtpPort: number | null;
   smtpUser: string | null;
@@ -41,8 +39,6 @@ function normalizeRow(row: Record<string, unknown>): HubSettingsRecord {
     latitude: typeof row.latitude === "number" ? row.latitude : null,
     longitude: typeof row.longitude === "number" ? row.longitude : null,
     timezone: typeof row.timezone === "string" ? row.timezone : null,
-    spotifyClientId: typeof row.spotifyClientId === "string" ? row.spotifyClientId : null,
-    spotifyClientSecret: typeof row.spotifyClientSecret === "string" ? row.spotifyClientSecret : null,
     smtpHost: typeof row.smtpHost === "string" ? row.smtpHost : defaults.smtpHost,
     smtpPort: typeof row.smtpPort === "number" ? row.smtpPort : defaults.smtpPort,
     smtpUser: typeof row.smtpUser === "string" ? row.smtpUser : defaults.smtpUser,
@@ -66,7 +62,7 @@ function isMissingTableError(error: unknown) {
 export async function getHubSettings() {
   try {
     const rows = await prisma.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
-      SELECT id, "weatherLocationMode", "locationName", latitude, longitude, timezone, "spotifyClientId", "spotifyClientSecret", "smtpHost", "smtpPort", "smtpUser", "smtpPass", "smtpFrom", "agentExecutionEmailEnabled"
+      SELECT id, "weatherLocationMode", "locationName", latitude, longitude, timezone, "smtpHost", "smtpPort", "smtpUser", "smtpPass", "smtpFrom", "agentExecutionEmailEnabled"
       FROM hub_settings
       WHERE id = 'default'
       LIMIT 1
@@ -91,8 +87,6 @@ export async function saveHubSettings(input: Omit<HubSettingsRecord, "id">) {
         latitude,
         longitude,
         timezone,
-        "spotifyClientId",
-        "spotifyClientSecret",
         "smtpHost",
         "smtpPort",
         "smtpUser",
@@ -109,8 +103,6 @@ export async function saveHubSettings(input: Omit<HubSettingsRecord, "id">) {
         ${input.latitude},
         ${input.longitude},
         ${input.timezone},
-        ${input.spotifyClientId},
-        ${input.spotifyClientSecret},
         ${input.smtpHost},
         ${input.smtpPort},
         ${input.smtpUser},
@@ -127,8 +119,6 @@ export async function saveHubSettings(input: Omit<HubSettingsRecord, "id">) {
         latitude = EXCLUDED.latitude,
         longitude = EXCLUDED.longitude,
         timezone = EXCLUDED.timezone,
-        "spotifyClientId" = EXCLUDED."spotifyClientId",
-        "spotifyClientSecret" = EXCLUDED."spotifyClientSecret",
         "smtpHost" = EXCLUDED."smtpHost",
         "smtpPort" = EXCLUDED."smtpPort",
         "smtpUser" = EXCLUDED."smtpUser",
@@ -136,7 +126,7 @@ export async function saveHubSettings(input: Omit<HubSettingsRecord, "id">) {
         "smtpFrom" = EXCLUDED."smtpFrom",
         "agentExecutionEmailEnabled" = EXCLUDED."agentExecutionEmailEnabled",
         "updatedAt" = NOW()
-      RETURNING id, "weatherLocationMode", "locationName", latitude, longitude, timezone, "spotifyClientId", "spotifyClientSecret", "smtpHost", "smtpPort", "smtpUser", "smtpPass", "smtpFrom", "agentExecutionEmailEnabled"
+      RETURNING id, "weatherLocationMode", "locationName", latitude, longitude, timezone, "smtpHost", "smtpPort", "smtpUser", "smtpPass", "smtpFrom", "agentExecutionEmailEnabled"
     `);
 
     return rows[0] ? normalizeRow(rows[0]) : null;

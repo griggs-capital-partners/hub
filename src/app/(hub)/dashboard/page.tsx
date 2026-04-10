@@ -38,7 +38,7 @@ export default async function DashboardPage() {
 
   // Activity feed
   const activity = await prisma.activityEvent.findMany({
-    where: { type: { not: "jam.vibe" }, createdAt: { gte: sevenDaysAgo } },
+    where: { createdAt: { gte: sevenDaysAgo } },
     orderBy: { createdAt: "desc" },
     take: 50,
   });

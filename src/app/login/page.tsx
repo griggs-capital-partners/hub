@@ -1,18 +1,41 @@
 "use client";
 
 import { authClient } from "@/lib/auth-client";
-import { motion, AnimatePresence } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import Image from "next/image";
-import { useState, Suspense } from "react";
 import { useSearchParams } from "next/navigation";
-import { Loader2, GitBranch, Users, Sparkles, BarChart3, LogIn, UserPlus, ArrowLeft, Mail } from "lucide-react";
+import { Suspense, useState } from "react";
+import {
+  ArrowLeft,
+  ChartNoAxesColumn,
+  Compass,
+  Loader2,
+  LogIn,
+  Mail,
+  ShieldCheck,
+  UserPlus,
+} from "lucide-react";
 
-const FEATURES = [
-  { icon: GitBranch, label: "Connected Workflows", desc: "Bring your team into one shared space" },
-  { icon: BarChart3, label: "Clear Visibility", desc: "Stay aligned on priorities and progress" },
-  { icon: Users, label: "Team Collaboration", desc: "Keep people, plans, and updates together" },
-  { icon: Sparkles, label: "Focused Execution", desc: "Start the day with clarity and momentum" },
+const PILLARS = [
+  {
+    icon: ShieldCheck,
+    label: "Patient Capital",
+    desc: "Built for disciplined decisions, aligned incentives, and long-term value creation.",
+  },
+  {
+    icon: Compass,
+    label: "Operator Perspective",
+    desc: "A partner portal shaped around execution, clarity, and owner-operator realities.",
+  },
+  {
+    icon: ChartNoAxesColumn,
+    label: "Enduring Cash Flows",
+    desc: "One place to keep priorities, reporting, and partnership communication in motion.",
+  },
 ];
+
+const fieldClassName =
+  "w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3.5 text-sm text-[#F7F3EB] placeholder:text-[#9D9385] outline-none transition duration-200 focus:border-[#DCA24C] focus:bg-white/[0.06]";
 
 function LoginForm() {
   const [tab, setTab] = useState<"signin" | "signup">("signin");
@@ -108,7 +131,6 @@ function LoginForm() {
     setError(null);
     setNotice(null);
 
-    // Initial sign-up — redirecting to dashboard immediately.
     const result = await authClient.signUp.email({ email, password, name });
 
     if (result.error) {
@@ -128,337 +150,328 @@ function LoginForm() {
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 30, scale: 0.97 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
+      initial={{ opacity: 0, y: 24 }}
+      animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.6, delay: 0.1 }}
-      className="w-full max-w-sm"
+      className="w-full max-w-[520px]"
     >
-      {/* Mobile logo */}
-      <div className="flex lg:hidden items-center gap-3 mb-10 justify-center">
-        <div className="w-10 h-10 rounded-xl overflow-hidden">
-          <Image src="/logo.png" alt="Griggs Capital Partners" width={40} height={40} style={{ width: 40, height: 40 }} />
-        </div>
-        <div>
-          <div className="text-xs font-bold text-[#F7941D] tracking-widest uppercase">Griggs Capital Partners</div>
-          <div className="text-xl font-black text-[#F0F0F0]">Griggs Hub</div>
-        </div>
-      </div>
-
-      <div className="mb-6">
-        <h1 className="text-3xl font-black text-[#F0F0F0] mb-2">Welcome</h1>
-        <p className="text-[#9A9A9A] text-sm">Sign in or create your invited account</p>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex gap-1 mb-6 p-1 bg-[#1A1A1A] rounded-xl border border-[rgba(255,255,255,0.06)]">
-        {(["signin", "signup"] as const).map((t) => (
-          <button
-            key={t}
-            onClick={() => {
-              setTab(t);
-              setMode("signin");
-              setError(null);
-              setNotice(null);
-            }}
-            className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-sm font-semibold transition-all duration-200 ${tab === t
-              ? "bg-gradient-to-r from-[#F7941D] to-[#FBBA00] text-[#0D0D0D]"
-              : "text-[#606060] hover:text-[#F0F0F0]"
-              }`}
-          >
-            {t === "signin" ? <LogIn size={14} /> : <UserPlus size={14} />}
-            {t === "signin" ? "Sign In" : "Join Team"}
-          </button>
-        ))}
-      </div>
-
-      {/* Errors */}
-      {(oauthError || error) && (
-        <motion.div
-          key={error ?? oauthError}
-          initial={{ opacity: 0, y: -8 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="p-3 bg-[rgba(239,68,68,0.1)] border border-[rgba(239,68,68,0.2)] rounded-xl mb-4 text-sm text-[#EF4444]"
-        >
-          {error ?? oauthError}
-        </motion.div>
-      )}
-
-      {(resetStatus === "success" || notice) && (
-        <motion.div
-          key={notice ?? resetStatus}
-          initial={{ opacity: 0, y: -8 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="p-3 bg-[rgba(34,197,94,0.1)] border border-[rgba(34,197,94,0.2)] rounded-xl mb-4 text-sm text-[#86EFAC]"
-        >
-          {notice ?? "Your password has been updated. Please sign in with your new password."}
-        </motion.div>
-      )}
-
-      <AnimatePresence mode="wait">
-        {tab === "signin" ? (
-          <motion.form
-            key="signin"
-            initial={{ opacity: 0, x: -10 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 10 }}
-            transition={{ duration: 0.2 }}
-            onSubmit={mode === "forgot" ? handleForgotPassword : handleSignIn}
-            className="space-y-3"
-          >
-            {mode === "forgot" && (
-              <div className="p-3 bg-[rgba(247,148,29,0.08)] border border-[rgba(247,148,29,0.15)] rounded-xl text-xs text-[#9A9A9A]">
-                Enter your email and we&apos;ll send you a password reset link.
-              </div>
-            )}
-            <input
-              type="email"
-              placeholder={mode === "forgot" ? "Work email address" : "Email address"}
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              className="w-full bg-[#1A1A1A] border border-[rgba(255,255,255,0.08)] rounded-xl px-4 py-3 text-sm text-[#F0F0F0] placeholder:text-[#606060] focus:outline-none focus:border-[#F7941D] transition-all"
-            />
-            {mode === "signin" && (
-              <input
-                type="password"
-                placeholder="Password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                className="w-full bg-[#1A1A1A] border border-[rgba(255,255,255,0.08)] rounded-xl px-4 py-3 text-sm text-[#F0F0F0] placeholder:text-[#606060] focus:outline-none focus:border-[#F7941D] transition-all"
-              />
-            )}
-            <div className="flex items-center justify-between gap-3 pt-1">
-              {mode === "forgot" ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMode("signin");
-                    setError(null);
-                    setNotice(null);
-                  }}
-                  className="inline-flex items-center gap-2 text-xs text-[#9A9A9A] hover:text-[#F0F0F0] transition-colors"
-                >
-                  <ArrowLeft size={13} />
-                  Back to sign in
-                </button>
-              ) : (
-                <span className="text-xs text-[#505050]">Use your team email and password</span>
-              )}
-              {mode === "signin" && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMode("forgot");
-                    setPassword("");
-                    setError(null);
-                    setNotice(null);
-                  }}
-                  className="text-xs font-medium text-[#F7941D] hover:text-[#FBBA00] transition-colors"
-                >
-                  Forgot password?
-                </button>
-              )}
+      <div className="rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(25,22,19,0.96),rgba(15,13,12,0.96))] p-5 shadow-[0_32px_100px_rgba(0,0,0,0.45)] backdrop-blur-xl sm:p-8">
+        <div className="mb-8 flex items-start justify-between gap-4">
+          <div>
+            <div className="mb-3 inline-flex items-center rounded-full border border-[#DCA24C]/25 bg-[#DCA24C]/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.28em] text-[#E3B261]">
+              Partner Portal
             </div>
-            <motion.button
-              whileHover={{ scale: 1.01, boxShadow: "0 0 30px rgba(247,148,29,0.2)" }}
-              whileTap={{ scale: 0.98 }}
-              type="submit"
-              disabled={loading}
-              className="w-full flex items-center justify-center gap-3 bg-gradient-to-r from-[#F7941D] to-[#FBBA00] text-[#0D0D0D] font-bold py-3.5 rounded-xl transition-all duration-200 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed text-sm"
-            >
-              {loading ? <Loader2 size={18} className="animate-spin" /> : mode === "forgot" ? <Mail size={18} /> : <LogIn size={18} />}
-              {loading ? (mode === "forgot" ? "Sending email..." : "Signing in...") : mode === "forgot" ? "Send Reset Email" : "Sign In"}
-            </motion.button>
-          </motion.form>
-        ) : (
-          <motion.div
-            key="signup"
-            initial={{ opacity: 0, x: 10 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -10 }}
-            transition={{ duration: 0.2 }}
-            className="space-y-3"
-          >
-            {signupStep === 1 && (
-              <form onSubmit={handleEmailCheck} className="space-y-3">
-                <div className="p-3 bg-[rgba(247,148,29,0.08)] border border-[rgba(247,148,29,0.15)] rounded-xl text-xs text-[#9A9A9A]">
-                  Your email must be on the invite list. Contact an admin if you need access.
-                </div>
-                <input
-                  type="email"
-                  placeholder="Invited email address"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                  className="w-full bg-[#1A1A1A] border border-[rgba(255,255,255,0.08)] rounded-xl px-4 py-3 text-sm text-[#F0F0F0] placeholder:text-[#606060] focus:outline-none focus:border-[#F7941D] transition-all"
-                />
-                <motion.button
-                  whileHover={{ scale: 1.01, boxShadow: "0 0 30px rgba(247,148,29,0.2)" }}
-                  whileTap={{ scale: 0.98 }}
-                  type="submit"
-                  disabled={loading}
-                  className="w-full flex items-center justify-center gap-3 bg-gradient-to-r from-[#F7941D] to-[#FBBA00] text-[#0D0D0D] font-bold py-3.5 rounded-xl transition-all duration-200 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed text-sm"
-                >
-                  {loading ? <Loader2 size={18} className="animate-spin" /> : "Continue"}
-                </motion.button>
-              </form>
-            )}
+            <h1 className="text-4xl leading-none font-black tracking-tight text-[#F7F3EB] sm:text-5xl">
+              Access Griggs Hub
+            </h1>
+            <p className="mt-3 max-w-sm text-sm leading-6 text-[#B7AC9B]">
+              Secure sign-in for partners, operators, and invited team members working across the Griggs Capital ecosystem.
+            </p>
+          </div>
 
-            {signupStep === 2 && (
-              <form onSubmit={handleSignUp} className="space-y-3">
-                <div className="flex items-center gap-2 mb-2">
-                  <button
-                    type="button"
-                    onClick={() => setSignupStep(1)}
-                    className="text-xs text-[#606060] hover:text-[#F7941D] transition-colors"
-                  >
-                    ← {email}
-                  </button>
+          <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-2.5 sm:p-3">
+            <Image src="/logo.png" alt="Griggs Capital Partners" width={42} height={42} priority className="h-9 w-9 sm:h-[42px] sm:w-[42px]" />
+          </div>
+        </div>
+
+        <div className="mb-6 grid grid-cols-2 gap-2 rounded-2xl border border-white/8 bg-black/20 p-1">
+          {(["signin", "signup"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => {
+                setTab(t);
+                setMode("signin");
+                setError(null);
+                setNotice(null);
+              }}
+              className={`flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition-all duration-200 ${tab === t
+                  ? "bg-[linear-gradient(135deg,#E0B35C_0%,#C8862A_100%)] text-[#17120E] shadow-[0_10px_30px_rgba(220,162,76,0.25)]"
+                  : "text-[#A79D8F] hover:text-[#F7F3EB]"
+                }`}
+            >
+              {t === "signin" ? <LogIn size={16} /> : <UserPlus size={16} />}
+              {t === "signin" ? "Sign In" : "Request Access"}
+            </button>
+          ))}
+        </div>
+
+        {(oauthError || error) && (
+          <motion.div
+            key={error ?? oauthError}
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-4 rounded-2xl border border-[#A64D45]/30 bg-[#A64D45]/10 p-3 text-sm text-[#F0B3AC]"
+          >
+            {error ?? oauthError}
+          </motion.div>
+        )}
+
+        {(resetStatus === "success" || notice) && (
+          <motion.div
+            key={notice ?? resetStatus}
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-4 rounded-2xl border border-[#7C9A67]/30 bg-[#7C9A67]/10 p-3 text-sm text-[#CDE4B5]"
+          >
+            {notice ?? "Your password has been updated. Please sign in with your new password."}
+          </motion.div>
+        )}
+
+        <AnimatePresence mode="wait">
+          {tab === "signin" ? (
+            <motion.form
+              key="signin"
+              initial={{ opacity: 0, x: -10 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 10 }}
+              transition={{ duration: 0.2 }}
+              onSubmit={mode === "forgot" ? handleForgotPassword : handleSignIn}
+              className="space-y-3"
+            >
+              {mode === "forgot" && (
+                <div className="rounded-2xl border border-[#DCA24C]/20 bg-[#DCA24C]/10 p-3 text-xs leading-5 text-[#CBBCA7]">
+                  Enter your email and we&apos;ll send a reset link to restore portal access.
                 </div>
-                <input
-                  type="text"
-                  placeholder="Your full name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  required
-                  className="w-full bg-[#1A1A1A] border border-[rgba(255,255,255,0.08)] rounded-xl px-4 py-3 text-sm text-[#F0F0F0] placeholder:text-[#606060] focus:outline-none focus:border-[#F7941D] transition-all"
-                />
+              )}
+
+              <input
+                type="email"
+                placeholder={mode === "forgot" ? "Work email address" : "Email address"}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                className={fieldClassName}
+              />
+
+              {mode === "signin" && (
                 <input
                   type="password"
-                  placeholder="Choose a password"
+                  placeholder="Password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   required
-                  minLength={8}
-                  className="w-full bg-[#1A1A1A] border border-[rgba(255,255,255,0.08)] rounded-xl px-4 py-3 text-sm text-[#F0F0F0] placeholder:text-[#606060] focus:outline-none focus:border-[#F7941D] transition-all"
+                  className={fieldClassName}
                 />
-                <input
-                  type="password"
-                  placeholder="Confirm password"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  required
-                  minLength={8}
-                  className="w-full bg-[#1A1A1A] border border-[rgba(255,255,255,0.08)] rounded-xl px-4 py-3 text-sm text-[#F0F0F0] placeholder:text-[#606060] focus:outline-none focus:border-[#F7941D] transition-all"
-                />
-                <motion.button
-                  whileHover={{ scale: 1.01, boxShadow: "0 0 30px rgba(247,148,29,0.2)" }}
-                  whileTap={{ scale: 0.98 }}
-                  type="submit"
-                  disabled={loading}
-                  className="w-full flex items-center justify-center gap-3 bg-gradient-to-r from-[#F7941D] to-[#FBBA00] text-[#0D0D0D] font-bold py-3.5 rounded-xl transition-all duration-200 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed text-sm"
-                >
-                  {loading ? <Loader2 size={18} className="animate-spin" /> : <UserPlus size={18} />}
-                  {loading ? "Creating account..." : "Join Team"}
-                </motion.button>
-              </form>
-            )}
-          </motion.div>
-        )}
-      </AnimatePresence>
+              )}
 
-      <p className="text-center text-xs text-[#404040] mt-6">
-        © {new Date().getFullYear()} Griggs Capital Partners. Griggs Hub.
-      </p>
+              <div className="flex items-center justify-between gap-3 pt-1">
+                {mode === "forgot" ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode("signin");
+                      setError(null);
+                      setNotice(null);
+                    }}
+                    className="inline-flex items-center gap-2 text-xs text-[#B7AC9B] transition-colors hover:text-[#F7F3EB]"
+                  >
+                    <ArrowLeft size={13} />
+                    Back to sign in
+                  </button>
+                ) : (
+                  <span className="text-xs text-[#8D8478]">Use your invited work email and password</span>
+                )}
+
+                {mode === "signin" && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMode("forgot");
+                      setPassword("");
+                      setError(null);
+                      setNotice(null);
+                    }}
+                    className="text-xs font-semibold text-[#E0B35C] transition-colors hover:text-[#F0C878]"
+                  >
+                    Forgot password?
+                  </button>
+                )}
+              </div>
+
+              <motion.button
+                whileHover={{ scale: 1.01, y: -1 }}
+                whileTap={{ scale: 0.98 }}
+                type="submit"
+                disabled={loading}
+                className="flex w-full items-center justify-center gap-3 rounded-2xl bg-[linear-gradient(135deg,#E0B35C_0%,#C8862A_100%)] px-4 py-3.5 text-sm font-bold text-[#17120E] shadow-[0_16px_40px_rgba(200,134,42,0.2)] transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {loading ? <Loader2 size={18} className="animate-spin" /> : mode === "forgot" ? <Mail size={18} /> : <LogIn size={18} />}
+                {loading ? (mode === "forgot" ? "Sending email..." : "Signing in...") : mode === "forgot" ? "Send Reset Email" : "Enter Hub"}
+              </motion.button>
+            </motion.form>
+          ) : (
+            <motion.div
+              key="signup"
+              initial={{ opacity: 0, x: 10 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -10 }}
+              transition={{ duration: 0.2 }}
+              className="space-y-3"
+            >
+              {signupStep === 1 && (
+                <form onSubmit={handleEmailCheck} className="space-y-3">
+                  <div className="rounded-2xl border border-[#DCA24C]/20 bg-[#DCA24C]/10 p-3 text-xs leading-5 text-[#CBBCA7]">
+                    Access is invitation-based. Confirm your email to continue with account setup.
+                  </div>
+                  <input
+                    type="email"
+                    placeholder="Invited email address"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    className={fieldClassName}
+                  />
+                  <motion.button
+                    whileHover={{ scale: 1.01, y: -1 }}
+                    whileTap={{ scale: 0.98 }}
+                    type="submit"
+                    disabled={loading}
+                    className="w-full rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3.5 text-sm font-semibold text-[#F7F3EB] transition-all duration-200 hover:bg-white/[0.07] disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {loading ? "Checking invitation..." : "Continue"}
+                  </motion.button>
+                </form>
+              )}
+
+              {signupStep === 2 && (
+                <form onSubmit={handleSignUp} className="space-y-3">
+                  <div className="mb-2 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSignupStep(1)}
+                      className="text-xs text-[#B7AC9B] transition-colors hover:text-[#F0C878]"
+                    >
+                      ← {email}
+                    </button>
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Your full name"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    required
+                    className={fieldClassName}
+                  />
+                  <input
+                    type="password"
+                    placeholder="Choose a password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    minLength={8}
+                    className={fieldClassName}
+                  />
+                  <input
+                    type="password"
+                    placeholder="Confirm password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    required
+                    minLength={8}
+                    className={fieldClassName}
+                  />
+                  <motion.button
+                    whileHover={{ scale: 1.01, y: -1 }}
+                    whileTap={{ scale: 0.98 }}
+                    type="submit"
+                    disabled={loading}
+                    className="flex w-full items-center justify-center gap-3 rounded-2xl bg-[linear-gradient(135deg,#E0B35C_0%,#C8862A_100%)] px-4 py-3.5 text-sm font-bold text-[#17120E] shadow-[0_16px_40px_rgba(200,134,42,0.2)] transition-all duration-200 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {loading ? <Loader2 size={18} className="animate-spin" /> : <UserPlus size={18} />}
+                    {loading ? "Creating account..." : "Create Portal Account"}
+                  </motion.button>
+                </form>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <div className="mt-6 flex items-center justify-between gap-4 border-t border-white/8 pt-4 text-xs text-[#8D8478]">
+          <span>Private access for invited partners and operators.</span>
+          <span>© {new Date().getFullYear()}</span>
+        </div>
+      </div>
     </motion.div>
   );
 }
 
 export default function LoginPage() {
   return (
-    <div className="min-h-screen bg-[#0D0D0D] flex overflow-hidden relative">
-      {/* Ambient orbs */}
-      {[
-        { top: "10%", left: "5%", size: 300, color: "rgba(247,148,29,0.08)", delay: 0 },
-        { top: "60%", right: "5%", size: 250, color: "rgba(251,186,0,0.06)", delay: 1.5 },
-        { bottom: "10%", left: "30%", size: 200, color: "rgba(123,28,36,0.1)", delay: 0.8 },
-      ].map((orb, i) => (
-        <motion.div
-          key={i}
-          className="absolute rounded-full pointer-events-none"
-          style={{
-            top: (orb as { top?: string }).top,
-            left: (orb as { left?: string }).left,
-            right: (orb as { right?: string }).right,
-            bottom: (orb as { bottom?: string }).bottom,
-            width: orb.size,
-            height: orb.size,
-            background: `radial-gradient(circle, ${orb.color} 0%, transparent 70%)`,
-          }}
-          animate={{ scale: [1, 1.1, 1], opacity: [0.6, 1, 0.6] }}
-          transition={{ duration: 6, repeat: Infinity, delay: orb.delay, ease: "easeInOut" }}
-        />
-      ))}
+    <div className="min-h-screen overflow-hidden bg-[#0B0908] text-[#F7F3EB]">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(200,134,42,0.18),transparent_34%),radial-gradient(circle_at_85%_18%,rgba(111,40,25,0.22),transparent_22%),linear-gradient(180deg,#15110E_0%,#0B0908_100%)]" />
+      <div className="absolute inset-0 opacity-[0.18]" style={{ backgroundImage: "linear-gradient(rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.05) 1px, transparent 1px)", backgroundSize: "72px 72px" }} />
+      <div className="absolute inset-y-0 left-[58%] hidden w-px bg-gradient-to-b from-transparent via-white/10 to-transparent xl:block" />
 
-      {/* Left — Branding */}
-      <div className="hidden lg:flex flex-1 flex-col justify-between p-16 relative">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6 }}
-          className="flex items-center gap-4"
-        >
-          <div className="w-12 h-12 rounded-2xl overflow-hidden">
-            <Image src="/logo.png" alt="Griggs Capital Partners" width={48} height={48} style={{ width: 48, height: 48 }} />
-          </div>
-          <div>
-            <div className="text-xs font-bold text-[#F7941D] tracking-[0.3em] uppercase">Griggs Capital Partners</div>
-            <div className="text-2xl font-black text-[#F0F0F0] tracking-tight">Griggs Hub</div>
-          </div>
-        </motion.div>
-
-        <div className="space-y-12">
+      <div className="relative z-10 flex min-h-screen items-center justify-center lg:grid lg:min-h-screen lg:grid-cols-[1.1fr_0.9fr]">
+        <section className="hidden overflow-hidden px-10 pb-10 pt-10 lg:flex lg:flex-col lg:justify-between lg:px-14">
           <motion.div
-            initial={{ opacity: 0, y: 30 }}
+            initial={{ opacity: 0, y: 16 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.7, delay: 0.2 }}
+            transition={{ duration: 0.6 }}
+            className="flex items-center gap-4"
           >
-            <h2 className="text-5xl font-black text-[#F0F0F0] leading-tight mb-4">
-              Your team&apos;s
-              <br />
-              <span className="text-gradient-ssf">command center.</span>
-            </h2>
-            <p className="text-lg text-[#9A9A9A] leading-relaxed max-w-md">
-              A central hub for planning, coordination, and staying aligned across the work that moves your team forward.
-            </p>
+            <div className="rounded-[22px] border border-white/10 bg-white/[0.04] p-2 shadow-[0_18px_40px_rgba(0,0,0,0.2)]">
+              <Image src="/logo.png" alt="Griggs Capital Partners" width={52} height={52} priority />
+            </div>
+            <div>
+              <div className="text-[11px] font-extrabold uppercase tracking-[0.38em] text-[#D7A24B]">Griggs Capital Partners</div>
+              <div className="text-3xl font-black leading-none tracking-tight text-[#F7F3EB]">Griggs Hub</div>
+            </div>
           </motion.div>
 
-          <div className="grid grid-cols-2 gap-4">
-            {FEATURES.map((feature, i) => (
-              <motion.div
-                key={feature.label}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: 0.4 + i * 0.1, duration: 0.5 }}
-                className="p-4 bg-[#1A1A1A] border border-[rgba(255,255,255,0.06)] rounded-xl"
-              >
-                <feature.icon size={20} className="text-[#F7941D] mb-2" />
-                <div className="text-sm font-semibold text-[#F0F0F0]">{feature.label}</div>
-                <div className="text-xs text-[#606060] mt-0.5">{feature.desc}</div>
-              </motion.div>
-            ))}
+          <div className="py-6 lg:py-8">
+            <motion.div
+              initial={{ opacity: 0, y: 24 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.65, delay: 0.15 }}
+              className="max-w-2xl"
+            >
+              <div className="mb-5 inline-flex items-center rounded-full border border-[#DCA24C]/25 bg-[#DCA24C]/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.28em] text-[#E3B261]">
+                Built for disciplined partnership
+              </div>
+              <h2 className="max-w-3xl text-5xl font-black leading-[0.92] tracking-tight text-[#F7F3EB] sm:text-6xl xl:text-[68px]">
+                Built for
+                <br />
+                focused execution.
+              </h2>
+
+            </motion.div>
+
+            <motion.div
+              initial={{ opacity: 0, y: 24 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.65, delay: 0.28 }}
+              className="mt-8 grid gap-4 md:grid-cols-3"
+            >
+              {PILLARS.map((pillar) => (
+                <div
+                  key={pillar.label}
+                  className="group rounded-[24px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.02))] p-5 shadow-[0_24px_60px_rgba(0,0,0,0.18)] backdrop-blur-sm transition duration-300 hover:-translate-y-1 hover:border-[#DCA24C]/25"
+                >
+                  <pillar.icon className="mb-4 text-[#D7A24B]" size={22} />
+                  <div className="text-sm font-semibold uppercase tracking-[0.16em] text-[#F7F3EB]">{pillar.label}</div>
+                  <p className="mt-3 text-sm leading-6 text-[#AA9F91]">{pillar.desc}</p>
+                </div>
+              ))}
+            </motion.div>
           </div>
-        </div>
 
-        <motion.p
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.8 }}
-          className="text-xs text-[#404040]"
-        >
-          © {new Date().getFullYear()} Griggs Capital Partners. Griggs Hub.
-        </motion.p>
-      </div>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.6 }}
+            className="flex flex-col gap-2 border-t border-white/8 pt-5 text-xs text-[#8D8478] sm:flex-row sm:items-center sm:justify-between"
+          >
+            <span>Private access for Griggs Capital Partners and invited collaborators.</span>
+            <span className="hidden sm:inline">Real estate, energy, and public markets.</span>
+          </motion.div>
+        </section>
 
-      {/* Divider */}
-      <div className="hidden lg:block w-px bg-gradient-to-b from-transparent via-[rgba(255,255,255,0.06)] to-transparent my-16" />
-
-      {/* Right — Login */}
-      <div className="flex-1 flex items-center justify-center p-8">
-        <Suspense fallback={null}>
-          <LoginForm />
-        </Suspense>
+        <section className="flex min-h-screen w-full items-center justify-center px-4 py-6 sm:px-6 lg:min-h-0 lg:px-10 lg:py-8 xl:px-12">
+          <Suspense fallback={null}>
+            <LoginForm />
+          </Suspense>
+        </section>
       </div>
     </div>
   );

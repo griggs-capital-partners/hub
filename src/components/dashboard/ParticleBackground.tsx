@@ -10,53 +10,33 @@ export function ParticleBackground() {
     if (!layer) return;
 
     const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
-    let pointerX = 0;
-    let pointerY = 0;
-    let currentX = 0;
+    let targetY = 0;
     let currentY = 0;
     let animationFrame = 0;
 
     const animate = () => {
-      currentX += (pointerX - currentX) * 0.08;
-      currentY += (pointerY - currentY) * 0.08;
+      currentY += (targetY - currentY) * 0.1;
 
-      layer.style.transform = `translate3d(${currentX}px, ${currentY}px, 0) scale(1.08)`;
+      layer.style.transform = `translate3d(0, ${currentY}px, 0) scale(1.08)`;
       animationFrame = window.requestAnimationFrame(animate);
     };
 
-    const handlePointerMove = (event: MouseEvent) => {
-      if (mediaQuery.matches) return;
+    const updateScrollParallax = () => {
+      if (mediaQuery.matches) {
+        targetY = 0;
+        return;
+      }
 
-      const x = (event.clientX / window.innerWidth - 0.5) * 18;
-      const y = (event.clientY / window.innerHeight - 0.5) * 12;
-      pointerX = x;
-      pointerY = y;
+      targetY = Math.max(-80, Math.min(80, window.scrollY * -0.18));
     };
 
-    const handleDeviceTilt = (event: DeviceOrientationEvent) => {
-      if (mediaQuery.matches) return;
-
-      const gamma = Math.max(-10, Math.min(10, event.gamma ?? 0));
-      const beta = Math.max(-10, Math.min(10, event.beta ?? 0));
-      pointerX = gamma * 0.8;
-      pointerY = beta * 0.45;
-    };
-
-    const resetMotion = () => {
-      pointerX = 0;
-      pointerY = 0;
-    };
-
+    updateScrollParallax();
     animationFrame = window.requestAnimationFrame(animate);
-    window.addEventListener("mousemove", handlePointerMove);
-    window.addEventListener("deviceorientation", handleDeviceTilt);
-    window.addEventListener("mouseleave", resetMotion);
+    window.addEventListener("scroll", updateScrollParallax, { passive: true });
 
     return () => {
       window.cancelAnimationFrame(animationFrame);
-      window.removeEventListener("mousemove", handlePointerMove);
-      window.removeEventListener("deviceorientation", handleDeviceTilt);
-      window.removeEventListener("mouseleave", resetMotion);
+      window.removeEventListener("scroll", updateScrollParallax);
     };
   }, []);
 

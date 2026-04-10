@@ -24,7 +24,6 @@ import {
   Radio,
   Globe,
   ChevronDown,
-  CalendarDays,
   User,
   Menu,
   Bot,
@@ -32,7 +31,6 @@ import {
 import { cn } from "@/lib/utils";
 import { Avatar } from "@/components/ui/Avatar";
 import { useMobileNav } from "@/components/layout/MobileNav";
-import { TeamJamWidget } from "@/components/jam/TeamJamWidget";
 
 // ─── Nav items ────────────────────────────────────────────────────────────────
 
@@ -435,13 +433,8 @@ function DesktopSidebar() {
 
 
       <div className="flex-shrink-0 border-t border-[rgba(255,255,255,0.06)]">
-
-        {/* Jam + Bell — only when expanded */}
         {!collapsed && (
-          <div className="px-3 py-2.5 flex items-center gap-2 border-b border-[rgba(255,255,255,0.04)]">
-            <div className="flex-1 min-w-0">
-              <TeamJamWidget />
-            </div>
+          <div className="px-3 py-2.5 flex justify-end border-b border-[rgba(255,255,255,0.04)]">
             <button className="relative p-1.5 text-[#9A9A9A] hover:text-[#F0F0F0] hover:bg-[rgba(255,255,255,0.05)] rounded-lg transition-all flex-shrink-0">
               <Bell size={16} />
               {hasNotifications && (
@@ -450,8 +443,6 @@ function DesktopSidebar() {
             </button>
           </div>
         )}
-
-
 
         {/* User profile */}
         {user && (
@@ -622,11 +613,7 @@ function MobileDrawer() {
             </nav>
 
             <div className="flex-shrink-0 border-t border-[rgba(255,255,255,0.06)]">
-              {/* Jam + Bell */}
-              <div className="px-3 py-2.5 flex items-center gap-2 border-b border-[rgba(255,255,255,0.04)]">
-                <div className="flex-1 min-w-0">
-                  <TeamJamWidget />
-                </div>
+              <div className="px-3 py-2.5 flex justify-end border-b border-[rgba(255,255,255,0.04)]">
                 <button className="relative p-1.5 text-[#9A9A9A] hover:text-[#F0F0F0] hover:bg-[rgba(255,255,255,0.05)] rounded-lg transition-all flex-shrink-0">
                   <Bell size={16} />
                   {hasNotifications && (
