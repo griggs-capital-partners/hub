@@ -1,0 +1,715 @@
+// SmartHub for Griggs Capital Partners
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  // For Neon serverless: use connection pooling URL for queries,
+  // direct URL for migrations
+  directUrl = env("DIRECT_URL")
+}
+
+// ─── Users (synced from Neon Auth on first sign-in) ──────────────────────────
+// Neon Auth stores authentication state in the neon_auth schema.
+// This table mirrors user identity for FK relations in app data tables.
+// The `id` matches the Neon Auth user ID (UUID).
+
+model User {
+  id          String   @id
+  name        String?
+  displayName String?  // user-set display name
+  email       String   @unique
+  image       String?  // avatar URL or base64 data URL
+  role        String   @default("member") // "admin" | "member"
+  lastSeen    DateTime? // updated via presence heartbeat for online status
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  connectedAccounts ConnectedAccount[]
+  customerDocs      CustomerDocument[]
+  customerNotes     CustomerNote[]
+  issueNotes        IssueNote[]
+  hostedJams        JamSession[]    @relation("JamHost")
+  jamListeners      JamListener[]   @relation("JamListeners")
+  sprintTasks       SprintTask[]    @relation("SprintTaskAssignee")
+  sprintComments    SprintComment[] @relation("SprintCommentAuthor")
+  createdAgents     AIAgent[]       @relation("AgentCreatedBy")
+  agentMessages     AgentMessage[]  @relation("UserAgentMessages")
+  calendarEvents    CalendarEvent[] @relation("CalendarEventCreator")
+  createdConversations Conversation[]      @relation("ConversationCreatedBy")
+  conversationMembers ConversationMember[] @relation("ConversationUserMembers")
+  chatMessages       ChatMessage[]         @relation("ChatMessageSenderUser")
+  triggeredExecutions AgentTaskExecution[] @relation("ExecutionTriggeredBy")
+  notificationSettings UserNotificationSettings?
+  pushSubscriptions    PushSubscription[]
+
+  @@map("users")
+}
+
+model UserNotificationSettings {
+  userId                String   @id
+  taskAssignedPush      Boolean  @default(true)
+  agentExecutionPush    Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_notification_settings")
+}
+
+model PushSubscription {
+  id          String    @id @default(cuid())
+  userId      String
+  endpoint    String    @unique
+  p256dh      String
+  auth        String
+  userAgent   String?
+  deviceLabel String?
+  lastSeenAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("push_subscriptions")
+}
+
+model HubSettings {
+  id                        String   @id @default("default")
+  weatherLocationMode       String   @default("hub")
+  locationName              String?
+  latitude                  Float?
+  longitude                 Float?
+  timezone                  String?
+  spotifyClientId           String?
+  spotifyClientSecret       String?
+  smtpHost                  String?
+  smtpPort                  Int?
+  smtpUser                  String?
+  smtpPass                  String?
+  smtpFrom                  String?
+  agentExecutionEmailEnabled Boolean @default(true)
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  @@map("hub_settings")
+}
+
+// Stores third-party OAuth tokens per user.
+// Separate from Neon Auth which manages sign-in credentials.
+model ConnectedAccount {
+  id                String  @id @default(cuid())
+  userId            String
+  provider          String
+  providerAccountId String
+  access_token      String?
+  refresh_token     String?
+  expires_at        Int?
+  scope             String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("connected_accounts")
+}
+
+// ─── Team Invites ────────────────────────────────────────────────────────────
+// Pre-authorized emails. Sign-up is blocked unless the email exists here.
+
+model TeamInvite {
+  id        String    @id @default(cuid())
+  email     String    @unique
+  createdBy String    // user id of the admin who added them
+  createdAt DateTime  @default(now())
+  usedAt    DateTime? // set when the user completes sign-up
+
+  @@map("team_invites")
+}
+
+// ─── Repos (synced from GitHub) ──────────────────────────────────────────────
+
+model Repo {
+  id           String   @id @default(cuid())
+  githubId     Int      @unique
+  name         String
+  fullName     String
+  description  String?
+  url          String
+  language     String?
+  isPrivate    Boolean  @default(false)
+  starCount    Int      @default(0)
+  openIssues   Int      @default(0)
+  connected       Boolean  @default(true)  // whether this repo is active in the workspace
+  pushedAt        DateTime? // last time someone pushed to GitHub
+  lastSyncedAt    DateTime @default(now())
+  roadmapOrder    Int      @default(0)     // order in the roadmap view
+  showInRoadmap   Boolean  @default(true)  // whether this repo appears on the roadmap
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  boards       KanbanBoard[]
+  awsLinks     RepoAwsLink[]
+  customPages  CustomPage[]
+  roadmapCards RoadmapCard[]
+  linkedCards  KanbanCardRepo[]
+
+  @@map("repos")
+}
+
+// ─── Roadmap ──────────────────────────────────────────────────────────────────
+// One card per repo per quarter — tracks milestones, releases, and concepts.
+
+model RoadmapCard {
+  id          String   @id @default(cuid())
+  repoId      String
+  repo        Repo     @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  quarter     Int      // 1–4
+  year        Int
+  title       String
+  description String?
+  status      String   @default("planning") // "por" | "planning" | "concept"
+  uid         String?  // optional label/identifier shown on card
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([repoId, quarter, year])
+  @@map("roadmap_cards")
+}
+
+// ─── Kanban ──────────────────────────────────────────────────────────────────
+
+model KanbanBoard {
+  id      String   @id @default(cuid())
+  repoId  String?  // null = General board (not tied to any repo)
+  name    String   @default("Main Board")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  repo    Repo?        @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  columns KanbanColumn[]
+
+  @@map("kanban_boards")
+}
+
+model KanbanColumn {
+  id       String @id @default(cuid())
+  boardId  String
+  name     String
+  color    String @default("#333333")
+  position Int    @default(0)
+
+  board KanbanBoard  @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  cards KanbanCard[]
+
+  @@map("kanban_columns")
+}
+
+model TaskGroup {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  status      String   @default("backlog") // "backlog" | "in-progress" | "in-qa" | "done" | "blocked"
+  color       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  cards KanbanCard[]
+
+  @@map("task_groups")
+}
+
+model KanbanCard {
+  id             String   @id @default(cuid())
+  columnId       String
+  githubIssueId  Int?
+  githubIssueUrl String?
+  title          String
+  body           String?
+  subtasks       String   @default("[]")
+  labels         String   @default("[]")
+  assignees      String   @default("[]")
+  priority       String   @default("medium")
+  state          String   @default("normal")
+  position       Int      @default(0)
+  taskGroupId    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  column          KanbanColumn         @relation(fields: [columnId], references: [id], onDelete: Cascade)
+  taskGroup       TaskGroup?           @relation(fields: [taskGroupId], references: [id], onDelete: SetNull)
+  customers       Customer[]
+  notes           IssueNote[]
+  sprintTask      SprintTask?
+  linkedRepos     KanbanCardRepo[]
+  agentExecutions AgentTaskExecution[]
+
+  @@map("kanban_cards")
+}
+
+model KanbanCardRepo {
+  cardId String
+  repoId String
+
+  card KanbanCard @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  repo Repo       @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  @@id([cardId, repoId])
+  @@map("kanban_card_repos")
+}
+
+model IssueNote {
+  id        String   @id @default(cuid())
+  cardId    String
+  authorId  String
+  body      String
+  image     String?
+  createdAt DateTime @default(now())
+
+  card   KanbanCard @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  author User       @relation(fields: [authorId], references: [id])
+
+  @@map("issue_notes")
+}
+
+// ─── Customers (company/account level) ───────────────────────────────────────
+
+model Customer {
+  id             String   @id @default(cuid())
+  name           String                        // Company name (e.g. "Hanor", "Oracle")
+  logoUrl        String?                       // base64 data URL or https URL
+  website        String?
+  productionUrls String   @default("[]")       // JSON array of { label, url }
+  status         String   @default("active")   // "active" | "at-risk" | "inactive"
+  healthScore    Int      @default(3)           // 1–5 happiness/health level
+  tier           String   @default("standard") // "enterprise" | "standard" | "startup"
+  priority       String   @default("medium")   // "critical" | "high" | "medium" | "low"
+  industry       String?
+  notes          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  contacts         CustomerContact[]
+  documents        CustomerDocument[]
+  kanbanCards      KanbanCard[]
+  noteItems        CustomerNote[]
+  weeklyNoteEntries WeeklyNoteEntry[]
+
+  @@map("customers")
+}
+
+// People within a customer org
+model CustomerContact {
+  id         String   @id @default(cuid())
+  customerId String
+  name       String
+  email      String?
+  phone      String?
+  title      String?
+  isPrimary  Boolean  @default(false)
+  notes      String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@map("customer_contacts")
+}
+
+// Notes, history, feature requests at the company level
+model CustomerNote {
+  id         String   @id @default(cuid())
+  customerId String
+  authorId   String
+  // "general" | "feature-request" | "issue" | "meeting"
+  type       String   @default("general")
+  body       String
+  createdAt  DateTime @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  author   User     @relation(fields: [authorId], references: [id])
+
+  @@map("customer_notes")
+}
+
+model CustomerDocument {
+  id          String   @id @default(cuid())
+  customerId  String?
+  uploadedBy  String
+  filename    String
+  fileType    String
+  fileSize    Int
+  storagePath String
+  summary     String?
+  tags        String   @default("[]")
+  createdAt   DateTime @default(now())
+
+  customer Customer? @relation(fields: [customerId], references: [id])
+  uploader User      @relation(fields: [uploadedBy], references: [id])
+
+  @@map("customer_documents")
+}
+
+// ─── Team Jam (Spotify Jam sessions) ────────────────────────────────────────
+
+model JamSession {
+  id            String    @id @default(cuid())
+  hostId        String
+  jamLink       String    // Spotify Jam join link pasted by host
+  note          String?   // Optional note e.g. "Lo-fi playlist"
+  isActive      Boolean   @default(true)
+  startedAt     DateTime  @default(now())
+  endedAt       DateTime?
+  lastPlayingAt DateTime? // Updated whenever Spotify confirms something is playing
+
+  host      User          @relation("JamHost", fields: [hostId], references: [id])
+  listeners JamListener[]
+
+  @@map("jam_sessions")
+}
+
+model JamListener {
+  id        String   @id @default(cuid())
+  sessionId String
+  userId    String
+  joinedAt  DateTime @default(now())
+
+  session JamSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user    User       @relation("JamListeners", fields: [userId], references: [id])
+
+  @@unique([sessionId, userId])
+  @@map("jam_listeners")
+}
+
+// ─── Dev Sprints ─────────────────────────────────────────────────────────────
+
+model Sprint {
+  id        String   @id @default(cuid())
+  name      String                          // e.g. "Sprint 12 – Auth & Payments"
+  goal      String?                         // Sprint goal statement
+  status    String   @default("planning")   // "planning" | "active" | "completed"
+  startDate DateTime
+  endDate   DateTime
+  velocity  Int?                            // planned story points total
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tasks    SprintTask[]
+  comments SprintComment[]
+
+  @@map("sprints")
+}
+
+model SprintTask {
+  id              String   @id @default(cuid())
+  sprintId        String
+  assigneeId      String?
+  agentAssigneeId String?  // AI agent assignee (mutually exclusive with assigneeId in practice)
+  kanbanCardId    String?  @unique // links to a KanbanCard; unique = one card per sprint at a time
+  title           String
+  description     String?
+  status          String   @default("todo")   // "todo" | "in-progress" | "done" | "blocked"
+  priority        String   @default("medium") // "critical" | "high" | "medium" | "low"
+  storyPoints     Int?
+  githubIssueUrl  String?
+  position        Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  sprint         Sprint      @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  assignee       User?       @relation("SprintTaskAssignee", fields: [assigneeId], references: [id])
+  agentAssignee  AIAgent?    @relation("SprintTaskAgentAssignee", fields: [agentAssigneeId], references: [id])
+  kanbanCard     KanbanCard? @relation(fields: [kanbanCardId], references: [id], onDelete: SetNull)
+
+  @@map("sprint_tasks")
+}
+
+model SprintComment {
+  id        String   @id @default(cuid())
+  sprintId  String
+  authorId  String
+  body      String
+  type      String   @default("comment") // "comment" | "blocker" | "decision"
+  createdAt DateTime @default(now())
+
+  sprint Sprint @relation(fields: [sprintId], references: [id], onDelete: Cascade)
+  author User   @relation("SprintCommentAuthor", fields: [authorId], references: [id])
+
+  @@map("sprint_comments")
+}
+
+// ─── Weekly Notes ─────────────────────────────────────────────────────────────
+
+model WeeklyNote {
+  id        String   @id @default(cuid())
+  weekStart DateTime @unique // Always Monday 00:00:00 UTC of the week
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  entries WeeklyNoteEntry[]
+
+  @@map("weekly_notes")
+}
+
+// One entry per customer per week — items stored as flat JSON array
+model WeeklyNoteEntry {
+  id           String     @id @default(cuid())
+  weeklyNoteId String
+  weeklyNote   WeeklyNote @relation(fields: [weeklyNoteId], references: [id], onDelete: Cascade)
+  customerId   String?
+  customer     Customer?  @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  customerName String     // denormalized for display even if customer is deleted
+  order        Int        @default(0)
+  items        String     @default("[]") // JSON: { id, content, isChecked, indent }[]
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@map("weekly_note_entries")
+}
+
+// ─── Knowledge Base ──────────────────────────────────────────────────────────
+// Stores the single connected Obsidian/knowledge repo for the workspace.
+
+model KnowledgeRepo {
+  id          String   @id @default(cuid())
+  repoOwner   String
+  repoName    String
+  branch      String   @default("main")
+  description String?
+  connectedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([repoOwner, repoName])
+  @@map("knowledge_repos")
+}
+
+// ─── AWS Repo Links ──────────────────────────────────────────────────────────
+// Links a workspace Repo to a deployed AWS resource (EC2, Amplify, etc.)
+
+model RepoAwsLink {
+  id         String   @id @default(cuid())
+  repoId     String
+  service    String   // "ec2" | "amplify" | "cloudwatch" | "route53" | "s3" | "rds" | "lambda" | "other"
+  resourceId String   // EC2 instance ID, Amplify app ID, ARN, log group name, etc.
+  label      String   // User-defined label e.g. "Production EC2", "SSF Amplify App"
+  region     String?  // AWS region override (falls back to account region)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  repo Repo @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  @@map("repo_aws_links")
+}
+
+// ─── Custom Pages ────────────────────────────────────────────────────────────
+// Sidebar-registered pages — each slug maps to a baked-in Next.js route.
+
+model CustomPage {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique  // matches /(hub)/pages/[slug]
+  description String?
+  icon        String   @default("Globe")  // Lucide icon name
+  repoId      String?
+  order       Int      @default(0)
+  isEnabled   Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  repo Repo? @relation(fields: [repoId], references: [id], onDelete: SetNull)
+
+  @@map("custom_pages")
+}
+
+// ─── MQTT Portal Config ───────────────────────────────────────────────────────
+// Stores connection config for the MQTT Security Portal (no .env needed).
+// Credentials are stored in DB; this is an internal admin tool.
+
+model MqttPortalConfig {
+  id        String   @id @default(cuid())
+  mqttUrl   String   @default("")        // e.g. mqtts://broker.local:8883
+  mqttUser  String   @default("")
+  mqttPass  String   @default("")
+  databases String   @default("[]")     // JSON: [{name,label,host,dbName,user,pass}]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("mqtt_portal_config")
+}
+
+// ─── AI Agents ───────────────────────────────────────────────────────────────
+// Artificial team members — assigned tasks, chatted with, configured by admins.
+
+model AIAgent {
+  id          String   @id @default(cuid())
+  name        String
+  role        String                          // e.g. "Backend Engineer", "DevOps Specialist"
+  description String?                         // short tagline shown on card
+  persona     String   @default("")           // full persona text (future LLM system prompt)
+  duties      String   @default("[]")         // JSON: string[] of duty descriptions
+  avatar      String?                         // emoji or image URL
+  status      String   @default("active")     // "active" | "inactive"
+  llmEndpointUrl  String?
+  llmUsername     String?
+  llmPassword     String?
+  llmModel        String?
+  llmThinkingMode String   @default("auto") // "off" | "auto" | "always"
+  disabledTools   String   @default("[]")  // JSON string[]: tool names disabled for this agent
+  abilities       String   @default("[]")  // JSON string[]: allowed agent execution ability ids
+  llmStatus       String   @default("disconnected") // "disconnected" | "online" | "offline"
+  llmLastCheckedAt DateTime?
+  llmLastError     String?
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdBy   User           @relation("AgentCreatedBy", fields: [createdById], references: [id])
+  messages    AgentMessage[]
+  sprintTasks SprintTask[]   @relation("SprintTaskAgentAssignee")
+  conversationMembers ConversationMember[] @relation("ConversationAgentMembers")
+  chatMessages       ChatMessage[]         @relation("ChatMessageSenderAgent")
+  taskExecutions     AgentTaskExecution[]  @relation("AgentTaskExecutions")
+
+  @@map("ai_agents")
+}
+
+// DM-style chat thread between a human user and an AI agent.
+model AgentMessage {
+  id        String   @id @default(cuid())
+  agentId   String
+  userId    String
+  body      String
+  sender    String   // "user" | "agent"
+  createdAt DateTime @default(now())
+
+  agent AIAgent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  user  User    @relation("UserAgentMessages", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, userId, createdAt])
+  @@map("agent_messages")
+}
+
+model Conversation {
+  id          String   @id @default(cuid())
+  type        String   @default("direct") // "direct" | "group"
+  name        String?
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdBy User?                @relation("ConversationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  members   ConversationMember[]
+  messages  ChatMessage[]
+
+  @@index([type, updatedAt])
+  @@map("conversations")
+}
+
+model ConversationMember {
+  id             String   @id @default(cuid())
+  conversationId String
+  userId         String?
+  agentId        String?
+  joinedAt       DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User?        @relation("ConversationUserMembers", fields: [userId], references: [id], onDelete: Cascade)
+  agent        AIAgent?     @relation("ConversationAgentMembers", fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, joinedAt])
+  @@index([userId])
+  @@index([agentId])
+  @@unique([conversationId, userId])
+  @@unique([conversationId, agentId])
+  @@map("conversation_members")
+}
+
+model ChatMessage {
+  id             String   @id @default(cuid())
+  conversationId String
+  senderUserId   String?
+  senderAgentId  String?
+  body           String
+  toolContext    String?  // JSON: tool call/result messages from this turn, re-injected as history
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderUser   User?        @relation("ChatMessageSenderUser", fields: [senderUserId], references: [id], onDelete: Cascade)
+  senderAgent  AIAgent?     @relation("ChatMessageSenderAgent", fields: [senderAgentId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@index([senderUserId, createdAt])
+  @@index([senderAgentId, createdAt])
+  @@map("chat_messages")
+}
+
+// ─── Calendar Events ─────────────────────────────────────────────────────────
+
+model CalendarEvent {
+  id          String    @id @default(cuid())
+  title       String
+  description String?
+  type        String    @default("event") // "customer-meeting" | "team-meeting" | "milestone" | "task" | "event"
+  startDate   DateTime
+  endDate     DateTime?
+  allDay      Boolean   @default(false)
+  location    String?
+  isRecurring Boolean   @default(false)
+  recurrence  String?   // JSON: { freq, until? }
+  createdById String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  createdBy User? @relation("CalendarEventCreator", fields: [createdById], references: [id])
+
+  @@map("calendar_events")
+}
+
+// ─── Agent Task Executions ───────────────────────────────────────────────────
+// Records each time an AI agent is assigned a real task with gathered context.
+
+model AgentTaskExecution {
+  id            String   @id @default(cuid())
+  kanbanCardId  String
+  agentId       String
+  // generate_docs | write_tests | code_review | break_down | estimate_points
+  // draft_pr | identify_risks | customer_update | suggest_implementation | qa_checklist
+  actionType    String
+  status        String   @default("in-process") // "in-process" | "needs-input" | "completed" | "failed"
+  contextJson   String?  // assembled task context snapshot (JSON)
+  prompt        String?  // final prompt sent to LLM
+  response      String?  // LLM response text
+  errorMessage  String?
+  modelUsed     String?
+  notes         String?  // user's freeform additions before execution
+  triggeredById String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  kanbanCard  KanbanCard @relation(fields: [kanbanCardId], references: [id], onDelete: Cascade)
+  agent       AIAgent    @relation("AgentTaskExecutions", fields: [agentId], references: [id], onDelete: Cascade)
+  triggeredBy User?      @relation("ExecutionTriggeredBy", fields: [triggeredById], references: [id])
+
+  @@index([kanbanCardId])
+  @@index([agentId])
+  @@index([status, createdAt])
+  @@map("agent_task_executions")
+}
+
+// ─── Activity ────────────────────────────────────────────────────────────────
+
+model ActivityEvent {
+  id         String   @id @default(cuid())
+  type       String
+  payload    String
+  actorName  String?
+  actorImage String?
+  createdAt  DateTime @default(now())
+
+  @@map("activity_events")
+}
