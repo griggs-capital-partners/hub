@@ -271,42 +271,59 @@ function condenseActivity(events: ActivityEvent[]): ActivityEvent[] {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-const HERO_IMAGES = ["/AgentsHome.png", "/AgentsHome2.png"];
+const HERO_IMAGES = [
+  "/Otis/Otis%20and%20Alex.png",
+  "/Otis/Otis%20and%20Trump.png",
+  "/Otis/Otis%20at%20the%20Bar.png",
+  "/Otis/otis%20in%20the%20field.png",
+];
 const IMAGE_STYLE = {
-  filter: "drop-shadow(0 18px 40px rgba(0,0,0,0.42))",
-  WebkitMaskImage: "radial-gradient(circle at 50% 50%, black 50%, transparent 82%)",
-  maskImage: "radial-gradient(circle at 50% 50%, black 50%, transparent 82%)",
+  filter: "drop-shadow(0 20px 44px rgba(0,0,0,0.34))",
+  WebkitMaskImage:
+    "radial-gradient(ellipse at 60% 50%, black 38%, rgba(0,0,0,0.94) 54%, rgba(0,0,0,0.68) 66%, transparent 84%), linear-gradient(to right, transparent 0%, rgba(0,0,0,0.72) 16%, black 28%, black 86%, transparent 100%)",
+  maskImage:
+    "radial-gradient(ellipse at 60% 50%, black 38%, rgba(0,0,0,0.94) 54%, rgba(0,0,0,0.68) 66%, transparent 84%), linear-gradient(to right, transparent 0%, rgba(0,0,0,0.72) 16%, black 28%, black 86%, transparent 100%)",
+  WebkitMaskComposite: "source-in",
+  maskComposite: "intersect",
 };
 
 function AgentsHeroImage() {
   const [idx, setIdx] = useState(0);
-  const [visible, setVisible] = useState(true);
 
   useEffect(() => {
     const interval = setInterval(() => {
-      setVisible(false);
-      setTimeout(() => {
-        setIdx((i) => (i + 1) % HERO_IMAGES.length);
-        setVisible(true);
-      }, 800);
+      setIdx((i) => (i + 1) % HERO_IMAGES.length);
     }, 7000);
     return () => clearInterval(interval);
   }, []);
 
+  const previousIdx = idx === 0 ? HERO_IMAGES.length - 1 : idx - 1;
+
   return (
-    <Image
-      src={HERO_IMAGES[idx]}
-      alt="Agents dashboard artwork"
-      fill
-      priority
-      sizes="(max-width: 640px) 160px, (max-width: 1024px) 220px, 260px"
-      className="object-contain object-center"
-      style={{
-        ...IMAGE_STYLE,
-        opacity: visible ? 0.95 : 0,
-        transition: "opacity 600ms ease-in-out",
-      }}
-    />
+    <div className="relative h-full w-full">
+      {HERO_IMAGES.map((src, imageIdx) => {
+        const isActive = imageIdx === idx;
+        const isPrevious = imageIdx === previousIdx;
+
+        return (
+            <Image
+            key={src}
+            src={src}
+            alt="Otis artwork for the agent activity panel"
+            fill
+            priority={imageIdx === 0}
+            sizes="(max-width: 640px) 230px, (max-width: 1024px) 300px, 360px"
+            className="object-contain object-center"
+            style={{
+              ...IMAGE_STYLE,
+              opacity: isActive ? 0.96 : isPrevious ? 0 : 0,
+              transform: isActive ? "scale(0.96)" : "scale(0.93)",
+              transition: "opacity 900ms ease-in-out, transform 900ms ease-in-out",
+            }}
+          />
+        );
+      })}
+    </div>
   );
 }
 
@@ -677,15 +694,17 @@ export function DashboardClient({ user, activity, stats, cardData, recentExecuti
               ) : (
                 <div className="relative p-4 sm:p-5">
                   <div className="grid gap-4 sm:gap-5">
-                    <div className="relative overflow-hidden rounded-[24px] border border-[rgba(255,255,255,0.08)] bg-[linear-gradient(135deg,rgba(255,255,255,0.06),rgba(255,255,255,0.02)_45%,rgba(17,24,39,0.12))] px-4 py-4 sm:px-5">
-                      <div className="absolute inset-y-0 right-0 w-[44%] sm:w-[54%] min-w-[140px] pointer-events-none">
-                        <div className="absolute inset-y-0 right-0 w-full rounded-full bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.16),transparent_64%)] blur-2xl" />
-                        <div className="absolute top-1/2 right-0 h-[160px] w-[160px] sm:h-[220px] sm:w-[220px] lg:h-[260px] lg:w-[260px] -translate-y-1/2">
+                    <div className="relative overflow-hidden rounded-[24px] bg-[linear-gradient(135deg,rgba(255,255,255,0.05),rgba(255,255,255,0.015)_45%,rgba(17,24,39,0.08))] px-5 py-5 sm:px-6">
+                      <div className="absolute inset-y-0 right-0 w-[52%] sm:w-[58%] min-w-[220px] pointer-events-none">
+                        <div className="absolute inset-y-6 right-4 left-8 rounded-[36px] bg-[radial-gradient(circle_at_62%_42%,rgba(255,255,255,0.12),rgba(99,102,241,0.08)_28%,rgba(15,16,20,0)_68%)] blur-2xl" />
+                        <div className="absolute inset-y-0 left-0 w-24 bg-[linear-gradient(to_right,rgba(15,16,20,1),rgba(15,16,20,0))]" />
+                        <div className="absolute inset-y-3 right-3 w-[84%] rounded-[34px] bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(255,255,255,0.012)_44%,rgba(255,255,255,0)_100%)]" />
+                        <div className="absolute top-1/2 right-[2%] h-[230px] w-[230px] sm:h-[290px] sm:w-[290px] lg:h-[340px] lg:w-[340px] -translate-y-1/2">
                           <AgentsHeroImage />
                         </div>
                       </div>
 
-                      <div className="relative z-10 max-w-[58%] min-w-0 sm:max-w-[56%]">
+                      <div className="relative z-10 max-w-[50%] min-w-0 sm:max-w-[44%]">
                         <div className="inline-flex items-center gap-2 rounded-full border border-purple-400/20 bg-purple-400/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-purple-200">
                           <span className="h-1.5 w-1.5 rounded-full bg-purple-300" />
                           Execution Feed
