@@ -12,6 +12,8 @@ import {
 } from "lucide-react";
 import { agentChatTools, TOOL_LABELS } from "@/lib/agent-tools";
 import { getDefaultAgentAbilities, normalizeAgentAbilities, slugifyAbilityId, type AgentAbility } from "@/lib/agent-task-context";
+import { AgentConstitutionEditor } from "@/components/agents/AgentConstitutionEditor";
+import { hasStoredAgentConstitution } from "@/lib/agent-constitution";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/utils";
@@ -23,6 +25,7 @@ interface Agent {
   name: string;
   role: string;
   description: string | null;
+  constitution: string;
   persona: string;
   duties: string;
   avatar: string | null;
@@ -49,6 +52,8 @@ const AGENT_COLOR = "#4B9CD3";
 const AGENT_COLOR_DIM = "rgba(75,156,211,0.15)";
 
 const ROLE_SUGGESTIONS = [
+  "Executive Assistant", "Admin Assistant", "Technical SME", "Diligence Analyst",
+  "Investor Relations", "File Librarian",
   "Backend Engineer", "Frontend Engineer", "Full Stack Engineer", "DevOps Engineer",
   "QA Engineer", "Data Engineer", "Security Engineer", "Mobile Engineer",
   "Product Manager", "Technical Writer", "Code Reviewer", "Deployment Manager",
@@ -934,7 +939,7 @@ function FireAgentModal({
         </div>
 
         <p className="text-sm text-[#9A9A9A] mb-5 leading-relaxed">
-          Firing this agent will permanently delete their profile, persona, duties, and all chat history. Any sprint tasks assigned to them will become unassigned.
+          Firing this agent will permanently delete their profile, constitution, persona, duties, and all chat history. Any sprint tasks assigned to them will become unassigned.
         </p>
 
         <div className="mb-5">
@@ -1031,6 +1036,7 @@ export default function AgentProfilePage() {
 
   const createdByName = agent.createdBy.displayName || agent.createdBy.name || "Unknown";
   const createdDate = new Date(agent.createdAt).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  const hasStructuredConstitution = hasStoredAgentConstitution(agent.constitution);
 
   const tabs = [
     { id: "profile" as const, label: "Profile", icon: Pencil },
@@ -1189,18 +1195,33 @@ export default function AgentProfilePage() {
                 <CardHeader className="border-b border-[rgba(255,255,255,0.06)] px-6 py-4">
                   <div className="flex items-center gap-2">
                     <Sparkles size={15} style={{ color: AGENT_COLOR }} />
-                    <span className="text-sm font-bold text-[#F0F0F0]">Persona</span>
+                    <span className="text-sm font-bold text-[#F0F0F0]">Brain / Constitution</span>
                   </div>
                 </CardHeader>
-                <CardBody className="p-6">
-                  <EditableField
-                    label="System Prompt / Persona"
-                    value={agent.persona}
-                    onSave={(v) => patch({ persona: v })}
-                    placeholder="Describe who this agent is, how they think, and how they communicate. This becomes their system prompt when an LLM is connected."
-                    multiline
-                    hint="This will be used as the LLM system prompt once AI is connected."
-                  />
+                <CardBody className="p-6 space-y-4">
+                  <div className="rounded-xl border border-[rgba(75,156,211,0.18)] bg-[rgba(75,156,211,0.08)] p-4">
+                    <p className="text-sm font-semibold text-[#F0F0F0]">Structured Constitution lives in the Brain tab.</p>
+                    <p className="mt-1 text-xs leading-5 text-[#9A9A9A]">
+                      Profile now shows the runtime prompt only. Open Brain to edit the structured Constitution that generates it.
+                    </p>
+                    {!hasStructuredConstitution && agent.persona.trim().length > 0 && (
+                      <p className="mt-3 text-xs leading-5" style={{ color: AGENT_COLOR }}>
+                        Legacy persona fallback is still active for this agent. Save the Brain once to persist the structured Constitution and keep this prompt derived from it.
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-medium text-[#9A9A9A]">Runtime Prompt Preview</span>
+                      <Button size="sm" variant="secondary" onClick={() => setActiveTab("brain")}>
+                        Open Brain
+                      </Button>
+                    </div>
+                    <pre className="max-h-72 overflow-auto rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#141414] px-4 py-3 text-xs leading-6 text-[#D4D4D4] whitespace-pre-wrap">
+                      {agent.persona || "No runtime prompt yet. Configure the Brain to generate one."}
+                    </pre>
+                  </div>
                 </CardBody>
               </Card>
 
@@ -1227,11 +1248,17 @@ export default function AgentProfilePage() {
 
           {/* Brain tab */}
           {activeTab === "brain" && (
-            <LlmConnectionCard
-              agent={agent}
-              onSave={patch}
-              onRefresh={refreshLlmStatus}
-            />
+            <div className="space-y-6">
+              <AgentConstitutionEditor
+                agent={agent}
+                onSave={patch}
+              />
+              <LlmConnectionCard
+                agent={agent}
+                onSave={patch}
+                onRefresh={refreshLlmStatus}
+              />
+            </div>
           )}
 
           {/* Tools tab */}

@@ -9,11 +9,22 @@ import {
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/utils";
+import {
+  AGENT_CONSTITUTION_SECTION_HINTS,
+  AGENT_CONSTITUTION_TYPES,
+  applyConstitutionSectionContentOverrides,
+  createAgentConstitutionSeed,
+  createDefaultAgentConstitution,
+  renderConstitutionAsPersona,
+  type AgentConstitutionType,
+} from "@/lib/agent-constitution";
 
 const AGENT_COLOR = "#4B9CD3";
 const AGENT_COLOR_DIM = "rgba(75,156,211,0.15)";
 
 const ROLE_SUGGESTIONS = [
+  "Executive Assistant", "Admin Assistant", "Technical SME", "Diligence Analyst",
+  "Investor Relations", "File Librarian",
   "Backend Engineer", "Frontend Engineer", "Full Stack Engineer", "DevOps Engineer",
   "QA Engineer", "Data Engineer", "Security Engineer", "Mobile Engineer",
   "Product Manager", "Technical Writer", "Code Reviewer", "Deployment Manager",
@@ -21,17 +32,21 @@ const ROLE_SUGGESTIONS = [
 
 const AVATAR_OPTIONS = ["🤖", "🧠", "⚡", "🔮", "🛸", "💡", "🦾", "🎯", "🔬", "🛡️", "🚀", "⚙️"];
 
+type ConstitutionStarterSectionId = "assistant_system" | "current_priorities";
+
 export default function HireAgentPage() {
   const router = useRouter();
 
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
   const [description, setDescription] = useState("");
-  const [persona, setPersona] = useState("");
+  const [agentType, setAgentType] = useState<AgentConstitutionType>("executive_assistant");
+  const [constitutionStarterOverrides, setConstitutionStarterOverrides] = useState<Partial<Record<ConstitutionStarterSectionId, string>>>({});
   const [duties, setDuties] = useState<string[]>([]);
   const [dutyInput, setDutyInput] = useState("");
   const [avatar, setAvatar] = useState("🤖");
   const [showRoleSugg, setShowRoleSugg] = useState(false);
+  const [showPromptPreview, setShowPromptPreview] = useState(false);
 
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -78,6 +93,36 @@ export default function HireAgentPage() {
     setDuties((d) => d.filter((_, idx) => idx !== i));
   }
 
+  const constitutionSeed = createAgentConstitutionSeed({ name, role, description });
+  const defaultConstitution = createDefaultAgentConstitution(agentType, constitutionSeed);
+  const constitutionDraft = applyConstitutionSectionContentOverrides(defaultConstitution, constitutionStarterOverrides);
+  const constitutionPreview = renderConstitutionAsPersona(constitutionDraft);
+  const selectedAgentType = AGENT_CONSTITUTION_TYPES.find((option) => option.id === agentType);
+
+  function loadConstitutionTemplate(nextType: AgentConstitutionType) {
+    setAgentType(nextType);
+    setConstitutionStarterOverrides({});
+  }
+
+  function updateConstitutionField(
+    sectionId: ConstitutionStarterSectionId,
+    value: string,
+  ) {
+    const defaultValue = defaultConstitution.sections[sectionId].content;
+
+    setConstitutionStarterOverrides((current) => {
+      const next = { ...current };
+
+      if (value === defaultValue) {
+        delete next[sectionId];
+      } else {
+        next[sectionId] = value;
+      }
+
+      return next;
+    });
+  }
+
   async function handleHire() {
     const errs = validate();
     if (Object.keys(errs).length) { setErrors(errs); return; }
@@ -87,7 +132,15 @@ export default function HireAgentPage() {
       const res = await fetch("/api/agents", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), role: role.trim(), description: description.trim() || null, persona: persona.trim(), duties, avatar, status: "active" }),
+        body: JSON.stringify({
+          name: name.trim(),
+          role: role.trim(),
+          description: description.trim() || null,
+          constitution: constitutionDraft,
+          duties,
+          avatar,
+          status: "active",
+        }),
       });
       const data = await res.json();
       if (!res.ok) { setErrors({ general: data.error ?? "Failed to hire agent" }); return; }
@@ -306,25 +359,84 @@ export default function HireAgentPage() {
             </CardBody>
           </Card>
 
-          {/* Persona */}
+          {/* Constitution */}
           <Card>
             <CardHeader className="border-b border-[rgba(255,255,255,0.06)] px-6 py-4">
               <div className="flex items-center gap-2">
                 <Sparkles size={15} style={{ color: AGENT_COLOR }} />
-                <span className="text-sm font-bold text-[#F0F0F0]">Persona</span>
+                <span className="text-sm font-bold text-[#F0F0F0]">Constitution Template</span>
               </div>
             </CardHeader>
-            <CardBody className="p-6 space-y-2">
-              <p className="text-xs text-[#606060]">
-                Describe who this agent is, their communication style, and areas of expertise. This becomes their system prompt when an LLM is connected.
+            <CardBody className="p-6 space-y-4">
+              <p className="text-xs text-[#606060] leading-5">
+                Start this agent from a structured Constitution instead of a single prompt field. You can fully refine the Brain after creation without losing runtime compatibility.
               </p>
-              <textarea
-                value={persona}
-                onChange={(e) => setPersona(e.target.value)}
-                placeholder="You are a senior DevOps engineer at Griggs Capital Partners. You specialize in AWS infrastructure, CI/CD pipelines, and system reliability. You are methodical, precise, and always flag risks proactively..."
-                rows={5}
-                className="w-full bg-[#1A1A1A] border border-[rgba(255,255,255,0.06)] rounded-xl px-4 py-3 text-sm text-[#F0F0F0] placeholder-[#404040] resize-none focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
-              />
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-[#9A9A9A]">Agent Type</label>
+                <select
+                  value={agentType}
+                  onChange={(e) => loadConstitutionTemplate(e.target.value as AgentConstitutionType)}
+                  className="w-full bg-[#1A1A1A] border border-[rgba(255,255,255,0.06)] rounded-lg px-4 py-2.5 text-sm text-[#F0F0F0] focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                >
+                  {AGENT_CONSTITUTION_TYPES.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                {selectedAgentType && (
+                  <p className="text-xs text-[#606060] leading-5">{selectedAgentType.description}</p>
+                )}
+              </div>
+
+              <div className="rounded-xl border border-[rgba(75,156,211,0.18)] bg-[rgba(75,156,211,0.08)] p-4">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ color: AGENT_COLOR }}>
+                  {selectedAgentType?.label ?? "Custom"}
+                </p>
+                <p className="mt-2 text-xs leading-5 text-[#9A9A9A]">
+                  This starter stays intentionally light. The full section-by-section editor lives in Brain after hire, while this screen keeps the defaults synced to the identity fields above.
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-[#9A9A9A]">Assistant System Starter</label>
+                <p className="text-[11px] text-[#606060]">{AGENT_CONSTITUTION_SECTION_HINTS.assistant_system}</p>
+                <textarea
+                  value={constitutionDraft.sections.assistant_system.content}
+                  onChange={(e) => updateConstitutionField("assistant_system", e.target.value)}
+                  rows={6}
+                  className="w-full bg-[#1A1A1A] border border-[rgba(255,255,255,0.06)] rounded-xl px-4 py-3 text-sm leading-6 text-[#F0F0F0] placeholder-[#404040] resize-y focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-sm font-medium text-[#9A9A9A]">Current Priorities Starter</label>
+                <p className="text-[11px] text-[#606060]">{AGENT_CONSTITUTION_SECTION_HINTS.current_priorities}</p>
+                <textarea
+                  value={constitutionDraft.sections.current_priorities.content}
+                  onChange={(e) => updateConstitutionField("current_priorities", e.target.value)}
+                  rows={4}
+                  className="w-full bg-[#1A1A1A] border border-[rgba(255,255,255,0.06)] rounded-xl px-4 py-3 text-sm leading-6 text-[#F0F0F0] placeholder-[#404040] resize-y focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-medium text-[#9A9A9A]">Derived Runtime Prompt</span>
+                  <Button size="sm" variant="secondary" onClick={() => setShowPromptPreview((current) => !current)}>
+                    {showPromptPreview ? "Hide Preview" : "Show Preview"}
+                  </Button>
+                </div>
+                <p className="text-[11px] leading-5 text-[#606060]">
+                  Read-only preview of the prompt that will be written to `persona` for runtime compatibility.
+                </p>
+                {showPromptPreview && (
+                  <pre className="max-h-72 overflow-auto rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#141414] px-4 py-3 text-xs leading-6 text-[#CFCFCF] whitespace-pre-wrap">
+                    {constitutionPreview}
+                  </pre>
+                )}
+              </div>
             </CardBody>
           </Card>
 

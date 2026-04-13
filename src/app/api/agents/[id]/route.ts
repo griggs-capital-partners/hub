@@ -3,6 +3,11 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { probeAgentLlm } from "@/lib/agent-llm";
 import { normalizeAgentAbilitiesInput } from "@/lib/agent-task-context";
+import {
+  createAgentConstitutionSeed,
+  parseAgentConstitution,
+  resolveAgentConstitutionPersistence,
+} from "@/lib/agent-constitution";
 
 // GET /api/agents/[id] — fetch a single agent with stats
 export async function GET(
@@ -47,6 +52,7 @@ export async function PATCH(
     name,
     role,
     description,
+    constitution,
     persona,
     duties,
     avatar,
@@ -65,6 +71,23 @@ export async function PATCH(
   if (!existing) {
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
+
+  const nextName = name !== undefined ? name.trim() : existing.name;
+  const nextRole = role !== undefined ? role.trim() : existing.role;
+  const nextDescription = description !== undefined ? description?.trim() ?? null : existing.description;
+  const existingConstitution = parseAgentConstitution(existing.constitution);
+  const constitutionPersistence = resolveAgentConstitutionPersistence({
+    constitution,
+    persona,
+    existingConstitution: existing.constitution,
+    existingPersona: existing.persona,
+    fallbackAgentType: existingConstitution?.agentType ?? "executive_assistant",
+    seed: createAgentConstitutionSeed({
+      name: nextName,
+      role: nextRole,
+      description: nextDescription,
+    }),
+  });
 
   const nextLlmEndpointUrl = llmEndpointUrl !== undefined ? llmEndpointUrl?.trim() || null : existing.llmEndpointUrl;
   const nextLlmUsername = llmUsername !== undefined ? llmUsername?.trim() || null : existing.llmUsername;
@@ -88,7 +111,16 @@ export async function PATCH(
       ...(name !== undefined && { name: name.trim() }),
       ...(role !== undefined && { role: role.trim() }),
       ...(description !== undefined && { description: description?.trim() ?? null }),
-      ...(persona !== undefined && { persona: persona.trim() }),
+      ...(constitution !== undefined && { constitution: constitutionPersistence.serializedConstitution ?? "" }),
+      ...(
+        constitution !== undefined
+          ? {
+              persona: constitutionPersistence.persona,
+            }
+          : persona !== undefined
+            ? { persona: persona.trim() }
+            : {}
+      ),
       ...(duties !== undefined && { duties: Array.isArray(duties) ? JSON.stringify(duties) : "[]" }),
       ...(avatar !== undefined && { avatar: avatar?.trim() ?? null }),
       ...(status !== undefined && { status }),
@@ -108,7 +140,7 @@ export async function PATCH(
     },
     include: {
       createdBy: { select: { id: true, name: true, displayName: true } },
-      _count: { select: { sprintTasks: true, messages: true } },
+      _count: { select: { sprintTasks: true, messages: true, taskExecutions: true } },
     },
   });
 
