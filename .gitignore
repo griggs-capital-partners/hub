@@ -2,6 +2,8 @@
 
 # dependencies
 /node_modules
+.vs/
+.env.local
 /.pnp
 .pnp.*
 .yarn/*
