@@ -648,7 +648,7 @@ export function applyConstitutionSectionContentOverrides(
 
   for (const sectionId of AGENT_CONSTITUTION_SECTION_ORDER) {
     const override = overrides[sectionId];
-    if (override === undefined) continue;
+    if (typeof override !== "string") continue;
 
     next = updateConstitutionSection(next, sectionId, { content: override });
   }
