@@ -522,7 +522,8 @@ model AIAgent {
   name        String
   role        String                          // e.g. "Backend Engineer", "DevOps Specialist"
   description String?                         // short tagline shown on card
-  persona     String   @default("")           // full persona text (future LLM system prompt)
+  constitution String  @default("")           // JSON: structured constitution document; source of truth for persona generation
+  persona     String   @default("")           // derived persona text kept for runtime compatibility
   duties      String   @default("[]")         // JSON: string[] of duty descriptions
   avatar      String?                         // emoji or image URL
   status      String   @default("active")     // "active" | "inactive"
