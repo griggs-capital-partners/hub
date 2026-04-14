@@ -23,7 +23,6 @@ import {
   updateConstitutionAgentType,
   updateConstitutionSection,
   type AgentConstitution,
-  type AgentConstitutionSection,
   type AgentConstitutionSectionId,
   type AgentConstitutionType,
 } from "@/lib/agent-constitution";
@@ -46,14 +45,12 @@ const constitutionMarkdownComponents: Components = {
 };
 
 type ConstitutionPreviewBlockProps = {
-  title: string;
   content: string;
 };
 
-function ConstitutionPreviewBlock({ title, content }: ConstitutionPreviewBlockProps) {
+function ConstitutionPreviewBlock({ content }: ConstitutionPreviewBlockProps) {
   return (
     <div className="rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#151515] p-4">
-      <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-[#707070]">{title}</p>
       {content.trim() ? (
         <ReactMarkdown remarkPlugins={[remarkGfm]} components={constitutionMarkdownComponents}>
           {content}
@@ -121,16 +118,8 @@ export function AgentConstitutionEditor({
   const hasStructuredConstitution = hasStoredAgentConstitution(agent.constitution);
   const usesLegacyPersonaFallback = !hasStructuredConstitution && agent.persona.trim().length > 0;
 
-  function updateSectionField(field: keyof AgentConstitutionSection, value: string) {
+  function updateSectionContent(value: string) {
     setConstitution((current) => {
-      if (field === "businessContext") {
-        return updateConstitutionSection(current, selectedSection, { businessContext: value });
-      }
-
-      if (field === "personalContext") {
-        return updateConstitutionSection(current, selectedSection, { personalContext: value });
-      }
-
       return updateConstitutionSection(current, selectedSection, { content: value });
     });
   }
@@ -311,94 +300,38 @@ export function AgentConstitutionEditor({
             {editing ? (
               <div className="space-y-4">
                 <div>
-                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.14em] text-[#707070]">Guidance</label>
+                  <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.14em] text-[#707070]">Section Content</label>
                   <textarea
                     rows={8}
                     value={selectedSectionContent.content}
-                    onChange={(e) => updateSectionField("content", e.target.value)}
+                    onChange={(e) => updateSectionContent(e.target.value)}
                     className="w-full rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] px-4 py-3 text-sm leading-6 text-[#F0F0F0] focus:outline-none focus:border-[rgba(75,156,211,0.4)] resize-y"
                   />
-                </div>
-
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <div>
-                    <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.14em] text-[#707070]">Business Context</label>
-                    <textarea
-                      rows={6}
-                      value={selectedSectionContent.businessContext}
-                      onChange={(e) => updateSectionField("businessContext", e.target.value)}
-                      className="w-full rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] px-4 py-3 text-sm leading-6 text-[#F0F0F0] focus:outline-none focus:border-[rgba(75,156,211,0.4)] resize-y"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.14em] text-[#707070]">Personal Context</label>
-                    <textarea
-                      rows={6}
-                      value={selectedSectionContent.personalContext}
-                      onChange={(e) => updateSectionField("personalContext", e.target.value)}
-                      className="w-full rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] px-4 py-3 text-sm leading-6 text-[#F0F0F0] focus:outline-none focus:border-[rgba(75,156,211,0.4)] resize-y"
-                    />
-                  </div>
                 </div>
               </div>
             ) : (
               <div className="space-y-4">
-                <ConstitutionPreviewBlock title="Guidance" content={selectedSectionContent.content} />
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                  <ConstitutionPreviewBlock title="Business Context" content={selectedSectionContent.businessContext} />
-                  <ConstitutionPreviewBlock title="Personal Context" content={selectedSectionContent.personalContext} />
-                </div>
+                <ConstitutionPreviewBlock content={selectedSectionContent.content} />
               </div>
             )}
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <div className="rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#151515] p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-sm font-semibold text-[#F0F0F0]">Derived Runtime Prompt</p>
-                <p className="mt-1 text-xs text-[#606060]">Read-only preview generated from the structured Constitution and written back to `persona`.</p>
-              </div>
-              <Button size="sm" variant="secondary" onClick={() => setShowPromptPreview((current) => !current)}>
-                {showPromptPreview ? "Hide Preview" : "Show Preview"}
-              </Button>
+        <div className="rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#151515] p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold text-[#F0F0F0]">Derived Runtime Prompt</p>
+              <p className="mt-1 text-xs text-[#606060]">Read-only preview generated from the structured Constitution and written back to `persona`.</p>
             </div>
-            {showPromptPreview && (
-              <pre className="mt-4 max-h-96 overflow-auto rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#111111] px-4 py-3 text-xs leading-6 text-[#D6D6D6] whitespace-pre-wrap">
-                {derivedPersona}
-              </pre>
-            )}
+            <Button size="sm" variant="secondary" onClick={() => setShowPromptPreview((current) => !current)}>
+              {showPromptPreview ? "Hide Preview" : "Show Preview"}
+            </Button>
           </div>
-
-          <div className="rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#151515] p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-sm font-semibold text-[#F0F0F0]">Profile Suggestions</p>
-                <p className="mt-1 text-xs text-[#606060]">Display-only in pass 1. Suggestions are surfaced for review and never auto-applied.</p>
-              </div>
-              <span
-                className="rounded-full border px-2.5 py-1 text-[11px] font-semibold"
-                style={{ color: AGENT_COLOR, borderColor: `${AGENT_COLOR}40`, backgroundColor: AGENT_COLOR_DIM }}
-              >
-                {constitution.profileSuggestions.length}
-              </span>
-            </div>
-
-            <div className="mt-4 space-y-3">
-              {constitution.profileSuggestions.length > 0 ? constitution.profileSuggestions.map((suggestion) => (
-                <div key={suggestion.id} className="rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#111111] p-3">
-                  <p className="text-sm font-semibold text-[#F0F0F0]">{suggestion.title}</p>
-                  <p className="mt-1 text-xs leading-5 text-[#8D877F]">{suggestion.detail}</p>
-                </div>
-              )) : (
-                <div className="rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#111111] p-3">
-                  <p className="text-sm text-[#9A9A9A]">No suggestions are queued yet.</p>
-                </div>
-              )}
-            </div>
-          </div>
+          {showPromptPreview && (
+            <pre className="mt-4 max-h-96 overflow-auto rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#111111] px-4 py-3 text-xs leading-6 text-[#D6D6D6] whitespace-pre-wrap">
+              {derivedPersona}
+            </pre>
+          )}
         </div>
       </CardBody>
     </Card>

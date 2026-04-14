@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/utils";
 import {
   AGENT_CONSTITUTION_SECTION_HINTS,
+  AGENT_CONSTITUTION_SECTION_LABELS,
   AGENT_CONSTITUTION_TYPES,
   applyConstitutionSectionContentOverrides,
   createAgentConstitutionSeed,
@@ -400,7 +401,7 @@ export default function HireAgentPage() {
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium text-[#9A9A9A]">Assistant System Starter</label>
+                <label className="text-sm font-medium text-[#9A9A9A]">{AGENT_CONSTITUTION_SECTION_LABELS.assistant_system} Starter</label>
                 <p className="text-[11px] text-[#606060]">{AGENT_CONSTITUTION_SECTION_HINTS.assistant_system}</p>
                 <textarea
                   value={constitutionDraft.sections.assistant_system.content}
@@ -411,7 +412,7 @@ export default function HireAgentPage() {
               </div>
 
               <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-medium text-[#9A9A9A]">Current Priorities Starter</label>
+                <label className="text-sm font-medium text-[#9A9A9A]">{AGENT_CONSTITUTION_SECTION_LABELS.current_priorities} Starter</label>
                 <p className="text-[11px] text-[#606060]">{AGENT_CONSTITUTION_SECTION_HINTS.current_priorities}</p>
                 <textarea
                   value={constitutionDraft.sections.current_priorities.content}

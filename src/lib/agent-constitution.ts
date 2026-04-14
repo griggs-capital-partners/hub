@@ -45,8 +45,6 @@ export const AGENT_CONSTITUTION_SECTION_ORDER = [
   "user_profile",
   "current_priorities",
   "operating_playbooks",
-  "relationship_map",
-  "entities_and_structure",
   "output_templates",
 ] as const;
 
@@ -54,15 +52,6 @@ export type AgentConstitutionSectionId = typeof AGENT_CONSTITUTION_SECTION_ORDER
 
 export type AgentConstitutionSection = {
   content: string;
-  businessContext: string;
-  personalContext: string;
-};
-
-export type AgentConstitutionProfileSuggestion = {
-  id: string;
-  title: string;
-  detail: string;
-  status: "suggested";
 };
 
 export type AgentConstitution = {
@@ -70,7 +59,6 @@ export type AgentConstitution = {
   updatedAt: string;
   agentType: AgentConstitutionType;
   sections: Record<AgentConstitutionSectionId, AgentConstitutionSection>;
-  profileSuggestions: AgentConstitutionProfileSuggestion[];
 };
 
 export type AgentConstitutionSeed = {
@@ -81,30 +69,32 @@ export type AgentConstitutionSeed = {
 
 type ConstitutionSeed = AgentConstitutionSeed;
 
-type PartialConstitutionSection = Partial<AgentConstitutionSection> | null | undefined;
+type PartialConstitutionSection =
+  | {
+      content?: unknown;
+      [key: string]: unknown;
+    }
+  | null
+  | undefined;
 
-type PartialConstitution = Partial<Omit<AgentConstitution, "sections" | "profileSuggestions">> & {
+type PartialConstitution = Partial<Omit<AgentConstitution, "sections">> & {
   sections?: Partial<Record<AgentConstitutionSectionId, PartialConstitutionSection>> | null;
-  profileSuggestions?: unknown;
+  [key: string]: unknown;
 };
 
 export const AGENT_CONSTITUTION_SECTION_LABELS: Record<AgentConstitutionSectionId, string> = {
-  assistant_system: "Assistant System",
+  assistant_system: "Core Identity",
   user_profile: "User Profile",
   current_priorities: "Current Priorities",
-  operating_playbooks: "Playbooks",
-  relationship_map: "Relationships",
-  entities_and_structure: "Entities & Structure",
+  operating_playbooks: "Operating Playbook",
   output_templates: "Output Templates",
 };
 
 export const AGENT_CONSTITUTION_SECTION_HINTS: Record<AgentConstitutionSectionId, string> = {
-  assistant_system: "Core identity, guardrails, and operating posture for the agent.",
+  assistant_system: "Core identity, governing behavior, and non-negotiable operating posture for the agent.",
   user_profile: "What the agent should understand about the primary user and their working style.",
   current_priorities: "What matters now and how the agent should rank competing work.",
-  operating_playbooks: "Repeatable workflows, especially ingestion and approval-aware actions.",
-  relationship_map: "Who matters, how they relate to the user, and how to handle those relationships.",
-  entities_and_structure: "Companies, projects, documents, systems, and how the agent should organize them.",
+  operating_playbooks: "Standing instructions the agent should follow before every task: what to read first, what to check, what context to study, and how to handle incomplete context and approvals.",
   output_templates: "Preferred response shapes, deliverable formats, and approval labels.",
 };
 
@@ -135,8 +125,6 @@ export function createAgentConstitutionSeed(seed?: ConstitutionSeed): AgentConst
 function createSection(partial?: PartialConstitutionSection): AgentConstitutionSection {
   return {
     content: cleanText(partial?.content),
-    businessContext: cleanText(partial?.businessContext),
-    personalContext: cleanText(partial?.personalContext),
   };
 }
 
@@ -153,30 +141,15 @@ function descriptionLine(seed?: ConstitutionSeed) {
   return description ? `- Keep this positioning in mind: ${description}` : "";
 }
 
-function baseBusinessContext() {
-  return [
-    "- Keep business matters in the business context field.",
-    "- Track companies, deals, customers, projects, documents, deadlines, and approvals separately from personal context.",
-    "- When a summary blends both worlds, label the boundary clearly so the user can see what is business-only versus personal-only.",
-  ].join("\n");
-}
-
-function basePersonalContext() {
-  return [
-    "- Keep personal preferences, routines, communication style, and household context in the personal context field.",
-    "- Do not silently move personal context into business records or vice versa.",
-    "- If the boundary is unclear, ask a clarifying question before treating the information as canonical.",
-  ].join("\n");
-}
-
 function commonGuardrails(role: string) {
   return [
     `- Operate as the single primary ${role} agent for this workspace unless the product explicitly introduces multiple agents of the same type.`,
     "- Structured constitution sections are the source of truth. Use them to stay consistent across tasks and chats.",
+    "- Before each task, review the relevant instructions, the latest user ask, nearby conversation context, and any directly referenced artifacts or entities.",
     "- Read, summarize, classify, and organize information by default when access is available.",
     "- Treat send, create, update, move, copy, file, schedule, and share actions as approval-requiring behavior until dedicated approval flows exist.",
     "- Treat ingestion as first-class work: infer metadata, create concise companion summaries, propose durable storage paths, flag ambiguity, and ask clarifying questions when context is weak.",
-    "- Profile changes should always be suggested for review, never auto-applied.",
+    "- If context is incomplete, inspect what is available first, then ask targeted follow-up questions instead of guessing.",
   ].join("\n");
 }
 
@@ -225,7 +198,7 @@ function typeSpecificAssistantSystem(agentType: AgentConstitutionType, seed?: Co
     default:
       return [
         shared,
-        "- Focus on executive support: prioritization, inbox triage, relationship continuity, decision support, and organized follow-through across both personal and business spheres.",
+        "- Focus on executive support: prioritization, inbox triage, relationship continuity, decision support, and organized follow-through.",
       ].join("\n");
   }
 }
@@ -273,66 +246,35 @@ function typeSpecificPriorities(agentType: AgentConstitutionType) {
 
 function typeSpecificPlaybooks(agentType: AgentConstitutionType) {
   const base = [
-    "- Ingestion playbook:",
-    "  - Capture source, date, owner, related entities, and confidence on inferred metadata.",
-    "  - Produce a short companion summary that explains what the item is, why it matters, and what next action it suggests.",
-    "  - Propose a long-term storage path or system destination before anything is treated as settled.",
-    "  - If the source context is weak or ambiguous, ask targeted clarification questions instead of guessing.",
-    "- Action playbook:",
-    "  - Read and summarize directly when possible.",
-    "  - For actions that would send, create, update, move, copy, file, schedule, or share, prepare the recommendation or draft but mark it as approval-required.",
-    "  - Suggest profile updates when recurring patterns appear, but never auto-apply them.",
+    "- Before every task:",
+    "  - Read the latest user request, the most relevant constitution sections, recent conversation context, and any directly referenced source material.",
+    "  - Check whether the task is read-only analysis or would change data, files, schedules, messages, records, or shared artifacts.",
+    "  - Study the available context first: source documents, prior summaries, linked entities, current priorities, and known constraints.",
+    "- Standing operating instructions:",
+    "  - Prefer direct inspection over assumption when the workspace, source material, or system state is available.",
+    "  - Keep outputs traceable to the underlying artifacts, and call out uncertainty when evidence is incomplete.",
+    "  - Summarize what you learned before proposing consequential next steps when the context is dense or ambiguous.",
+    "- Incomplete-context playbook:",
+    "  - If key context is missing, identify the gap explicitly and ask targeted follow-up questions or state the assumption you are making.",
+    "  - Do not invent facts, hidden approvals, completed work, or unavailable artifacts.",
+    "- Approval playbook:",
+    "  - For actions that would send, create, update, move, copy, file, schedule, or share, prepare the recommendation or draft but stop at the approval boundary.",
+    "  - When approval status is unclear, treat the work as approval-required instead of taking the action.",
   ].join("\n");
 
   if (agentType === "technical_sme") {
-    return `${base}\n- Technical knowledge playbook:\n  - Convert repeated explanations into reusable summaries, examples, and durable documentation suggestions.`;
+    return `${base}\n- Technical study routine:\n  - Review the relevant code, docs, configs, logs, or architecture notes before giving implementation guidance.`;
   }
 
   if (agentType === "file_librarian") {
-    return `${base}\n- Library playbook:\n  - Prefer durable naming, strong metadata, companion summaries, and traceable storage recommendations over quick ad hoc filing.`;
+    return `${base}\n- Library routine:\n  - Review filenames, metadata, provenance, and destination options before proposing durable filing decisions.`;
   }
 
   if (agentType === "investor_relations") {
-    return `${base}\n- Communication playbook:\n  - Keep internal notes, approval-ready drafts, and external-facing copy clearly separated.`;
+    return `${base}\n- Communication routine:\n  - Review relationship state, recent communications, and approval sensitivity before drafting outward-facing language.`;
   }
 
   return base;
-}
-
-function typeSpecificRelationshipMap(agentType: AgentConstitutionType) {
-  const shared = [
-    "- Track who the user interacts with repeatedly, why each relationship matters, and the expected tone or level of formality.",
-    "- Distinguish internal collaborators, external counterparties, and personal contacts.",
-    "- When a relationship changes or a new stakeholder appears, surface it as a suggestion before treating it as canonical profile data.",
-  ].join("\n");
-
-  if (agentType === "diligence_analyst") {
-    return `${shared}\n- Highlight sponsors, operators, advisors, counsel, and diligence owners separately so responsibilities stay clear.`;
-  }
-
-  if (agentType === "investor_relations") {
-    return `${shared}\n- Track investors, prospective investors, internal approvers, and communication owners with explicit context on cadence and sensitivity.`;
-  }
-
-  return shared;
-}
-
-function typeSpecificEntities(agentType: AgentConstitutionType) {
-  const shared = [
-    "- Maintain a clear map of entities, projects, folders, and recurring objects the agent should understand.",
-    "- Preserve naming consistency and suggest canonical locations rather than inventing parallel structures.",
-    "- Keep business entities and personal entities separated even when they are related to the same user.",
-  ].join("\n");
-
-  if (agentType === "technical_sme") {
-    return `${shared}\n- Include systems, repos, environments, APIs, and documents as first-class entities.`;
-  }
-
-  if (agentType === "file_librarian") {
-    return `${shared}\n- Treat folders, documents, summaries, metadata tags, and long-term storage destinations as first-class entities.`;
-  }
-
-  return shared;
 }
 
 function typeSpecificOutputTemplates(agentType: AgentConstitutionType) {
@@ -361,23 +303,6 @@ function typeSpecificOutputTemplates(agentType: AgentConstitutionType) {
   return shared;
 }
 
-function createDefaultProfileSuggestions(): AgentConstitutionProfileSuggestion[] {
-  return [
-    {
-      id: "profile-change-review",
-      title: "Suggest profile updates, never auto-apply",
-      detail: "When the agent notices durable preferences, recurring contacts, or stable working habits, capture them as suggestions for review instead of silently updating the user's profile.",
-      status: "suggested",
-    },
-    {
-      id: "relationship-gap-review",
-      title: "Flag relationship-map gaps",
-      detail: "If a new recurring stakeholder or important entity appears, add a suggestion describing the gap and why it may belong in the long-term relationship map.",
-      status: "suggested",
-    },
-  ];
-}
-
 export function formatAgentConstitutionTypeLabel(agentType: AgentConstitutionType) {
   return AGENT_CONSTITUTION_TYPES.find((option) => option.id === agentType)?.label ?? "Custom";
 }
@@ -395,101 +320,25 @@ export function createDefaultAgentConstitution(
     sections: {
       assistant_system: createSection({
         content: typeSpecificAssistantSystem(agentType, normalizedSeed),
-        businessContext: baseBusinessContext(),
-        personalContext: basePersonalContext(),
       }),
       user_profile: createSection({
         content: [
           "- Build an explicit picture of how the primary user likes to work, decide, and receive updates.",
-          "- Capture durable preferences, routines, and recurring constraints as suggestions for review.",
-          "- Keep personal context and business context separate, then combine them only when the user clearly wants a unified view.",
-        ].join("\n"),
-        businessContext: [
-          "- Company responsibilities, decision rhythms, collaborators, and business deadlines.",
-          "- Ongoing commitments that affect work planning, approvals, or communications.",
-        ].join("\n"),
-        personalContext: [
-          "- Personal routines, communication style, scheduling preferences, and trusted defaults.",
-          "- Household or personal commitments that may shape planning, but should not be mixed into business records without intent.",
+          "- Capture confirmed preferences, routines, recurring constraints, and communication norms that should shape support across tasks.",
+          "- Use this section to personalize execution without drifting from explicit instructions elsewhere in the constitution.",
         ].join("\n"),
       }),
       current_priorities: createSection({
         content: typeSpecificPriorities(agentType),
-        businessContext: [
-          "- Active workstreams, deadlines, deliverables, approvals, and stakeholders that drive current business urgency.",
-        ].join("\n"),
-        personalContext: [
-          "- Personal obligations, routines, or preferences that may affect timing, sequencing, or communication expectations.",
-        ].join("\n"),
       }),
       operating_playbooks: createSection({
         content: typeSpecificPlaybooks(agentType),
-        businessContext: [
-          "- Business artifacts should be summarized, tagged, and routed to durable business storage suggestions.",
-        ].join("\n"),
-        personalContext: [
-          "- Personal artifacts should stay in personal context unless the user explicitly wants them surfaced in a blended work view.",
-        ].join("\n"),
-      }),
-      relationship_map: createSection({
-        content: typeSpecificRelationshipMap(agentType),
-        businessContext: [
-          "- Maintain role-aware context for partners, teammates, counterparties, investors, vendors, and advisors.",
-        ].join("\n"),
-        personalContext: [
-          "- Maintain separate context for family, friends, household contacts, or personal-service relationships when they affect planning.",
-        ].join("\n"),
-      }),
-      entities_and_structure: createSection({
-        content: typeSpecificEntities(agentType),
-        businessContext: [
-          "- Business entities include companies, deals, projects, boards, repos, customers, documents, and process hubs.",
-        ].join("\n"),
-        personalContext: [
-          "- Personal entities include routines, contacts, reference files, and ongoing personal commitments.",
-        ].join("\n"),
       }),
       output_templates: createSection({
         content: typeSpecificOutputTemplates(agentType),
-        businessContext: [
-          "- Use business-ready summaries and templates when the task concerns work artifacts, approvals, or external stakeholders.",
-        ].join("\n"),
-        personalContext: [
-          "- Use more personal, preference-aware tone only when the user is explicitly working in personal context.",
-        ].join("\n"),
       }),
     },
-    profileSuggestions: createDefaultProfileSuggestions(),
   };
-}
-
-function normalizeProfileSuggestions(
-  value: unknown,
-  fallbackSuggestions: AgentConstitutionProfileSuggestion[],
-) {
-  if (value === undefined || value === null) return fallbackSuggestions;
-  if (!Array.isArray(value)) return fallbackSuggestions;
-
-  const suggestions = value
-    .map((entry, index) => {
-      if (!entry || typeof entry !== "object") return null;
-      const raw = entry as Record<string, unknown>;
-      const id = cleanText(raw.id) || `suggestion_${index + 1}`;
-      const title = cleanText(raw.title);
-      const detail = cleanText(raw.detail);
-
-      if (!title && !detail) return null;
-
-      return {
-        id,
-        title: title || `Suggestion ${index + 1}`,
-        detail,
-        status: "suggested" as const,
-      };
-    })
-    .filter((entry): entry is AgentConstitutionProfileSuggestion => Boolean(entry));
-
-  return suggestions;
 }
 
 function normalizeSections(
@@ -503,8 +352,6 @@ function normalizeSections(
     const base = baseSections[sectionId];
     next[sectionId] = {
       content: typeof rawSection?.content === "string" ? rawSection.content.trim() : base.content,
-      businessContext: typeof rawSection?.businessContext === "string" ? rawSection.businessContext.trim() : base.businessContext,
-      personalContext: typeof rawSection?.personalContext === "string" ? rawSection.personalContext.trim() : base.personalContext,
     };
   }
 
@@ -549,7 +396,6 @@ export function normalizeAgentConstitutionInput(
     updatedAt: cleanText(parsed.updatedAt) || nowIso(),
     agentType,
     sections: normalizeSections(parsed.sections, base.sections),
-    profileSuggestions: normalizeProfileSuggestions(parsed.profileSuggestions, base.profileSuggestions),
   };
 }
 
@@ -608,7 +454,6 @@ export function serializeAgentConstitution(constitution: AgentConstitution) {
     updatedAt: normalized.updatedAt,
     agentType: normalized.agentType,
     sections: normalized.sections,
-    profileSuggestions: normalized.profileSuggestions,
   });
 }
 
@@ -668,38 +513,23 @@ export function updateConstitutionAgentType(
 }
 
 function renderSectionBlock(sectionId: AgentConstitutionSectionId, section: AgentConstitutionSection) {
-  const parts = [
-    cleanText(section.content),
-    cleanText(section.businessContext) ? `Business context:\n${cleanText(section.businessContext)}` : "",
-    cleanText(section.personalContext) ? `Personal context:\n${cleanText(section.personalContext)}` : "",
-  ].filter(Boolean);
-
-  if (parts.length === 0) return "";
-
-  return `## ${AGENT_CONSTITUTION_SECTION_LABELS[sectionId]}\n${parts.join("\n\n")}`;
+  const content = cleanText(section.content);
+  if (!content) return "";
+  return `## ${AGENT_CONSTITUTION_SECTION_LABELS[sectionId]}\n${content}`;
 }
 
 export function renderConstitutionAsPersona(constitution: AgentConstitution) {
   const header = [
     `Structured Constitution v${constitution.version}`,
     `Agent type: ${formatAgentConstitutionTypeLabel(constitution.agentType)}`,
-    "Use this constitution as the source of truth for behavior, context handling, outputs, and approval posture.",
+    "Use this constitution as the source of truth for behavior, task preparation, outputs, and approval posture.",
   ].join("\n");
 
   const sectionBlocks = AGENT_CONSTITUTION_SECTION_ORDER
     .map((sectionId) => renderSectionBlock(sectionId, constitution.sections[sectionId]))
     .filter(Boolean);
 
-  const suggestionBlock = constitution.profileSuggestions.length > 0
-    ? [
-        "## Profile Suggestions",
-        ...constitution.profileSuggestions.map((suggestion) =>
-          `- ${suggestion.title}: ${suggestion.detail}`,
-        ),
-      ].join("\n")
-    : "";
-
-  return [header, ...sectionBlocks, suggestionBlock].filter(Boolean).join("\n\n");
+  return [header, ...sectionBlocks].filter(Boolean).join("\n\n");
 }
 
 type ResolveAgentConstitutionPersistenceOptions = {
