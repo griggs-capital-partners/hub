@@ -92,6 +92,24 @@ interface ConversationSummary {
   id: string;
   type: "direct" | "group" | string;
   name: string | null;
+  llmThread?: {
+    selectedModel: string | null;
+    selectedModelKey: string | null;
+    selectedLabel: string | null;
+    selectedProvider: string | null;
+    selectedBy: "auto" | "default" | "user" | "legacy" | null;
+    reasonSummary: string | null;
+    escalationSummary: string | null;
+    auditEvents: Array<{
+      type: "selection" | "override" | "escalation";
+      at: string;
+      summary: string;
+      selectedBy: "auto" | "default" | "user" | "legacy";
+      provider: string | null;
+      model: string | null;
+      modelKey: string | null;
+    }>;
+  };
   createdAt: string;
   updatedAt: string;
   members: ConversationMemberSummary[];
@@ -159,6 +177,36 @@ interface AgentInspectorData {
     llmLastError: string | null;
     endpointConfigured: boolean;
   };
+  threadLlm: {
+    selectedModel: string | null;
+    selectedModelKey: string | null;
+    selectedLabel: string | null;
+    selectedProvider: string | null;
+    selectedBy: "auto" | "default" | "user" | "legacy" | null;
+    reasonSummary: string | null;
+    escalationSummary: string | null;
+    auditEvents: Array<{
+      type: "selection" | "override" | "escalation";
+      at: string;
+      summary: string;
+      selectedBy: "auto" | "default" | "user" | "legacy";
+      provider: string | null;
+      model: string | null;
+      modelKey: string | null;
+    }>;
+    availableModels: Array<{
+      key: string;
+      label: string;
+      model: string;
+      provider: string;
+      connectionId: string;
+      connectionLabel: string;
+      isDefault: boolean;
+    }>;
+    autoRoute: boolean;
+    allowUserOverride: boolean;
+    allowEscalation: boolean;
+  };
   context: {
     estimatedTokens: number;
     estimatedSystemPromptTokens: number;
@@ -180,6 +228,20 @@ interface AgentInspectorData {
     }>;
     orgContext: string;
   };
+}
+
+function dedupeChatMessages(messages: ChatMessage[]) {
+  const seen = new Set<string>();
+  const unique: ChatMessage[] = [];
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (seen.has(message.id)) continue;
+    seen.add(message.id);
+    unique.unshift(message);
+  }
+
+  return unique;
 }
 
 interface ActiveSprint {
@@ -835,9 +897,34 @@ function ContextInspectorDialog({
 
               <div className="rounded-2xl border border-[rgba(255,255,255,0.06)] bg-[#101010] p-4">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#8D877F]">Model</p>
-                <p className="mt-2 text-sm font-semibold text-[#F6F3EE]">{data.agent.llmModel ?? "Unknown model"}</p>
+                <p className="mt-2 text-sm font-semibold text-[#F6F3EE]">{data.threadLlm.selectedLabel ?? data.agent.llmModel ?? "Unknown model"}</p>
+                <p className="mt-1 text-sm text-[#8D877F]">
+                  Selected for this thread: {data.threadLlm.selectedBy === "user"
+                    ? "User override"
+                    : data.threadLlm.selectedBy === "auto"
+                      ? "Auto-routed"
+                      : data.threadLlm.selectedBy === "default"
+                        ? "Default model"
+                        : "Legacy/default connection"}
+                </p>
+                {data.threadLlm.reasonSummary ? (
+                  <p className="mt-1 text-sm text-[#8D877F]">{data.threadLlm.reasonSummary}</p>
+                ) : null}
+                {data.threadLlm.escalationSummary ? (
+                  <p className="mt-1 text-sm text-[#F0C889]">{data.threadLlm.escalationSummary}</p>
+                ) : null}
                 <p className="mt-1 text-sm text-[#8D877F]">Thinking mode: {formatThinkingMode(data.agent.llmThinkingMode)}</p>
                 <p className="mt-1 text-sm text-[#8D877F]">Last checked: {formatRelativeTime(data.agent.llmLastCheckedAt)}</p>
+                {data.threadLlm.auditEvents.length > 0 ? (
+                  <div className="mt-3 space-y-2 border-t border-[rgba(255,255,255,0.06)] pt-3">
+                    {data.threadLlm.auditEvents.slice(-3).reverse().map((event) => (
+                      <div key={`${event.type}-${event.at}`} className="rounded-xl bg-[rgba(255,255,255,0.03)] px-3 py-2">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#7EC8E3]">{event.type}</p>
+                        <p className="mt-1 text-xs leading-5 text-[#CFC9C2]">{event.summary}</p>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
@@ -1067,6 +1154,7 @@ export function TeamClient({
     () => conversations.find((conversation) => conversation.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId]
   );
+  const renderedMessages = useMemo(() => dedupeChatMessages(messages), [messages]);
 
   useEffect(() => {
     async function loadMessages() {
@@ -1171,6 +1259,7 @@ export function TeamClient({
 
             return {
               ...conversation,
+              llmThread: data.threadLlm,
               members: conversation.members.map((member) =>
                 member.kind === "agent"
                   ? {
@@ -1657,7 +1746,10 @@ export function TeamClient({
     ? [
         `Agent: ${agentInspector.agent.name} (${agentInspector.agent.role})`,
         `Status: ${agentInspector.readiness.label}`,
-        `Model: ${agentInspector.agent.llmModel ?? "Unknown"}`,
+        `Model: ${agentInspector.threadLlm.selectedLabel ?? agentInspector.agent.llmModel ?? "Unknown"}`,
+        `Selected for this thread: ${agentInspector.threadLlm.selectedBy ?? "unknown"}`,
+        agentInspector.threadLlm.reasonSummary ? `Routing reason: ${agentInspector.threadLlm.reasonSummary}` : null,
+        agentInspector.threadLlm.escalationSummary ? `Escalation: ${agentInspector.threadLlm.escalationSummary}` : null,
         `Thinking mode: ${formatThinkingMode(agentInspector.agent.llmThinkingMode)}`,
         `Context: ${formatTokensK(agentInspector.context.estimatedTokens)} / 128K (${formatContextMeter(agentInspector.context.estimatedTokens)})`,
         `History: ${agentInspector.context.recentHistoryCount}/${agentInspector.context.historyWindowSize} turns loaded`,
@@ -1670,7 +1762,7 @@ export function TeamClient({
         "",
         "System prompt:",
         agentInspector.payload.systemPrompt,
-      ].join("\n")
+      ].filter(Boolean).join("\n")
     : "";
 
   const activeConversationAvatar = activeConversation
@@ -1683,6 +1775,12 @@ export function TeamClient({
   const activeAgentBootstrapPending =
     activePartner?.kind === "agent"
       && (agentInspectorLoading || bootstrappingConversationId === selectedConversationId);
+  const activeThreadModelLabel = agentInspector?.threadLlm.selectedLabel
+    ?? activeConversation?.llmThread?.selectedLabel
+    ?? agentInspector?.threadLlm.selectedModel
+    ?? activeConversation?.llmThread?.selectedModel
+    ?? agentInspector?.agent.llmModel
+    ?? null;
   const activeAgentReady =
     activePartner?.kind === "agent"
       ? Boolean(agentInspector?.readiness.canSend)
@@ -2065,10 +2163,10 @@ export function TeamClient({
                             <PresenceBadge status={getOnlineStatus(activePartner.lastSeen ?? null)} />
                           </>
                         ) : null}
-                        {activePartner?.kind === "agent" && agentInspector?.agent.llmModel ? (
+                        {activePartner?.kind === "agent" && activeThreadModelLabel ? (
                           <>
                             <span className="text-[#3A3632]">·</span>
-                            <span>{agentInspector.agent.llmModel}</span>
+                            <span>{activeThreadModelLabel}</span>
                           </>
                         ) : null}
                       </div>
@@ -2141,7 +2239,7 @@ export function TeamClient({
                         Open Agent Profile
                       </Button>
                     </div>
-                  ) : messages.length === 0 ? (
+                  ) : renderedMessages.length === 0 ? (
                     <div className="flex h-full flex-col items-center justify-center text-center">
                       <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(247,148,29,0.12)] text-[#F7941D]">
                         <MessageSquare size={28} />
@@ -2155,7 +2253,7 @@ export function TeamClient({
                     </div>
                   ) : (
                     <div className="space-y-1.5">
-                      {messages.map((message) => {
+                      {renderedMessages.map((message) => {
                         const isCurrentUser = message.sender?.id === currentUserId && message.sender?.kind === "user";
                         const isEditing = editingMessageId === message.id;
                         return (

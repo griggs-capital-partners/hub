@@ -1,2 +1,2 @@
 ALTER TABLE "ai_agents"
-ADD COLUMN "constitution" TEXT NOT NULL DEFAULT '';
+ADD COLUMN IF NOT EXISTS "constitution" TEXT NOT NULL DEFAULT '';

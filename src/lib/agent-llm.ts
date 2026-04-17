@@ -1,9 +1,19 @@
+import { createHash, createHmac } from "crypto";
+import type { AgentLlmProvider } from "@/lib/agent-llm-config";
+
 type LlmEndpointKind = "ollama" | "openai";
 
 type AgentLlmConfig = {
+  llmProvider?: AgentLlmProvider | null;
+  llmProtocol?: string | null;
+  llmAuthType?: string | null;
+  llmApiKey?: string | null;
   llmEndpointUrl?: string | null;
   llmUsername?: string | null;
   llmPassword?: string | null;
+  llmRegion?: string | null;
+  llmAccessKeyId?: string | null;
+  llmSecretAccessKey?: string | null;
   llmModel?: string | null;
   llmThinkingMode?: string | null;
   description?: string | null;
@@ -74,22 +84,42 @@ type ResolvedEndpoint = {
   chatUrl: string;
 };
 
+type AnthropicMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
 }
 
-function buildBasicAuthHeader(username?: string | null, password?: string | null): Record<string, string> {
+function buildAuthHeader(config: Pick<AgentLlmConfig, "llmAuthType" | "llmApiKey" | "llmUsername" | "llmPassword">): Record<string, string> {
+  const authType = config.llmAuthType ?? (
+    config.llmApiKey?.trim() ? "bearer" : config.llmUsername?.trim() || config.llmPassword?.trim() ? "basic" : "none"
+  );
+
+  if (authType === "bearer") {
+    const apiKey = config.llmApiKey?.trim();
+    return apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
+  }
+
+  if (authType !== "basic") {
+    return {};
+  }
+
+  const username = config.llmUsername?.trim();
+  const password = config.llmPassword?.trim();
   if (!username || !password) return {};
 
   const token = Buffer.from(`${username}:${password}`, "utf8").toString("base64");
   return { Authorization: `Basic ${token}` };
 }
 
-function buildJsonHeaders(username?: string | null, password?: string | null) {
+function buildJsonHeaders(config: Pick<AgentLlmConfig, "llmAuthType" | "llmApiKey" | "llmUsername" | "llmPassword">) {
   return {
     "Content-Type": "application/json",
-    ...buildBasicAuthHeader(username, password),
-  };
+    ...buildAuthHeader(config),
+  } satisfies Record<string, string>;
 }
 
 function buildOllamaUrls(rawUrl: string) {
@@ -136,6 +166,222 @@ function buildOpenAiUrls(rawUrl: string) {
     modelsUrl: `${url}/v1/models`,
     chatUrl: `${url}/v1/chat/completions`,
   };
+}
+
+function resolveProvider(config: AgentLlmConfig): AgentLlmProvider {
+  if (config.llmProvider === "openai" || config.llmProvider === "anthropic" || config.llmProvider === "bedrock") {
+    return config.llmProvider;
+  }
+
+  if (config.llmRegion?.trim() || config.llmAccessKeyId?.trim() || config.llmSecretAccessKey?.trim()) {
+    return "bedrock";
+  }
+
+  return "local";
+}
+
+function buildProviderBaseUrl(override: string | null | undefined, fallback: string) {
+  return trimTrailingSlash(override?.trim() || fallback);
+}
+
+function buildAnthropicMessagesUrl(rawUrl?: string | null) {
+  const baseUrl = buildProviderBaseUrl(rawUrl, "https://api.anthropic.com");
+  return `${baseUrl}/v1/messages`;
+}
+
+function buildBedrockRuntimeUrl(config: Pick<AgentLlmConfig, "llmEndpointUrl" | "llmRegion" | "llmModel">) {
+  const region = config.llmRegion?.trim() || "us-east-1";
+  const baseUrl = buildProviderBaseUrl(config.llmEndpointUrl, `https://bedrock-runtime.${region}.amazonaws.com`);
+  const model = config.llmModel?.trim();
+
+  if (!model) {
+    throw new Error("A Bedrock model is required");
+  }
+
+  return `${baseUrl}/model/${encodeURIComponent(model)}/converse`;
+}
+
+function buildAnthropicHeaders(config: Pick<AgentLlmConfig, "llmApiKey">) {
+  const apiKey = config.llmApiKey?.trim();
+  if (!apiKey) {
+    throw new Error("An API key is required");
+  }
+
+  return {
+    "Content-Type": "application/json",
+    "x-api-key": apiKey,
+    "anthropic-version": "2023-06-01",
+  };
+}
+
+function toAnthropicMessages(messages: LlmMessage[]) {
+  const normalized = messages
+    .filter((message) => message.role !== "system")
+    .map((message) => ({
+      role: message.role === "assistant" ? "assistant" : "user",
+      content: message.role === "tool"
+        ? `Tool result:\n${message.content ?? ""}`.trim()
+        : message.content ?? "",
+    }))
+    .filter((message): message is AnthropicMessage => Boolean(message.content.trim()));
+
+  const alternating: AnthropicMessage[] = [];
+
+  for (const message of normalized) {
+    const previous = alternating[alternating.length - 1];
+
+    if (!previous) {
+      if (message.role === "assistant") {
+        alternating.push({
+          role: "user",
+          content: `Prior assistant context:\n${message.content}`.trim(),
+        });
+        continue;
+      }
+
+      alternating.push({ ...message });
+      continue;
+    }
+
+    if (previous.role === message.role) {
+      previous.content = `${previous.content}\n\n${message.content}`.trim();
+      continue;
+    }
+
+    alternating.push({ ...message });
+  }
+
+  return alternating;
+}
+
+function sha256Hex(value: string) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function hmac(key: Buffer | string, value: string, encoding?: "hex") {
+  const digest = createHmac("sha256", key).update(value, "utf8").digest();
+  return encoding === "hex" ? digest.toString("hex") : digest;
+}
+
+function buildAmzDate(date: Date) {
+  return date.toISOString().replace(/[:-]|\.\d{3}/g, "");
+}
+
+function signAwsRequest(params: {
+  method: "POST";
+  url: string;
+  region: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  body: string;
+}) {
+  const requestDate = new Date();
+  const amzDate = buildAmzDate(requestDate);
+  const dateStamp = amzDate.slice(0, 8);
+  const url = new URL(params.url);
+  const canonicalHeaders = [
+    ["content-type", "application/json"],
+    ["host", url.host],
+    ["x-amz-content-sha256", sha256Hex(params.body)],
+    ["x-amz-date", amzDate],
+  ];
+  const signedHeaders = canonicalHeaders.map(([key]) => key).join(";");
+  const canonicalRequest = [
+    params.method,
+    url.pathname,
+    "",
+    canonicalHeaders.map(([key, value]) => `${key}:${value}`).join("\n"),
+    "",
+    signedHeaders,
+    sha256Hex(params.body),
+  ].join("\n");
+  const credentialScope = `${dateStamp}/${params.region}/bedrock/aws4_request`;
+  const stringToSign = [
+    "AWS4-HMAC-SHA256",
+    amzDate,
+    credentialScope,
+    sha256Hex(canonicalRequest),
+  ].join("\n");
+  const kDate = hmac(`AWS4${params.secretAccessKey}`, dateStamp);
+  const kRegion = hmac(kDate, params.region);
+  const kService = hmac(kRegion, "bedrock");
+  const kSigning = hmac(kService, "aws4_request");
+  const signature = hmac(kSigning, stringToSign, "hex");
+
+  return {
+    "Content-Type": "application/json",
+    "X-Amz-Date": amzDate,
+    "X-Amz-Content-Sha256": sha256Hex(params.body),
+    Authorization: `AWS4-HMAC-SHA256 Credential=${params.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+  };
+}
+
+async function fetchBedrockJson(
+  config: Pick<AgentLlmConfig, "llmEndpointUrl" | "llmRegion" | "llmModel" | "llmAccessKeyId" | "llmSecretAccessKey">,
+  body: Record<string, unknown>,
+  timeoutMs = 60000
+) {
+  const accessKeyId = config.llmAccessKeyId?.trim();
+  const secretAccessKey = config.llmSecretAccessKey?.trim();
+  const region = config.llmRegion?.trim() || "us-east-1";
+
+  if (!accessKeyId || !secretAccessKey) {
+    throw new Error("Bedrock access key ID and secret access key are required");
+  }
+
+  const url = buildBedrockRuntimeUrl(config);
+  const serializedBody = JSON.stringify(body);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: signAwsRequest({
+      method: "POST",
+      url,
+      region,
+      accessKeyId,
+      secretAccessKey,
+      body: serializedBody,
+    }),
+    body: serializedBody,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    throw new Error(details || `Bedrock request failed (${response.status})`);
+  }
+
+  return response.json();
+}
+
+function extractAnthropicText(payload: Record<string, unknown>) {
+  const content = Array.isArray(payload.content) ? payload.content : [];
+  return content
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const block = item as Record<string, unknown>;
+      return block.type === "text" && typeof block.text === "string" ? block.text : "";
+    })
+    .join("")
+    .trim();
+}
+
+function extractBedrockText(payload: Record<string, unknown>) {
+  const output = payload.output && typeof payload.output === "object"
+    ? payload.output as Record<string, unknown>
+    : null;
+  const message = output?.message && typeof output.message === "object"
+    ? output.message as Record<string, unknown>
+    : null;
+  const content = Array.isArray(message?.content) ? message.content : [];
+
+  return content
+    .map((item) => {
+      if (!item || typeof item !== "object") return "";
+      const block = item as Record<string, unknown>;
+      return typeof block.text === "string" ? block.text : "";
+    })
+    .join("")
+    .trim();
 }
 
 function parseDuties(raw: string | null | undefined) {
@@ -316,48 +562,88 @@ async function fetchJson(url: string, init: RequestInit) {
 }
 
 export async function probeAgentLlm(config: AgentLlmConfig): Promise<AgentLlmStatus> {
-  const endpointUrl = config.llmEndpointUrl?.trim();
-  if (!endpointUrl) {
-    return {
-      llmStatus: "disconnected",
-      llmModel: null,
-      llmLastCheckedAt: null,
-      llmLastError: null,
-    };
-  }
-
   const checkedAt = new Date();
-  const headers = buildBasicAuthHeader(config.llmUsername, config.llmPassword);
+  const provider = resolveProvider(config);
 
-  try {
-    const { tagsUrl } = buildOllamaUrls(endpointUrl);
-    const payload = await fetchJson(tagsUrl, { headers });
-    const models = Array.isArray(payload?.models) ? payload.models : [];
-    const firstModel = typeof models[0]?.name === "string" ? models[0].name : null;
-    // Respect the configured model — only fall back to first available if none is set
-    const model = config.llmModel?.trim() || firstModel;
-
-    if (!model) {
-      throw new Error("No Ollama models were returned by the endpoint");
+  if (provider === "local") {
+    const endpointUrl = config.llmEndpointUrl?.trim();
+    if (!endpointUrl) {
+      return {
+        llmStatus: "disconnected",
+        llmModel: null,
+        llmLastCheckedAt: null,
+        llmLastError: null,
+      };
     }
 
-    return {
-      llmStatus: "online",
-      llmModel: model,
-      llmLastCheckedAt: checkedAt,
-      llmLastError: null,
-    };
-  } catch (ollamaError) {
+    const headers = buildAuthHeader(config);
+    const protocol = config.llmProtocol ?? "auto";
+
+    if (protocol === "ollama") {
+      try {
+        const { tagsUrl } = buildOllamaUrls(endpointUrl);
+        const payload = await fetchJson(tagsUrl, { headers });
+        const models = Array.isArray(payload?.models) ? payload.models : [];
+        const firstModel = typeof models[0]?.name === "string" ? models[0].name : null;
+        const model = config.llmModel?.trim() || firstModel;
+
+        if (!model) {
+          throw new Error("No Ollama models were returned by the endpoint");
+        }
+
+        return {
+          llmStatus: "online",
+          llmModel: model,
+          llmLastCheckedAt: checkedAt,
+          llmLastError: null,
+        };
+      } catch (error) {
+        return {
+          llmStatus: "offline",
+          llmModel: config.llmModel?.trim() || null,
+          llmLastCheckedAt: checkedAt,
+          llmLastError: error instanceof Error ? error.message : "Unable to reach the Ollama endpoint",
+        };
+      }
+    }
+
+    if (protocol === "openai-compatible") {
+      try {
+        const { modelsUrl } = buildOpenAiUrls(endpointUrl);
+        const payload = await fetchJson(modelsUrl, { headers });
+        const models = Array.isArray(payload?.data) ? payload.data : [];
+        const firstModel = typeof models[0]?.id === "string" ? models[0].id : null;
+        const model = config.llmModel?.trim() || firstModel;
+
+        if (!model) {
+          throw new Error("No OpenAI-compatible models were returned by the endpoint");
+        }
+
+        return {
+          llmStatus: "online",
+          llmModel: model,
+          llmLastCheckedAt: checkedAt,
+          llmLastError: null,
+        };
+      } catch (error) {
+        return {
+          llmStatus: "offline",
+          llmModel: config.llmModel?.trim() || null,
+          llmLastCheckedAt: checkedAt,
+          llmLastError: error instanceof Error ? error.message : "Unable to reach the OpenAI-compatible endpoint",
+        };
+      }
+    }
+
     try {
-      const { modelsUrl } = buildOpenAiUrls(endpointUrl);
-      const payload = await fetchJson(modelsUrl, { headers });
-      const models = Array.isArray(payload?.data) ? payload.data : [];
-      const firstModel = typeof models[0]?.id === "string" ? models[0].id : null;
-      // Respect the configured model — only fall back to first available if none is set
+      const { tagsUrl } = buildOllamaUrls(endpointUrl);
+      const payload = await fetchJson(tagsUrl, { headers });
+      const models = Array.isArray(payload?.models) ? payload.models : [];
+      const firstModel = typeof models[0]?.name === "string" ? models[0].name : null;
       const model = config.llmModel?.trim() || firstModel;
 
       if (!model) {
-        throw new Error("No OpenAI-compatible models were returned by the endpoint");
+        throw new Error("No Ollama models were returned by the endpoint");
       }
 
       return {
@@ -366,30 +652,207 @@ export async function probeAgentLlm(config: AgentLlmConfig): Promise<AgentLlmSta
         llmLastCheckedAt: checkedAt,
         llmLastError: null,
       };
-    } catch (openAiError) {
-      const message = openAiError instanceof Error
-        ? openAiError.message
-        : ollamaError instanceof Error
-          ? ollamaError.message
-          : "Unable to reach the LLM endpoint";
+    } catch (ollamaError) {
+      try {
+        const { modelsUrl } = buildOpenAiUrls(endpointUrl);
+        const payload = await fetchJson(modelsUrl, { headers });
+        const models = Array.isArray(payload?.data) ? payload.data : [];
+        const firstModel = typeof models[0]?.id === "string" ? models[0].id : null;
+        const model = config.llmModel?.trim() || firstModel;
 
+        if (!model) {
+          throw new Error("No OpenAI-compatible models were returned by the endpoint");
+        }
+
+        return {
+          llmStatus: "online",
+          llmModel: model,
+          llmLastCheckedAt: checkedAt,
+          llmLastError: null,
+        };
+      } catch (openAiError) {
+        const message = openAiError instanceof Error
+          ? openAiError.message
+          : ollamaError instanceof Error
+            ? ollamaError.message
+            : "Unable to reach the LLM endpoint";
+
+        return {
+          llmStatus: "offline",
+          llmModel: config.llmModel?.trim() || null,
+          llmLastCheckedAt: checkedAt,
+          llmLastError: message,
+        };
+      }
+    }
+  }
+
+  if (provider === "openai") {
+    const apiKey = config.llmApiKey?.trim();
+    if (!apiKey) {
+      return {
+        llmStatus: "disconnected",
+        llmModel: config.llmModel?.trim() || null,
+        llmLastCheckedAt: null,
+        llmLastError: null,
+      };
+    }
+
+    try {
+      const { modelsUrl } = buildOpenAiUrls(buildProviderBaseUrl(config.llmEndpointUrl, "https://api.openai.com"));
+      const payload = await fetchJson(modelsUrl, { headers: buildJsonHeaders({ ...config, llmAuthType: "bearer" }) });
+      const models = Array.isArray(payload?.data) ? payload.data : [];
+      const firstModel = typeof models[0]?.id === "string" ? models[0].id : null;
+      const model = config.llmModel?.trim() || firstModel;
+
+      if (!model) {
+        throw new Error("No OpenAI models were returned by the endpoint");
+      }
+
+      return {
+        llmStatus: "online",
+        llmModel: model,
+        llmLastCheckedAt: checkedAt,
+        llmLastError: null,
+      };
+    } catch (error) {
       return {
         llmStatus: "offline",
         llmModel: config.llmModel?.trim() || null,
         llmLastCheckedAt: checkedAt,
-        llmLastError: message,
+        llmLastError: error instanceof Error ? error.message : "Unable to reach the OpenAI endpoint",
       };
     }
+  }
+
+  if (provider === "anthropic") {
+    if (!config.llmApiKey?.trim() || !config.llmModel?.trim()) {
+      return {
+        llmStatus: "disconnected",
+        llmModel: config.llmModel?.trim() || null,
+        llmLastCheckedAt: null,
+        llmLastError: null,
+      };
+    }
+
+    try {
+      await fetch(buildAnthropicMessagesUrl(config.llmEndpointUrl), {
+        method: "POST",
+        headers: buildAnthropicHeaders(config),
+        body: JSON.stringify({
+          model: config.llmModel.trim(),
+          max_tokens: 8,
+          messages: [{ role: "user", content: "Ping" }],
+        }),
+        signal: AbortSignal.timeout(30000),
+      }).then(async (response) => {
+        if (!response.ok) {
+          const details = await response.text().catch(() => "");
+          throw new Error(details || `Anthropic request failed (${response.status})`);
+        }
+      });
+
+      return {
+        llmStatus: "online",
+        llmModel: config.llmModel.trim(),
+        llmLastCheckedAt: checkedAt,
+        llmLastError: null,
+      };
+    } catch (error) {
+      return {
+        llmStatus: "offline",
+        llmModel: config.llmModel?.trim() || null,
+        llmLastCheckedAt: checkedAt,
+        llmLastError: error instanceof Error ? error.message : "Unable to reach the Anthropic endpoint",
+      };
+    }
+  }
+
+  if (!config.llmAccessKeyId?.trim() || !config.llmSecretAccessKey?.trim() || !config.llmModel?.trim()) {
+    return {
+      llmStatus: "disconnected",
+      llmModel: config.llmModel?.trim() || null,
+      llmLastCheckedAt: null,
+      llmLastError: null,
+    };
+  }
+
+  try {
+    await fetchBedrockJson(
+      config,
+      {
+        messages: [{ role: "user", content: [{ text: "Ping" }] }],
+        inferenceConfig: { maxTokens: 8 },
+      },
+      30000
+    );
+
+    return {
+      llmStatus: "online",
+      llmModel: config.llmModel.trim(),
+      llmLastCheckedAt: checkedAt,
+      llmLastError: null,
+    };
+  } catch (error) {
+    return {
+      llmStatus: "offline",
+      llmModel: config.llmModel?.trim() || null,
+      llmLastCheckedAt: checkedAt,
+      llmLastError: error instanceof Error ? error.message : "Unable to reach the Bedrock endpoint",
+    };
   }
 }
 
 async function resolveEndpoint(config: AgentLlmConfig): Promise<ResolvedEndpoint> {
+  const provider = resolveProvider(config);
+
+  if (provider === "openai") {
+    const baseUrl = buildProviderBaseUrl(config.llmEndpointUrl, "https://api.openai.com");
+    const { modelsUrl, chatUrl } = buildOpenAiUrls(baseUrl);
+    const payload = await fetchJson(modelsUrl, {
+      headers: buildJsonHeaders({ ...config, llmAuthType: "bearer" }),
+    });
+    const models = Array.isArray(payload?.data) ? payload.data : [];
+    const model = config.llmModel?.trim() || models[0]?.id;
+
+    if (typeof model !== "string" || !model.trim()) {
+      throw new Error("No OpenAI model is available");
+    }
+
+    return { kind: "openai", model: model.trim(), chatUrl };
+  }
+
   const endpointUrl = config.llmEndpointUrl?.trim();
   if (!endpointUrl) {
     throw new Error("No LLM endpoint is configured for this agent");
   }
 
-  const headers = buildBasicAuthHeader(config.llmUsername, config.llmPassword);
+  const headers = buildAuthHeader(config);
+  const protocol = config.llmProtocol ?? "auto";
+
+  if (protocol === "ollama") {
+    const { tagsUrl, chatUrl } = buildOllamaUrls(endpointUrl);
+    const payload = await fetchJson(tagsUrl, { headers });
+    const models = Array.isArray(payload?.models) ? payload.models : [];
+    const model = config.llmModel?.trim() || models[0]?.name;
+    if (typeof model !== "string" || !model.trim()) {
+      throw new Error("No Ollama model is available");
+    }
+
+    return { kind: "ollama", model: model.trim(), chatUrl };
+  }
+
+  if (protocol === "openai-compatible") {
+    const { modelsUrl, chatUrl } = buildOpenAiUrls(endpointUrl);
+    const payload = await fetchJson(modelsUrl, { headers });
+    const models = Array.isArray(payload?.data) ? payload.data : [];
+    const model = config.llmModel?.trim() || models[0]?.id;
+    if (typeof model !== "string" || !model.trim()) {
+      throw new Error("No OpenAI-compatible model is available");
+    }
+
+    return { kind: "openai", model: model.trim(), chatUrl };
+  }
 
   try {
     const { tagsUrl, chatUrl } = buildOllamaUrls(endpointUrl);
@@ -414,20 +877,89 @@ async function resolveEndpoint(config: AgentLlmConfig): Promise<ResolvedEndpoint
   }
 }
 
+async function generateAnthropicReply(
+  config: AgentLlmConfig,
+  messages: LlmMessage[],
+  systemPrompt: string
+) {
+  const response = await fetch(buildAnthropicMessagesUrl(config.llmEndpointUrl), {
+    method: "POST",
+    headers: buildAnthropicHeaders(config),
+    body: JSON.stringify({
+      model: config.llmModel?.trim(),
+      max_tokens: 2048,
+      system: systemPrompt,
+      messages: toAnthropicMessages(messages),
+    }),
+    signal: AbortSignal.timeout(60000),
+  });
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    throw new Error(details || `Anthropic request failed (${response.status})`);
+  }
+
+  const payload = await response.json() as Record<string, unknown>;
+  const content = extractAnthropicText(payload);
+  if (!content) {
+    throw new Error("Anthropic returned an empty response");
+  }
+
+  return {
+    content,
+    model: config.llmModel?.trim() || "",
+  };
+}
+
+async function generateBedrockReply(
+  config: AgentLlmConfig,
+  messages: LlmMessage[],
+  systemPrompt: string
+) {
+  const payload = await fetchBedrockJson(config, {
+    system: [{ text: systemPrompt }],
+    messages: toAnthropicMessages(messages).map((message) => ({
+      role: message.role,
+      content: [{ text: message.content }],
+    })),
+    inferenceConfig: { maxTokens: 2048 },
+  });
+  const content = extractBedrockText(payload as Record<string, unknown>);
+
+  if (!content) {
+    throw new Error("Bedrock returned an empty response");
+  }
+
+  return {
+    content,
+    model: config.llmModel?.trim() || "",
+  };
+}
+
 export async function generateAgentReply(
   config: AgentLlmConfig & { history: ChatMessageInput[]; enableThinking?: boolean }
 ) {
-  const resolved = await resolveEndpoint(config);
   const systemPrompt = buildSystemPrompt(config);
-  const messages = [
+  const messages: LlmMessage[] = [
     { role: "system" as const, content: systemPrompt },
     ...config.history,
   ];
+  const provider = resolveProvider(config);
+
+  if (provider === "anthropic") {
+    return generateAnthropicReply(config, messages, systemPrompt);
+  }
+
+  if (provider === "bedrock") {
+    return generateBedrockReply(config, messages, systemPrompt);
+  }
+
+  const resolved = await resolveEndpoint(config);
 
   if (resolved.kind === "ollama") {
     const response = await fetch(resolved.chatUrl, {
       method: "POST",
-      headers: buildJsonHeaders(config.llmUsername, config.llmPassword),
+      headers: buildJsonHeaders(config),
       body: JSON.stringify({
         model: resolved.model,
         stream: false,
@@ -452,7 +984,7 @@ export async function generateAgentReply(
 
   const response = await fetch(resolved.chatUrl, {
     method: "POST",
-    headers: buildJsonHeaders(config.llmUsername, config.llmPassword),
+    headers: buildJsonHeaders(config),
     body: JSON.stringify({
       model: resolved.model,
       messages,
@@ -484,14 +1016,30 @@ export async function* streamAgentReply(
     executeTool?: (name: string, args: Record<string, unknown>) => Promise<string>;
   }
 ): AsyncGenerator<AgentReplyStreamEvent> {
-  const resolved = await resolveEndpoint(config);
   const systemPrompt = buildSystemPrompt(config);
+  const provider = resolveProvider(config);
 
   // Build a mutable messages array (supports tool-call/result entries).
   const messages: LlmMessage[] = [
     { role: "system", content: systemPrompt },
     ...config.history,
   ];
+
+  if (provider === "anthropic") {
+    const response = await generateAnthropicReply(config, messages, systemPrompt);
+    yield { type: "content_delta", delta: response.content };
+    yield { type: "done", model: response.model };
+    return;
+  }
+
+  if (provider === "bedrock") {
+    const response = await generateBedrockReply(config, messages, systemPrompt);
+    yield { type: "content_delta", delta: response.content };
+    yield { type: "done", model: response.model };
+    return;
+  }
+
+  const resolved = await resolveEndpoint(config);
 
   // ── Tool use loop ────────────────────────────────────────────────────────
   // Run non-streaming rounds until the model produces no more tool calls
@@ -520,7 +1068,7 @@ export async function* streamAgentReply(
       try {
         toolResponse = await fetch(resolved.chatUrl, {
           method: "POST",
-          headers: buildJsonHeaders(config.llmUsername, config.llmPassword),
+          headers: buildJsonHeaders(config),
           body: JSON.stringify({
             model: resolved.model,
             messages,
@@ -646,7 +1194,7 @@ export async function* streamAgentReply(
   if (resolved.kind === "openai") {
     const response = await fetch(resolved.chatUrl, {
       method: "POST",
-      headers: buildJsonHeaders(config.llmUsername, config.llmPassword),
+      headers: buildJsonHeaders(config),
       body: JSON.stringify({
         model: resolved.model,
         messages,
@@ -765,7 +1313,7 @@ export async function* streamAgentReply(
 
   const response = await fetch(resolved.chatUrl, {
     method: "POST",
-    headers: buildJsonHeaders(config.llmUsername, config.llmPassword),
+    headers: buildJsonHeaders(config),
     body: JSON.stringify({
       model: resolved.model,
       stream: true,

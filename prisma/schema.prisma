@@ -527,13 +527,14 @@ model AIAgent {
   duties      String   @default("[]")         // JSON: string[] of duty descriptions
   avatar      String?                         // emoji or image URL
   status      String   @default("active")     // "active" | "inactive"
+  llmConfig       String   @default("")     // JSON: provider connections + allowed models + routing settings
   llmEndpointUrl  String?
   llmUsername     String?
   llmPassword     String?
   llmModel        String?
   llmThinkingMode String   @default("auto") // "off" | "auto" | "always"
   disabledTools   String   @default("[]")  // JSON string[]: tool names disabled for this agent
-  abilities       String   @default("[]")  // JSON string[]: allowed agent execution ability ids
+  abilities       String   @default("[]")  // JSON: AgentAbility[]
   llmStatus       String   @default("disconnected") // "disconnected" | "online" | "offline"
   llmLastCheckedAt DateTime?
   llmLastError     String?
@@ -571,6 +572,7 @@ model Conversation {
   id          String   @id @default(cuid())
   type        String   @default("direct") // "direct" | "group"
   name        String?
+  llmThreadState String @default("")      // JSON: selected thread model + audit trail
   createdById String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

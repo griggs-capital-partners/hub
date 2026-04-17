@@ -3,9 +3,37 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getDefaultAgentAbilities, normalizeAgentAbilitiesInput } from "@/lib/agent-task-context";
 import {
+  createDefaultAgentLlmConfig,
+  getPrimaryLegacyLlmFields,
+  normalizeAgentLlmConfig,
+  serializeAgentLlmConfig,
+  serializePublicAgentLlmConfig,
+} from "@/lib/agent-llm-config";
+import {
   createAgentConstitutionSeed,
   resolveAgentConstitutionPersistence,
 } from "@/lib/agent-constitution";
+
+function serializeAgentForClient(agent: {
+  llmConfig: string;
+  llmEndpointUrl: string | null;
+  llmUsername: string | null;
+  llmPassword: string | null;
+  llmModel: string | null;
+  llmThinkingMode: string | null;
+} & Record<string, unknown>) {
+  return {
+    ...agent,
+    llmConfig: serializePublicAgentLlmConfig(agent.llmConfig, {
+      llmEndpointUrl: agent.llmEndpointUrl,
+      llmUsername: agent.llmUsername,
+      llmPassword: agent.llmPassword,
+      llmModel: agent.llmModel,
+      llmThinkingMode: agent.llmThinkingMode,
+    }),
+    llmPassword: null,
+  };
+}
 
 // GET /api/agents — list all agents
 export async function GET() {
@@ -22,7 +50,7 @@ export async function GET() {
     },
   });
 
-  return NextResponse.json({ agents });
+  return NextResponse.json({ agents: agents.map((agent) => serializeAgentForClient(agent)) });
 }
 
 // POST /api/agents — create a new agent
@@ -33,7 +61,7 @@ export async function POST(request: Request) {
   }
 
   const body = await request.json();
-  const { name, role, description, persona, duties, avatar, status, abilities, constitution } = body;
+  const { name, role, description, persona, duties, avatar, status, abilities, constitution, llmConfig } = body;
 
   if (!name?.trim() || !role?.trim()) {
     return NextResponse.json({ error: "name and role are required" }, { status: 400 });
@@ -52,6 +80,8 @@ export async function POST(request: Request) {
       description: trimmedDescription,
     }),
   });
+  const normalizedLlmConfig = normalizeAgentLlmConfig(llmConfig ?? createDefaultAgentLlmConfig());
+  const mirroredLegacyFields = getPrimaryLegacyLlmFields(normalizedLlmConfig);
 
   const agent = await prisma.aIAgent.create({
     data: {
@@ -64,7 +94,12 @@ export async function POST(request: Request) {
       avatar: avatar?.trim() ?? null,
       status: status ?? "active",
       abilities: JSON.stringify(abilities !== undefined ? normalizeAgentAbilitiesInput(abilities) : getDefaultAgentAbilities()),
-      llmThinkingMode: "auto",
+      llmConfig: serializeAgentLlmConfig(normalizedLlmConfig),
+      llmEndpointUrl: mirroredLegacyFields.llmEndpointUrl,
+      llmUsername: mirroredLegacyFields.llmUsername,
+      llmPassword: mirroredLegacyFields.llmPassword,
+      llmModel: mirroredLegacyFields.llmModel,
+      llmThinkingMode: mirroredLegacyFields.llmThinkingMode,
       llmStatus: "disconnected",
       createdById: session.user.id,
     },
@@ -74,5 +109,5 @@ export async function POST(request: Request) {
     },
   });
 
-  return NextResponse.json({ agent }, { status: 201 });
+  return NextResponse.json({ agent: serializeAgentForClient(agent) }, { status: 201 });
 }

@@ -1,9 +1,21 @@
 import { prisma } from "@/lib/prisma";
-import { buildTaskContext, formatTaskContextForLlm, resolveAgentActionLabel, resolveAgentActionPrompt } from "@/lib/agent-task-context";
+import {
+  buildTaskContext,
+  formatTaskContextForLlm,
+  resolveAgentActionLabel,
+  resolveAgentActionPrompt,
+  resolveAgentLlmRoutingPolicy,
+} from "@/lib/agent-task-context";
 import { buildOrgContext } from "@/lib/agent-context";
 import { notifyAgentExecutionEmail } from "@/lib/agent-execution-email";
 import { notifyAgentExecutionStatus } from "@/lib/web-push";
 import { probeAgentLlm, streamAgentReply } from "@/lib/agent-llm";
+import {
+  buildExecutionTargetRuntimeConfig,
+  normalizeAgentLlmConfig,
+  normalizeConversationLlmThreadState,
+  planConversationLlmSelection,
+} from "@/lib/agent-llm-config";
 
 type RunAgentExecutionArgs = {
   executionId: string;
@@ -23,6 +35,7 @@ const EXECUTION_INCLUDE = {
       description: true,
       persona: true,
       duties: true,
+      llmConfig: true,
       llmEndpointUrl: true,
       llmUsername: true,
       llmPassword: true,
@@ -64,48 +77,13 @@ export async function runAgentExecution({ executionId, currentUserName }: RunAge
     }
 
     const agent = execution.agent;
-    const llmRecentlyChecked =
-      agent.llmStatus === "online" &&
-      agent.llmLastCheckedAt instanceof Date &&
-      Date.now() - agent.llmLastCheckedAt.getTime() < 60_000;
-
-    console.log("[agent-execution] checking llm health", {
-      executionId,
-      agentId: agent.id,
-      llmRecentlyChecked,
-      endpointConfigured: Boolean(agent.llmEndpointUrl?.trim()),
-      model: agent.llmModel ?? null,
+    const normalizedLlmConfig = normalizeAgentLlmConfig(agent.llmConfig, {
+      llmEndpointUrl: agent.llmEndpointUrl,
+      llmUsername: agent.llmUsername,
+      llmPassword: agent.llmPassword,
+      llmModel: agent.llmModel,
+      llmThinkingMode: agent.llmThinkingMode,
     });
-
-    const llmHealth = llmRecentlyChecked
-      ? {
-          llmStatus: agent.llmStatus,
-          llmModel: agent.llmModel,
-          llmLastCheckedAt: agent.llmLastCheckedAt,
-          llmLastError: agent.llmLastError,
-        }
-      : await probeAgentLlm(agent);
-
-    console.log("[agent-execution] llm health resolved", {
-      executionId,
-      llmStatus: llmHealth.llmStatus,
-      llmModel: llmHealth.llmModel,
-      llmLastError: llmHealth.llmLastError,
-    });
-
-    await prisma.aIAgent.update({
-      where: { id: agent.id },
-      data: {
-        llmStatus: llmHealth.llmStatus,
-        llmModel: llmHealth.llmModel,
-        llmLastCheckedAt: llmHealth.llmLastCheckedAt,
-        llmLastError: llmHealth.llmLastError,
-      },
-    });
-
-    if (llmHealth.llmStatus !== "online") {
-      throw new Error(llmHealth.llmLastError || "LLM brain is offline");
-    }
 
     console.log("[agent-execution] building task and org context", {
       executionId,
@@ -132,19 +110,70 @@ export async function runAgentExecution({ executionId, currentUserName }: RunAge
       .filter(Boolean)
       .join("");
 
+    const executionLlmPlan = planConversationLlmSelection({
+      config: normalizedLlmConfig,
+      currentState: normalizeConversationLlmThreadState(""),
+      message: userMessage,
+      historyCount: 0,
+      routingPolicy: resolveAgentLlmRoutingPolicy(execution.agent.abilities),
+    });
+    const selectedTarget = executionLlmPlan.target;
+    const selectedRuntimeConfig = selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : null;
+
+    console.log("[agent-execution] routed llm target", {
+      executionId,
+      selectedBy: executionLlmPlan.state.selectedBy,
+      provider: selectedTarget?.provider ?? null,
+      model: selectedTarget?.model ?? null,
+      connectionId: selectedTarget?.connectionId ?? null,
+      reason: executionLlmPlan.state.reasonSummary,
+    });
+
+    console.log("[agent-execution] checking llm health", {
+      executionId,
+      agentId: agent.id,
+      provider: selectedTarget?.provider ?? null,
+      endpointConfigured: Boolean(selectedTarget?.endpointUrl || agent.llmEndpointUrl?.trim()),
+      model: selectedTarget?.model ?? null,
+    });
+
+    const llmHealth = await probeAgentLlm(selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : agent);
+
+    console.log("[agent-execution] llm health resolved", {
+      executionId,
+      llmStatus: llmHealth.llmStatus,
+      llmModel: llmHealth.llmModel,
+      llmLastError: llmHealth.llmLastError,
+    });
+
+    await prisma.aIAgent.update({
+      where: { id: agent.id },
+      data: {
+        llmStatus: llmHealth.llmStatus,
+        llmModel: llmHealth.llmModel,
+        llmLastCheckedAt: llmHealth.llmLastCheckedAt,
+        llmLastError: llmHealth.llmLastError,
+      },
+    });
+
+    if (llmHealth.llmStatus !== "online") {
+      throw new Error(llmHealth.llmLastError || "LLM brain is offline");
+    }
+
     let finalContent = "";
-    let resolvedModel = llmHealth.llmModel ?? agent.llmModel ?? null;
+    let resolvedModel = llmHealth.llmModel ?? selectedTarget?.model ?? agent.llmModel ?? null;
     let sawFirstDelta = false;
 
     console.log("[agent-execution] starting llm stream", {
       executionId,
-      model: llmHealth.llmModel ?? agent.llmModel ?? null,
+      model: selectedTarget?.model ?? llmHealth.llmModel ?? agent.llmModel ?? null,
       promptLength: userMessage.length,
     });
 
     for await (const event of streamAgentReply({
       ...agent,
-      llmModel: llmHealth.llmModel ?? agent.llmModel,
+      ...(selectedRuntimeConfig ?? {}),
+      llmThinkingMode: selectedTarget?.thinkingMode ?? agent.llmThinkingMode,
       orgContext,
       currentUserName,
       history: [{ role: "user", content: userMessage }],

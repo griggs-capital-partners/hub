@@ -2,12 +2,47 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { probeAgentLlm } from "@/lib/agent-llm";
+import {
+  applyAgentLlmConnectionProbeResult,
+  buildExecutionTargetRuntimeConfig,
+  getPrimaryLegacyLlmFields,
+  mergeAgentLlmConfigWithStoredSecrets,
+  normalizeAgentLlmConfig,
+  normalizeConversationLlmThreadState,
+  reconcileConversationLlmThreadState,
+  resolveExecutionTargetForConnection,
+  resolvePrimaryExecutionTarget,
+  serializeAgentLlmConfig,
+  serializeConversationLlmThreadState,
+  serializePublicAgentLlmConfig,
+} from "@/lib/agent-llm-config";
 import { normalizeAgentAbilitiesInput } from "@/lib/agent-task-context";
 import {
   createAgentConstitutionSeed,
   parseAgentConstitution,
   resolveAgentConstitutionPersistence,
 } from "@/lib/agent-constitution";
+
+function serializeAgentForClient(agent: {
+  llmConfig: string;
+  llmEndpointUrl: string | null;
+  llmUsername: string | null;
+  llmPassword: string | null;
+  llmModel: string | null;
+  llmThinkingMode: string | null;
+} & Record<string, unknown>) {
+  return {
+    ...agent,
+    llmConfig: serializePublicAgentLlmConfig(agent.llmConfig, {
+      llmEndpointUrl: agent.llmEndpointUrl,
+      llmUsername: agent.llmUsername,
+      llmPassword: agent.llmPassword,
+      llmModel: agent.llmModel,
+      llmThinkingMode: agent.llmThinkingMode,
+    }),
+    llmPassword: null,
+  };
+}
 
 // GET /api/agents/[id] — fetch a single agent with stats
 export async function GET(
@@ -33,7 +68,7 @@ export async function GET(
     return NextResponse.json({ error: "Agent not found" }, { status: 404 });
   }
 
-  return NextResponse.json({ agent });
+  return NextResponse.json({ agent: serializeAgentForClient(agent) });
 }
 
 // PATCH /api/agents/[id] — update agent
@@ -64,7 +99,9 @@ export async function PATCH(
     llmPassword,
     llmModel,
     llmThinkingMode,
+    llmConfig,
     refreshLlmStatus,
+    probeConnectionId,
   } = body;
 
   const existing = await prisma.aIAgent.findUnique({ where: { id } });
@@ -94,16 +131,50 @@ export async function PATCH(
   const nextLlmPassword = llmPassword !== undefined ? llmPassword?.trim() || null : existing.llmPassword;
   // llmModel override: empty string means "auto-detect", otherwise use the provided value.
   const nextLlmModelOverride = llmModel !== undefined ? llmModel?.trim() || null : existing.llmModel;
+  const nextLlmThinkingMode = llmThinkingMode !== undefined ? llmThinkingMode : existing.llmThinkingMode;
+  const legacyFallback = {
+    llmEndpointUrl: nextLlmEndpointUrl,
+    llmUsername: nextLlmUsername,
+    llmPassword: nextLlmPassword,
+    llmModel: nextLlmModelOverride,
+    llmThinkingMode: nextLlmThinkingMode,
+  };
+  const nextLlmConfig = llmConfig !== undefined
+    ? mergeAgentLlmConfigWithStoredSecrets(llmConfig, existing.llmConfig, legacyFallback)
+    : normalizeAgentLlmConfig(existing.llmConfig, legacyFallback);
+  const baseMirroredLegacyFields = getPrimaryLegacyLlmFields(nextLlmConfig);
+  const primaryExecutionTarget = resolvePrimaryExecutionTarget(nextLlmConfig);
+  const requestedExecutionTarget = typeof probeConnectionId === "string" && probeConnectionId.trim()
+    ? resolveExecutionTargetForConnection(nextLlmConfig, probeConnectionId.trim()) ?? primaryExecutionTarget
+    : primaryExecutionTarget;
 
-  const llmFieldsChanged = llmEndpointUrl !== undefined || llmUsername !== undefined || llmPassword !== undefined || llmModel !== undefined;
-  const nextLlmStatus = (llmFieldsChanged || refreshLlmStatus)
-    ? await probeAgentLlm({
-        llmEndpointUrl: nextLlmEndpointUrl,
-        llmUsername: nextLlmUsername,
-        llmPassword: nextLlmPassword,
-        llmModel: nextLlmModelOverride,
-      })
+  const llmConnectionFieldsChanged =
+    llmEndpointUrl !== undefined
+    || llmUsername !== undefined
+    || llmPassword !== undefined
+    || llmModel !== undefined
+    || llmConfig !== undefined;
+  const llmSettingsChanged = llmConnectionFieldsChanged || llmThinkingMode !== undefined;
+  const nextLlmStatus = (llmConnectionFieldsChanged || refreshLlmStatus)
+    ? await probeAgentLlm(requestedExecutionTarget
+        ? buildExecutionTargetRuntimeConfig(requestedExecutionTarget)
+        : {
+            llmProvider: primaryExecutionTarget?.provider,
+            llmEndpointUrl: baseMirroredLegacyFields.llmEndpointUrl,
+            llmUsername: baseMirroredLegacyFields.llmUsername,
+            llmPassword: baseMirroredLegacyFields.llmPassword,
+            llmModel: baseMirroredLegacyFields.llmModel,
+            llmThinkingMode: baseMirroredLegacyFields.llmThinkingMode,
+          })
     : null;
+  const probedConnectionId = typeof probeConnectionId === "string" && probeConnectionId.trim()
+    ? probeConnectionId.trim()
+    : requestedExecutionTarget?.connectionId ?? primaryExecutionTarget?.connectionId ?? null;
+  const persistedLlmConfig = nextLlmStatus && probedConnectionId
+    ? applyAgentLlmConnectionProbeResult(nextLlmConfig, probedConnectionId, nextLlmStatus)
+    : nextLlmConfig;
+  const mirroredLegacyFields = getPrimaryLegacyLlmFields(persistedLlmConfig);
+  const shouldPersistLlmConfig = llmSettingsChanged || refreshLlmStatus || Boolean(probedConnectionId);
 
   const agent = await prisma.aIAgent.update({
     where: { id },
@@ -125,11 +196,12 @@ export async function PATCH(
       ...(avatar !== undefined && { avatar: avatar?.trim() ?? null }),
       ...(status !== undefined && { status }),
       ...(abilities !== undefined && { abilities: JSON.stringify(normalizeAgentAbilitiesInput(abilities)) }),
-      ...(llmEndpointUrl !== undefined && { llmEndpointUrl: nextLlmEndpointUrl }),
-      ...(llmUsername !== undefined && { llmUsername: nextLlmUsername }),
-      ...(llmPassword !== undefined && { llmPassword: nextLlmPassword }),
-      ...(llmModel !== undefined && { llmModel: nextLlmModelOverride }),
-      ...(llmThinkingMode !== undefined && { llmThinkingMode }),
+      ...(shouldPersistLlmConfig && { llmConfig: serializeAgentLlmConfig(persistedLlmConfig) }),
+      ...(shouldPersistLlmConfig && { llmEndpointUrl: mirroredLegacyFields.llmEndpointUrl }),
+      ...(shouldPersistLlmConfig && { llmUsername: mirroredLegacyFields.llmUsername }),
+      ...(shouldPersistLlmConfig && { llmPassword: mirroredLegacyFields.llmPassword }),
+      ...(shouldPersistLlmConfig && { llmModel: mirroredLegacyFields.llmModel }),
+      ...(shouldPersistLlmConfig && { llmThinkingMode: mirroredLegacyFields.llmThinkingMode }),
       ...(disabledTools !== undefined && { disabledTools: Array.isArray(disabledTools) ? JSON.stringify(disabledTools) : "[]" }),
       ...(nextLlmStatus && {
         llmStatus: nextLlmStatus.llmStatus,
@@ -144,7 +216,41 @@ export async function PATCH(
     },
   });
 
-  return NextResponse.json({ agent });
+  if (shouldPersistLlmConfig) {
+    const relatedConversations = await prisma.conversation.findMany({
+      where: {
+        members: {
+          some: { agentId: id },
+        },
+      },
+      select: {
+        id: true,
+        llmThreadState: true,
+      },
+    });
+
+    await Promise.all(
+      relatedConversations.map((conversation) => {
+        const storedThreadLlmState = normalizeConversationLlmThreadState(conversation.llmThreadState);
+        const reconciledThreadLlmState = reconcileConversationLlmThreadState(persistedLlmConfig, storedThreadLlmState);
+        const nextSerializedThreadState = serializeConversationLlmThreadState(reconciledThreadLlmState);
+
+        if (nextSerializedThreadState === serializeConversationLlmThreadState(storedThreadLlmState)) {
+          return Promise.resolve(null);
+        }
+
+        return prisma.conversation.update({
+          where: { id: conversation.id },
+          data: {
+            llmThreadState: nextSerializedThreadState,
+            updatedAt: new Date(),
+          },
+        });
+      })
+    );
+  }
+
+  return NextResponse.json({ agent: serializeAgentForClient(agent) });
 }
 
 // DELETE /api/agents/[id] — delete agent

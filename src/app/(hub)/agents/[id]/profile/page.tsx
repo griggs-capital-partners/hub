@@ -8,12 +8,23 @@ import {
   Loader2, Bot, ChevronDown, MessageSquare,
   CalendarDays, User, Sparkles, ListTodo, Sliders,
   AlertTriangle, PlugZap, ShieldCheck, ShieldAlert, Link as LinkIcon, RefreshCw, KeyRound, Camera,
-  Wrench, WandSparkles,
+  Wrench, WandSparkles, Plus, Trash2,
 } from "lucide-react";
 import { agentChatTools, TOOL_LABELS } from "@/lib/agent-tools";
 import { getDefaultAgentAbilities, normalizeAgentAbilities, slugifyAbilityId, type AgentAbility } from "@/lib/agent-task-context";
 import { AgentConstitutionEditor } from "@/components/agents/AgentConstitutionEditor";
 import { hasStoredAgentConstitution } from "@/lib/agent-constitution";
+import {
+  AGENT_LLM_PROVIDER_OPTIONS,
+  createEmptyAgentLlmConnection,
+  getAgentLlmCatalog,
+  isAgentLlmConnectionConfigured,
+  normalizeAgentLlmConfig,
+  switchAgentLlmConnectionProvider,
+  type AgentLlmConfigDocument,
+  type AgentLlmConnection,
+  type AgentLlmProvider,
+} from "@/lib/agent-llm-config";
 import { Card, CardBody, CardHeader } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { cn } from "@/lib/utils";
@@ -30,6 +41,7 @@ interface Agent {
   duties: string;
   avatar: string | null;
   status: string;
+  llmConfig: string;
   llmEndpointUrl: string | null;
   llmUsername: string | null;
   llmPassword: string | null;
@@ -326,30 +338,32 @@ function AvatarPicker({ value, onSave }: { value: string | null; onSave: (val: s
   );
 }
 
-function LlmConnectionCard({
-  agent,
-  onSave,
-  onRefresh,
-}: {
-  agent: Agent;
-  onSave: (fields: Record<string, unknown>) => Promise<void>;
-  onRefresh: () => Promise<void>;
-}) {
-  const [endpointUrl, setEndpointUrl] = useState(agent.llmEndpointUrl ?? "");
-  const [username, setUsername] = useState(agent.llmUsername ?? "");
-  const [password, setPassword] = useState(agent.llmPassword ?? "");
-  const [modelName, setModelName] = useState(agent.llmModel ?? "");
+function getNormalizedAgentLlmConfig(agent: Agent) {
+  const config = normalizeAgentLlmConfig(agent.llmConfig, {
+    llmEndpointUrl: agent.llmEndpointUrl,
+    llmUsername: agent.llmUsername,
+    llmPassword: agent.llmPassword,
+    llmModel: agent.llmModel,
+    llmThinkingMode: agent.llmThinkingMode,
+  });
+  return config.connections.length > 0
+    ? config
+    : {
+        ...config,
+        connections: [createEmptyAgentLlmConnection(0)],
+      };
+}
+
+/*
+  const [config, setConfig] = useState<AgentLlmConfigDocument>(() => getNormalizedAgentLlmConfig(agent));
   const [thinkingMode, setThinkingMode] = useState(agent.llmThinkingMode ?? "auto");
   const [saving, setSaving] = useState(false);
   const [checking, setChecking] = useState(false);
 
   useEffect(() => {
-    setEndpointUrl(agent.llmEndpointUrl ?? "");
-    setUsername(agent.llmUsername ?? "");
-    setPassword(agent.llmPassword ?? "");
-    setModelName(agent.llmModel ?? "");
+    setConfig(getNormalizedAgentLlmConfig(agent));
     setThinkingMode(agent.llmThinkingMode ?? "auto");
-  }, [agent.llmEndpointUrl, agent.llmUsername, agent.llmPassword, agent.llmModel, agent.llmThinkingMode]);
+  }, [agent]);
 
   const statusLabel = agent.llmStatus === "online"
     ? "LLM Brain Online"
@@ -362,15 +376,78 @@ function LlmConnectionCard({
     : agent.llmStatus === "offline"
       ? "#EF4444"
       : "#8D877F";
+  const catalog = getAgentLlmCatalog(config);
+  const hasIncompleteConnections = config.connections.some((connection) => !connection.endpointUrl.trim());
+  const endpointUrl = config.connections[0]?.endpointUrl ?? agent.llmEndpointUrl ?? "";
+  const username = config.connections[0]?.username ?? agent.llmUsername ?? "";
+  const password = config.connections[0]?.password ?? agent.llmPassword ?? "";
+  const modelName = config.connections[0]?.model ?? agent.llmModel ?? "";
+  const legacyConnectionId = config.connections[0]?.id ?? null;
+
+  function updateConnection(connectionId: string, patch: Partial<AgentLlmConnection>) {
+    setConfig((current) => ({
+      ...current,
+      connections: current.connections.map((connection) =>
+        connection.id === connectionId ? { ...connection, ...patch } : connection
+      ),
+    }));
+  }
+
+  function setEndpointUrl(value: string) {
+    if (!legacyConnectionId) return;
+    updateConnection(legacyConnectionId, { endpointUrl: value });
+  }
+
+  function setUsername(value: string) {
+    if (!legacyConnectionId) return;
+    updateConnection(legacyConnectionId, { username: value });
+  }
+
+  function setPassword(value: string) {
+    if (!legacyConnectionId) return;
+    updateConnection(legacyConnectionId, { password: value });
+  }
+
+  function setModelName(value: string) {
+    if (!legacyConnectionId) return;
+    updateConnection(legacyConnectionId, { model: value.trim() });
+  }
+
+  function addConnection() {
+    setConfig((current) => ({
+      ...current,
+      connections: [...current.connections, createEmptyAgentLlmConnection(current.connections.length)],
+    }));
+  }
+
+  function removeConnection(connectionId: string) {
+    setConfig((current) => {
+      const nextConnections = current.connections.filter((connection) => connection.id !== connectionId);
+      const availableKeys = nextConnections.flatMap((connection) => connection.model ? [`${connection.id}::${connection.model}`] : []);
+
+      return {
+        ...current,
+        connections: nextConnections,
+        routing: {
+          ...current.routing,
+          defaultModelKey: availableKeys.includes(current.routing.defaultModelKey ?? "")
+            ? current.routing.defaultModelKey
+            : null,
+        },
+      };
+    });
+  }
+
+  void catalog;
+  void hasIncompleteConnections;
+  void addConnection;
+  void removeConnection;
 
   async function saveConnection() {
     setSaving(true);
     try {
       await onSave({
-        llmEndpointUrl: endpointUrl,
-        llmUsername: username,
-        llmPassword: password,
-        llmModel: modelName.trim() || null,
+        llmConfig: config,
         llmThinkingMode: thinkingMode,
       });
     } finally {
@@ -393,7 +470,7 @@ function LlmConnectionCard({
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <PlugZap size={15} style={{ color: AGENT_COLOR }} />
-            <span className="text-sm font-bold text-[#F0F0F0]">LLM Connection</span>
+            <span className="text-sm font-bold text-[#F0F0F0]">LLM Connections</span>
           </div>
           <div
             className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.16em]"
@@ -530,6 +607,765 @@ function LlmConnectionCard({
 }
 
 // ─── Tools & Capabilities card ───────────────────────────────────────────────
+
+*/
+
+const THINKING_MODE_OPTIONS: Array<{
+  value: AgentLlmConnection["thinkingMode"];
+  label: string;
+  description: string;
+}> = [
+  { value: "off", label: "Off", description: "Reply directly without visible reasoning." },
+  { value: "auto", label: "Auto", description: "Default. Think only when the prompt looks analytical." },
+  { value: "always", label: "Always Think", description: "Always stream reasoning before the answer." },
+];
+
+function reconcileLlmConfig(config: AgentLlmConfigDocument) {
+  const availableKeys = getAgentLlmCatalog(config).map((entry) => entry.key);
+  return {
+    ...config,
+    routing: {
+      ...config.routing,
+      defaultModelKey: availableKeys.includes(config.routing.defaultModelKey ?? "")
+        ? config.routing.defaultModelKey
+        : null,
+    },
+  };
+}
+
+function getProviderLabel(provider: AgentLlmProvider) {
+  return AGENT_LLM_PROVIDER_OPTIONS.find((option) => option.id === provider)?.label ?? "Local / Custom Endpoint";
+}
+
+function getConnectionStatusMeta(connection: AgentLlmConnection) {
+  if (connection.status === "online") {
+    return { label: "LLM Brain Online", color: "#22C55E" };
+  }
+
+  if (connection.status === "offline") {
+    return { label: "LLM Brain Offline", color: "#EF4444" };
+  }
+
+  if (isAgentLlmConnectionConfigured(connection)) {
+    return { label: "Connection Saved", color: AGENT_COLOR };
+  }
+
+  return { label: "LLM Brain Not Connected", color: "#8D877F" };
+}
+
+function LlmSecretField({
+  label,
+  value,
+  hasStoredValue,
+  placeholder,
+  helperText,
+  editing,
+  onToggleEditing,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  hasStoredValue: boolean;
+  placeholder: string;
+  helperText?: string;
+  editing: boolean;
+  onToggleEditing: (next: boolean) => void;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <label className="block text-sm font-medium text-[#9A9A9A]">{label}</label>
+        {hasStoredValue ? (
+          <button
+            type="button"
+            onClick={() => onToggleEditing(!editing)}
+            className="text-[11px] font-semibold uppercase tracking-[0.14em] text-[#9FCBE0]"
+          >
+            {editing ? "Keep Saved" : "Replace"}
+          </button>
+        ) : null}
+      </div>
+      {hasStoredValue && !editing && !value.trim() ? (
+        <div className="rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#151515] px-4 py-3 text-sm text-[#8D877F]">
+          Saved on the server and hidden after save.
+        </div>
+      ) : (
+        <div className="relative">
+          <KeyRound size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#606060]" />
+          <input
+            type="password"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={placeholder}
+            className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] py-2.5 pl-9 pr-4 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+          />
+        </div>
+      )}
+      {helperText ? <p className="mt-1.5 text-xs text-[#606060]">{helperText}</p> : null}
+    </div>
+  );
+}
+
+function LlmConnectionCard({
+  agent,
+  onSave,
+  onRefresh,
+}: {
+  agent: Agent;
+  onSave: (fields: Record<string, unknown>) => Promise<void>;
+  onRefresh: (connectionId?: string) => Promise<void>;
+}) {
+  const [config, setConfig] = useState<AgentLlmConfigDocument>(() => getNormalizedAgentLlmConfig(agent));
+  const [savingConnectionId, setSavingConnectionId] = useState<string | null>(null);
+  const [checkingConnectionId, setCheckingConnectionId] = useState<string | null>(null);
+  const [savingRouting, setSavingRouting] = useState(false);
+  const [showProviderPicker, setShowProviderPicker] = useState(false);
+  const [editingSecrets, setEditingSecrets] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    setConfig(getNormalizedAgentLlmConfig(agent));
+    setShowProviderPicker(false);
+    setEditingSecrets({});
+  }, [agent]);
+
+  const catalog = getAgentLlmCatalog(config);
+
+  function updateConnectionFields(connectionId: string, patch: Partial<AgentLlmConnection>) {
+    updateConnection(connectionId, (connection) => ({ ...connection, ...patch }));
+  }
+
+  function updateConnectionAuth(connectionId: string, patch: Partial<AgentLlmConnection["auth"]>) {
+    updateConnection(connectionId, (connection) => ({
+      ...connection,
+      auth: { ...connection.auth, ...patch },
+    }));
+  }
+
+  function updateConnectionSettings(connectionId: string, patch: Partial<AgentLlmConnection["connection"]>) {
+    updateConnection(connectionId, (connection) => ({
+      ...connection,
+      connection: { ...connection.connection, ...patch },
+    }));
+  }
+
+  function updateConnection(connectionId: string, updater: (connection: AgentLlmConnection) => AgentLlmConnection) {
+    setConfig((current) => reconcileLlmConfig({
+      ...current,
+      connections: current.connections.map((connection) =>
+        connection.id === connectionId ? updater(connection) : connection
+      ),
+    }));
+  }
+
+  function setSecretEditing(connectionId: string, field: "password" | "apiKey" | "secretAccessKey", next: boolean) {
+    setEditingSecrets((current) => {
+      const key = `${connectionId}:${field}`;
+      if (!next) {
+        const nextState = { ...current };
+        delete nextState[key];
+        return nextState;
+      }
+
+      return { ...current, [key]: true };
+    });
+  }
+
+  function isSecretEditing(connectionId: string, field: "password" | "apiKey" | "secretAccessKey") {
+    return Boolean(editingSecrets[`${connectionId}:${field}`]);
+  }
+
+  function addConnection(provider: AgentLlmProvider) {
+    setConfig((current) => ({
+      ...current,
+      connections: [...current.connections, createEmptyAgentLlmConnection(current.connections.length, provider)],
+    }));
+    setShowProviderPicker(false);
+  }
+
+  function removeConnection(connectionId: string) {
+    setConfig((current) => {
+      if (current.connections.length <= 1) {
+        return current;
+      }
+
+      const nextConfig = reconcileLlmConfig({
+        ...current,
+        connections: current.connections.filter((connection) => connection.id !== connectionId),
+      });
+      return nextConfig;
+    });
+  }
+
+  async function saveConnection(connectionId: string) {
+    setSavingConnectionId(connectionId);
+    try {
+      await onSave({
+        llmConfig: config,
+        probeConnectionId: connectionId,
+      });
+    } finally {
+      setSavingConnectionId(null);
+    }
+  }
+
+  async function refreshConnection(connectionId: string) {
+    setCheckingConnectionId(connectionId);
+    try {
+      await onRefresh(connectionId);
+    } finally {
+      setCheckingConnectionId(null);
+    }
+  }
+
+  async function saveRoutingSettings() {
+    setSavingRouting(true);
+    try {
+      await onSave({ llmConfig: config });
+    } finally {
+      setSavingRouting(false);
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-[#F0F0F0]">LLM Connections</p>
+          <p className="mt-1 text-xs leading-5 text-[#606060]">
+            Add one or more LLM cards for this agent. Routing only uses enabled, configured cards saved here.
+          </p>
+        </div>
+        <Button size="sm" variant="secondary" onClick={() => setShowProviderPicker((current) => !current)} icon={<Plus size={13} />}>
+          Add LLM
+        </Button>
+      </div>
+
+      {showProviderPicker ? (
+        <Card>
+          <CardHeader className="border-b border-[rgba(255,255,255,0.06)] px-6 py-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-bold text-[#F0F0F0]">Choose a Provider</p>
+                <p className="mt-1 text-xs text-[#606060]">Pick the source first, then configure the new card.</p>
+              </div>
+              <Button size="sm" variant="secondary" onClick={() => setShowProviderPicker(false)}>
+                Cancel
+              </Button>
+            </div>
+          </CardHeader>
+          <CardBody className="grid gap-3 p-6 md:grid-cols-2">
+            {AGENT_LLM_PROVIDER_OPTIONS.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => addConnection(option.id)}
+                className="rounded-2xl border border-[rgba(255,255,255,0.06)] bg-[#171717] px-4 py-4 text-left transition-all hover:border-[rgba(75,156,211,0.32)] hover:bg-[rgba(75,156,211,0.08)]"
+              >
+                <p className="text-sm font-semibold text-[#F0F0F0]">{option.label}</p>
+                <p className="mt-1 text-xs leading-5 text-[#8D877F]">{option.description}</p>
+              </button>
+            ))}
+          </CardBody>
+        </Card>
+      ) : null}
+
+      {config.connections.map((connection, index) => {
+        const statusMeta = getConnectionStatusMeta(connection);
+        const canRoute = isAgentLlmConnectionConfigured(connection);
+        const isLocal = connection.provider === "local";
+        const isOpenAi = connection.provider === "openai";
+        const isAnthropic = connection.provider === "anthropic";
+        const isBedrock = connection.provider === "bedrock";
+
+        return (
+          <Card key={connection.id}>
+            <CardHeader className="border-b border-[rgba(255,255,255,0.06)] px-6 py-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <PlugZap size={15} style={{ color: AGENT_COLOR }} />
+                  <span className="text-sm font-bold text-[#F0F0F0]">LLM Connection</span>
+                  {config.connections.length > 1 ? (
+                    <span className="rounded-full border border-[rgba(255,255,255,0.08)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[#606060]">
+                      {index + 1}
+                    </span>
+                  ) : null}
+                </div>
+                <div
+                  className="inline-flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-bold uppercase tracking-[0.16em]"
+                  style={{ color: statusMeta.color, borderColor: `${statusMeta.color}44`, backgroundColor: `${statusMeta.color}16` }}
+                >
+                  <span className="h-2 w-2 rounded-full" style={{ backgroundColor: statusMeta.color }} />
+                  {statusMeta.label}
+                </div>
+              </div>
+            </CardHeader>
+            <CardBody className="space-y-4 p-6">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Label</label>
+                  <input
+                    value={connection.label}
+                    onChange={(e) => updateConnectionFields(connection.id, { label: e.target.value })}
+                    placeholder={getProviderLabel(connection.provider)}
+                    className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] px-4 py-2.5 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)]"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Provider</label>
+                  <select
+                    value={connection.provider}
+                    onChange={(e) => updateConnection(connection.id, (current) => switchAgentLlmConnectionProvider(current, e.target.value as AgentLlmProvider))}
+                    className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] px-4 py-2.5 text-sm text-[#F0F0F0] focus:outline-none focus:border-[rgba(75,156,211,0.4)]"
+                  >
+                    {AGENT_LLM_PROVIDER_OPTIONS.map((option) => (
+                      <option key={option.id} value={option.id}>{option.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="md:col-span-2">
+                  <label className="flex items-center justify-between rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#171717] px-4 py-3 text-sm text-[#F0F0F0]">
+                    <span className="font-medium">Enabled for routing</span>
+                    <input
+                      type="checkbox"
+                      checked={connection.enabled}
+                      onChange={(e) => updateConnectionFields(connection.id, { enabled: e.target.checked })}
+                      className="h-4 w-4 accent-[#4B9CD3]"
+                    />
+                  </label>
+                </div>
+
+                {isLocal ? (
+                  <>
+                    <div className="md:col-span-2">
+                      <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">API Endpoint URL</label>
+                      <div className="relative">
+                        <LinkIcon size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#606060]" />
+                        <input
+                          value={connection.connection.endpointUrl}
+                          onChange={(e) => updateConnectionSettings(connection.id, { endpointUrl: e.target.value })}
+                          placeholder="https://your-ngrok-url.ngrok-free.app"
+                          className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] py-2.5 pl-9 pr-4 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Username</label>
+                      <div className="relative">
+                        <ShieldCheck size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#606060]" />
+                        <input
+                          value={connection.auth.username}
+                          onChange={(e) => updateConnectionAuth(connection.id, { username: e.target.value })}
+                          placeholder="bmac"
+                          className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] py-2.5 pl-9 pr-4 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                        />
+                      </div>
+                    </div>
+
+                    <LlmSecretField
+                      label="Password"
+                      value={connection.auth.password}
+                      hasStoredValue={Boolean(connection.auth.hasPassword)}
+                      placeholder="Basic auth password"
+                      helperText="Stored server-side. Replace it only when the endpoint credentials change."
+                      editing={isSecretEditing(connection.id, "password")}
+                      onToggleEditing={(next) => setSecretEditing(connection.id, "password", next)}
+                      onChange={(value) => updateConnectionAuth(connection.id, {
+                        password: value,
+                        hasPassword: Boolean(value.trim() || connection.auth.hasPassword),
+                      })}
+                    />
+
+                    <div className="md:col-span-2">
+                      <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Model</label>
+                      <div className="relative">
+                        <Cpu size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#606060]" />
+                        <input
+                          value={connection.model}
+                          onChange={(e) => updateConnectionFields(connection.id, { model: e.target.value })}
+                          placeholder="e.g. gemma4 - leave blank to auto-detect"
+                          className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] py-2.5 pl-9 pr-4 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                        />
+                      </div>
+                      <p className="mt-1.5 text-xs text-[#606060]">Pin a specific model name. Blank = use the first model the endpoint reports.</p>
+                    </div>
+                  </>
+                ) : null}
+
+                {isOpenAi ? (
+                  <>
+                    <LlmSecretField
+                      label="API Key"
+                      value={connection.auth.apiKey}
+                      hasStoredValue={Boolean(connection.auth.hasApiKey)}
+                      placeholder="sk-..."
+                      helperText="Stored server-side. This key is used only for this agent card."
+                      editing={isSecretEditing(connection.id, "apiKey")}
+                      onToggleEditing={(next) => setSecretEditing(connection.id, "apiKey", next)}
+                      onChange={(value) => updateConnectionAuth(connection.id, {
+                        apiKey: value,
+                        hasApiKey: Boolean(value.trim() || connection.auth.hasApiKey),
+                      })}
+                    />
+
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Model</label>
+                      <div className="relative">
+                        <Cpu size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#606060]" />
+                        <input
+                          value={connection.model}
+                          onChange={(e) => updateConnectionFields(connection.id, { model: e.target.value })}
+                          placeholder="gpt-4.1"
+                          className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] py-2.5 pl-9 pr-4 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Base URL Override</label>
+                      <div className="relative">
+                        <LinkIcon size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#606060]" />
+                        <input
+                          value={connection.connection.endpointUrl}
+                          onChange={(e) => updateConnectionSettings(connection.id, { endpointUrl: e.target.value })}
+                          placeholder="Optional - defaults to api.openai.com"
+                          className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] py-2.5 pl-9 pr-4 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                        />
+                      </div>
+                    </div>
+                  </>
+                ) : null}
+
+                {isAnthropic ? (
+                  <>
+                    <LlmSecretField
+                      label="API Key"
+                      value={connection.auth.apiKey}
+                      hasStoredValue={Boolean(connection.auth.hasApiKey)}
+                      placeholder="sk-ant-..."
+                      helperText="Stored server-side. This key is used only for this agent card."
+                      editing={isSecretEditing(connection.id, "apiKey")}
+                      onToggleEditing={(next) => setSecretEditing(connection.id, "apiKey", next)}
+                      onChange={(value) => updateConnectionAuth(connection.id, {
+                        apiKey: value,
+                        hasApiKey: Boolean(value.trim() || connection.auth.hasApiKey),
+                      })}
+                    />
+
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Model</label>
+                      <div className="relative">
+                        <Cpu size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#606060]" />
+                        <input
+                          value={connection.model}
+                          onChange={(e) => updateConnectionFields(connection.id, { model: e.target.value })}
+                          placeholder="claude-3-7-sonnet-latest"
+                          className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] py-2.5 pl-9 pr-4 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Base URL Override</label>
+                      <div className="relative">
+                        <LinkIcon size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#606060]" />
+                        <input
+                          value={connection.connection.endpointUrl}
+                          onChange={(e) => updateConnectionSettings(connection.id, { endpointUrl: e.target.value })}
+                          placeholder="Optional - defaults to api.anthropic.com"
+                          className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] py-2.5 pl-9 pr-4 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                        />
+                      </div>
+                    </div>
+                  </>
+                ) : null}
+
+                {isBedrock ? (
+                  <>
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Region</label>
+                      <input
+                        value={connection.connection.region}
+                        onChange={(e) => updateConnectionSettings(connection.id, { region: e.target.value })}
+                        placeholder="us-east-1"
+                        className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] px-4 py-2.5 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Access Key ID</label>
+                      <div className="relative">
+                        <ShieldCheck size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#606060]" />
+                        <input
+                          value={connection.auth.accessKeyId}
+                          onChange={(e) => updateConnectionAuth(connection.id, { accessKeyId: e.target.value })}
+                          placeholder="AKIA..."
+                          className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] py-2.5 pl-9 pr-4 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                        />
+                      </div>
+                    </div>
+
+                    <LlmSecretField
+                      label="Secret Access Key"
+                      value={connection.auth.secretAccessKey}
+                      hasStoredValue={Boolean(connection.auth.hasSecretAccessKey)}
+                      placeholder="AWS secret access key"
+                      helperText="Stored server-side. Replace it only when the AWS credentials change."
+                      editing={isSecretEditing(connection.id, "secretAccessKey")}
+                      onToggleEditing={(next) => setSecretEditing(connection.id, "secretAccessKey", next)}
+                      onChange={(value) => updateConnectionAuth(connection.id, {
+                        secretAccessKey: value,
+                        hasSecretAccessKey: Boolean(value.trim() || connection.auth.hasSecretAccessKey),
+                      })}
+                    />
+
+                    <div>
+                      <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Model</label>
+                      <div className="relative">
+                        <Cpu size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#606060]" />
+                        <input
+                          value={connection.model}
+                          onChange={(e) => updateConnectionFields(connection.id, { model: e.target.value })}
+                          placeholder="anthropic.claude-3-5-sonnet-20240620-v1:0"
+                          className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] py-2.5 pl-9 pr-4 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Endpoint Override</label>
+                      <div className="relative">
+                        <LinkIcon size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#606060]" />
+                        <input
+                          value={connection.connection.endpointUrl}
+                          onChange={(e) => updateConnectionSettings(connection.id, { endpointUrl: e.target.value })}
+                          placeholder="Optional - defaults to the Bedrock runtime endpoint for the selected region"
+                          className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] py-2.5 pl-9 pr-4 text-sm text-[#F0F0F0] placeholder-[#404040] focus:outline-none focus:border-[rgba(75,156,211,0.4)] transition-colors"
+                        />
+                      </div>
+                    </div>
+                  </>
+                ) : null}
+
+                <div className="md:col-span-2">
+                  <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Thinking Mode</label>
+                  <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                    {THINKING_MODE_OPTIONS.map((option) => (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => updateConnectionFields(connection.id, { thinkingMode: option.value })}
+                        className={cn(
+                          "rounded-xl border px-4 py-3 text-left transition-all",
+                          connection.thinkingMode === option.value
+                            ? "border-[rgba(75,156,211,0.45)] bg-[rgba(75,156,211,0.14)]"
+                            : "border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] hover:border-[rgba(75,156,211,0.22)]"
+                        )}
+                      >
+                        <p className="text-sm font-semibold text-[#F0F0F0]">{option.label}</p>
+                        <p className="mt-1 text-xs leading-5 text-[#8D877F]">{option.description}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-2 rounded-xl border border-[rgba(255,255,255,0.06)] bg-[#151515] p-4">
+                <div className="flex items-center gap-2 text-sm text-[#F0F0F0]">
+                  {connection.status === "online" ? (
+                    <ShieldCheck size={14} className="text-[#22C55E]" />
+                  ) : (
+                    <ShieldAlert size={14} className={connection.status === "offline" ? "text-[#EF4444]" : "text-[#8D877F]"} />
+                  )}
+                  <span>{statusMeta.label}</span>
+                </div>
+                <p className="text-xs text-[#9A9A9A]">
+                  Provider: <span className="text-[#F0F0F0]">{getProviderLabel(connection.provider)}</span>
+                </p>
+                <p className="text-xs text-[#9A9A9A]">
+                  Thinking mode: <span className="text-[#F0F0F0] capitalize">{connection.thinkingMode}</span>
+                </p>
+                {connection.model.trim() ? (
+                  <p className="text-xs text-[#9A9A9A]">Model: <span className="text-[#F0F0F0]">{connection.model.trim()}</span></p>
+                ) : isLocal ? (
+                  <p className="text-xs text-[#606060]">Leave the model blank to let the endpoint auto-detect its first available model.</p>
+                ) : (
+                  <p className="text-xs text-[#606060]">Add a model before routing or testing this hosted provider card.</p>
+                )}
+                {!connection.enabled ? (
+                  <p className="text-xs text-[#606060]">This card is disabled and excluded from routing.</p>
+                ) : canRoute ? (
+                  <p className="text-xs text-[#606060]">This card is available to routing after you save it.</p>
+                ) : null}
+                {connection.lastValidatedAt ? (
+                  <p className="text-xs text-[#606060]">Last checked {new Date(connection.lastValidatedAt).toLocaleString()}</p>
+                ) : null}
+                {connection.validationError ? (
+                  <p className="text-xs text-[#EF4444]">{connection.validationError}</p>
+                ) : null}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  variant="primary"
+                  loading={savingConnectionId === connection.id}
+                  onClick={() => saveConnection(connection.id)}
+                  style={{ background: `linear-gradient(135deg, ${AGENT_COLOR}, #2980C4)` } as React.CSSProperties}
+                >
+                  Save Connection
+                </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => refreshConnection(connection.id)}
+                  loading={checkingConnectionId === connection.id}
+                  icon={<RefreshCw size={13} />}
+                >
+                  Test Connection
+                </Button>
+                {config.connections.length > 1 ? (
+                  <Button size="sm" variant="secondary" onClick={() => removeConnection(connection.id)} icon={<Trash2 size={13} />}>
+                    Remove
+                  </Button>
+                ) : null}
+              </div>
+            </CardBody>
+          </Card>
+        );
+      })}
+
+        {/* Legacy Available Models block removed.
+          <div className="rounded-2xl border border-[rgba(255,255,255,0.06)] bg-[#121212] p-4">
+            <p className="text-sm font-semibold text-[#F0F0F0]">Available Models</p>
+          <p className="mt-1 text-xs leading-5 text-[#606060]">
+            This is the allowed model catalog for the agent. Routing can only select from these entries.
+          </p>
+          <div className="mt-4 grid gap-3">
+            {catalog.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-[rgba(255,255,255,0.08)] bg-[#161616] px-4 py-5 text-sm text-[#606060]">
+                Add one or more model names to a connection to make them available here.
+              </div>
+            ) : (
+              catalog.map((entry) => (
+                <div
+                  key={entry.key}
+                  className={cn(
+                    "flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3",
+                    config.routing.defaultModelKey === entry.key
+                      ? "border-[rgba(75,156,211,0.4)] bg-[rgba(75,156,211,0.1)]"
+                      : "border-[rgba(255,255,255,0.06)] bg-[#171717]"
+                  )}
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-[#F0F0F0]">{entry.model}</p>
+                    <p className="mt-1 text-xs text-[#8D877F]">{entry.connectionLabel} · {entry.provider}</p>
+                  </div>
+                  {config.routing.defaultModelKey === entry.key ? (
+                    <span className="rounded-full border border-[rgba(75,156,211,0.35)] bg-[rgba(75,156,211,0.14)] px-2.5 py-1 text-[11px] font-semibold text-[#9FCBE0]">
+                      Default Model
+                    </span>
+                  ) : null}
+                </div>
+              ))
+            )}
+          </div>
+          </div>
+        */}
+
+        <Card>
+          <CardHeader className="border-b border-[rgba(255,255,255,0.06)] px-6 py-4">
+            <div className="flex items-center gap-2">
+              <Sliders size={15} style={{ color: AGENT_COLOR }} />
+              <span className="text-sm font-bold text-[#F0F0F0]">Routing Settings</span>
+            </div>
+          </CardHeader>
+          <CardBody className="p-6 space-y-4">
+            <p className="mt-1 text-xs leading-5 text-[#606060]">
+              Auto route by task once the thread is scoped. The default model list comes from the saved LLM cards above.
+            </p>
+
+            <div className="mt-4 space-y-3">
+              {[
+                {
+                  key: "autoRoute",
+                  label: "Auto Route by Task",
+                  value: config.routing.autoRoute,
+                  toggle: () => setConfig((current) => ({
+                    ...current,
+                    routing: { ...current.routing, autoRoute: !current.routing.autoRoute },
+                  })),
+                },
+                {
+                  key: "allowEscalation",
+                  label: "Allow Escalation",
+                  value: config.routing.allowEscalation,
+                  toggle: () => setConfig((current) => ({
+                    ...current,
+                    routing: { ...current.routing, allowEscalation: !current.routing.allowEscalation },
+                  })),
+                },
+              ].map((option) => (
+                <button
+                  key={option.key}
+                  type="button"
+                  onClick={option.toggle}
+                  className={cn(
+                    "flex w-full items-center justify-between rounded-xl border px-4 py-3 text-left transition-all",
+                    option.value
+                      ? "border-[rgba(75,156,211,0.4)] bg-[rgba(75,156,211,0.12)]"
+                      : "border-[rgba(255,255,255,0.06)] bg-[#171717]"
+                  )}
+                >
+                  <span className="text-sm font-medium text-[#F0F0F0]">{option.label}</span>
+                  <span className={cn("text-xs font-semibold", option.value ? "text-[#9FCBE0]" : "text-[#606060]")}>
+                    {option.value ? "Enabled" : "Off"}
+                  </span>
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-4">
+              <label className="mb-1.5 block text-sm font-medium text-[#9A9A9A]">Default Model</label>
+              <select
+                value={config.routing.defaultModelKey ?? ""}
+                onChange={(e) => setConfig((current) => reconcileLlmConfig({
+                  ...current,
+                  routing: {
+                    ...current.routing,
+                    defaultModelKey: e.target.value || null,
+                  },
+                }))}
+                className="w-full rounded-lg border border-[rgba(255,255,255,0.06)] bg-[#1A1A1A] px-4 py-2.5 text-sm text-[#F0F0F0] focus:outline-none focus:border-[rgba(75,156,211,0.4)]"
+                disabled={catalog.length === 0}
+              >
+                <option value="">No pinned default model</option>
+                {catalog.map((entry) => (
+                  <option key={entry.key} value={entry.key}>{entry.label}</option>
+                ))}
+              </select>
+              <p className="mt-1.5 text-xs text-[#606060]">If routing does not need to promote or escalate, the thread starts on this saved card.</p>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="primary"
+                loading={savingRouting}
+                onClick={saveRoutingSettings}
+                style={{ background: `linear-gradient(135deg, ${AGENT_COLOR}, #2980C4)` } as React.CSSProperties}
+              >
+                Save Routing Settings
+              </Button>
+            </div>
+          </CardBody>
+      </Card>
+    </div>
+  );
+}
 
 const TOOL_DESCRIPTIONS: Record<string, string> = {
   get_active_tasks: "Read planner and kanban tasks, including newest cards, board summaries, assignees, and priorities.",
@@ -1010,8 +1846,11 @@ export default function AgentProfilePage() {
     if (data.agent) setAgent(data.agent);
   }
 
-  async function refreshLlmStatus() {
-    await patch({ refreshLlmStatus: true });
+  async function refreshLlmStatus(connectionId?: string) {
+    await patch({
+      refreshLlmStatus: true,
+      ...(connectionId ? { probeConnectionId: connectionId } : {}),
+    });
   }
 
   if (loading) {

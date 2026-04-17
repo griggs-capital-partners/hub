@@ -780,10 +780,12 @@ function CompletedTasksDrawer({
   taskGroups: TaskGroupData[];
   onTaskGroupChange: (cardId: string, taskGroupId: string | null) => void;
 }) {
-  if (typeof window === "undefined") return null;
   const [pickerCardId, setPickerCardId] = useState<string | null>(null);
   const totalCount = cards.length + taskGroupEntries.length;
   const accent = "#22C55E";
+  const portalTarget = typeof document === "undefined" ? null : document.body;
+
+  if (!portalTarget) return null;
 
   return createPortal(
     <AnimatePresence>
@@ -883,7 +885,7 @@ function CompletedTasksDrawer({
         </>
       )}
     </AnimatePresence>,
-    document.body
+    portalTarget
   );
 }
 
@@ -905,17 +907,9 @@ function GroupTaskDrawer({
   onTaskGroupChange: (cardId: string, taskGroupId: string | null) => void;
 }) {
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (open && cards.length > 0) {
-      setSelectedCardId((prev) => {
-        if (prev && cards.find((c) => c.id === prev)) return prev;
-        return cards[0].id;
-      });
-    }
-  }, [open, group?.id, cards]);
-
-  const selectedCard = cards.find((c) => c.id === selectedCardId) ?? cards[0] ?? null;
+  const resolvedSelectedCardId =
+    selectedCardId && cards.some((card) => card.id === selectedCardId) ? selectedCardId : (cards[0]?.id ?? null);
+  const selectedCard = cards.find((c) => c.id === resolvedSelectedCardId) ?? cards[0] ?? null;
   const groupTasksForPicker = cards.map((c) => ({ id: c.id, title: c.title, columnName: c.columnName }));
 
   return (

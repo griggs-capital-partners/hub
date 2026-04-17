@@ -46,25 +46,25 @@ export async function POST(
     if (blocked) return blocked;
   }
 
-  return neonHandler.POST(request, ctx as any);
+  return neonHandler.POST(request, ctx);
 }
 
 export async function GET(request: Request, ctx: { params: Promise<{ path: string[] }> }) {
   await connection();
-  return neonHandler.GET(request, ctx as any);
+  return neonHandler.GET(request, ctx);
 }
 
 export async function PUT(request: Request, ctx: { params: Promise<{ path: string[] }> }) {
   await connection();
-  return neonHandler.PUT(request, ctx as any);
+  return neonHandler.PUT(request, ctx);
 }
 
 export async function DELETE(request: Request, ctx: { params: Promise<{ path: string[] }> }) {
   await connection();
-  return neonHandler.DELETE(request, ctx as any);
+  return neonHandler.DELETE(request, ctx);
 }
 
 export async function PATCH(request: Request, ctx: { params: Promise<{ path: string[] }> }) {
   await connection();
-  return neonHandler.PATCH(request, ctx as any);
+  return neonHandler.PATCH(request, ctx);
 }

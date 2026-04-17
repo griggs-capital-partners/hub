@@ -1,6 +1,7 @@
 import { prisma } from "./prisma";
 import { parseKanbanSubtasks } from "./kanban-subtasks";
 import { mapWellPriorityToHealthScore, mapWellPriorityToTier } from "./well-compat";
+import { DEFAULT_AGENT_LLM_ROUTING_POLICY, type AgentLlmRoutingPolicy } from "./agent-llm-config";
 
 export const AGENT_ACTION_TYPES = {
   generate_docs: {
@@ -71,20 +72,47 @@ export type AgentAbility = {
   label: string;
   description: string;
   prompt: string;
+  policy?: AgentLlmRoutingPolicy;
 };
 export const ALL_AGENT_ACTION_TYPES = Object.keys(AGENT_ACTION_TYPES) as AgentActionType[];
+
+export const DEFAULT_LLM_ROUTING_ABILITY: AgentAbility = {
+  id: "llm_routing",
+  label: "LLM Routing",
+  description: "Defines how this agent should prefer speed, cost, context, coding strength, and escalation when routing conversations onto an allowed model.",
+  prompt:
+    "Use this ability as the structured routing policy for model selection. Keep the policy aligned with the agent's intended quality bar, escalation rules, and task mix. This is not an execution ability for user-facing work products.",
+  policy: DEFAULT_AGENT_LLM_ROUTING_POLICY,
+};
+
+function ensureRoutingAbility(abilities: AgentAbility[]) {
+  const routingAbility = abilities.find((ability) => ability.id === DEFAULT_LLM_ROUTING_ABILITY.id);
+  if (routingAbility) {
+    return abilities.map((ability) =>
+      ability.id === DEFAULT_LLM_ROUTING_ABILITY.id
+        ? {
+            ...DEFAULT_LLM_ROUTING_ABILITY,
+            ...ability,
+            policy: ability.policy ?? DEFAULT_LLM_ROUTING_ABILITY.policy,
+          }
+        : ability
+    );
+  }
+
+  return [...abilities, DEFAULT_LLM_ROUTING_ABILITY];
+}
 
 export function isAgentActionType(value: string): value is AgentActionType {
   return value in AGENT_ACTION_TYPES;
 }
 
 export function getDefaultAgentAbilities(): AgentAbility[] {
-  return ALL_AGENT_ACTION_TYPES.map((id) => ({
+  return ensureRoutingAbility(ALL_AGENT_ACTION_TYPES.map((id) => ({
     id,
     label: AGENT_ACTION_TYPES[id].label,
     description: AGENT_ACTION_TYPES[id].description,
     prompt: AGENT_ACTION_TYPES[id].prompt,
-  }));
+  })));
 }
 
 export function slugifyAbilityId(value: string) {
@@ -114,9 +142,20 @@ function coerceAbility(value: unknown): AgentAbility | null {
   const label = typeof raw.label === "string" ? raw.label.trim() : "";
   const description = typeof raw.description === "string" ? raw.description.trim() : "";
   const prompt = typeof raw.prompt === "string" ? raw.prompt.trim() : "";
+  const policy = raw.policy && typeof raw.policy === "object"
+    ? {
+        ...DEFAULT_AGENT_LLM_ROUTING_POLICY,
+        ...raw.policy,
+        escalationConditions: Array.isArray((raw.policy as Partial<AgentLlmRoutingPolicy>).escalationConditions)
+          ? (raw.policy as Partial<AgentLlmRoutingPolicy>).escalationConditions!.filter(
+              (entry): entry is string => typeof entry === "string" && entry.trim().length > 0
+            )
+          : DEFAULT_AGENT_LLM_ROUTING_POLICY.escalationConditions,
+      }
+    : undefined;
 
   if (!id || !label || !prompt) return null;
-  return { id, label, description, prompt };
+  return { id, label, description, prompt, ...(policy ? { policy } : {}) };
 }
 
 export function parseAgentAbilities(raw: string | null | undefined): AgentAbility[] {
@@ -133,7 +172,7 @@ export function parseAgentAbilities(raw: string | null | undefined): AgentAbilit
 
 export function normalizeAgentAbilities(raw: string | null | undefined): AgentAbility[] {
   const parsed = parseAgentAbilities(raw);
-  return parsed.length > 0 ? parsed : getDefaultAgentAbilities();
+  return parsed.length > 0 ? ensureRoutingAbility(parsed) : getDefaultAgentAbilities();
 }
 
 export function normalizeAgentAbilitiesInput(value: unknown): AgentAbility[] {
@@ -144,7 +183,7 @@ export function normalizeAgentAbilitiesInput(value: unknown): AgentAbility[] {
       .map((entry) => coerceAbility(entry))
       .filter((entry): entry is AgentAbility => Boolean(entry));
 
-    return parsed.length > 0 ? parsed : getDefaultAgentAbilities();
+    return parsed.length > 0 ? ensureRoutingAbility(parsed) : getDefaultAgentAbilities();
   }
 
   return getDefaultAgentAbilities();
@@ -168,6 +207,10 @@ export function resolveAgentActionDescription(actionType: string, rawAbilities?:
 
 export function resolveAgentActionPrompt(actionType: string, rawAbilities?: string | null) {
   return findAgentAbility(rawAbilities, actionType)?.prompt ?? null;
+}
+
+export function resolveAgentLlmRoutingPolicy(rawAbilities?: string | null) {
+  return findAgentAbility(rawAbilities, DEFAULT_LLM_ROUTING_ABILITY.id)?.policy ?? DEFAULT_LLM_ROUTING_ABILITY.policy!;
 }
 
 export interface TaskContext {

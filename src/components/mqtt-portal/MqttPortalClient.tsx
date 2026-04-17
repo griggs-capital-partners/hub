@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import {
   Wifi, WifiOff, RefreshCw, ChevronRight, Settings2,
   Plus, Trash2, Save, Loader2, Copy, Check, MapPin, Shield,
-  Database, Zap, AlertCircle, ChevronDown, Search,
+  Database, Zap, AlertCircle, Search,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
@@ -776,9 +776,17 @@ export function MqttPortalClient() {
   }, []);
 
   useEffect(() => {
-    fetchStatus();
-    const id = setInterval(fetchStatus, 30000);
-    return () => clearInterval(id);
+    const initialTimeoutId = window.setTimeout(() => {
+      void fetchStatus();
+    }, 0);
+    const intervalId = window.setInterval(() => {
+      void fetchStatus();
+    }, 30000);
+
+    return () => {
+      window.clearTimeout(initialTimeoutId);
+      window.clearInterval(intervalId);
+    };
   }, [fetchStatus]);
 
   function handleConnected() {

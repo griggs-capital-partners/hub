@@ -1,5 +1,11 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import {
+  getPublicConversationLlmState,
+  normalizeAgentLlmConfig,
+  normalizeConversationLlmThreadState,
+  reconcileConversationLlmThreadState,
+} from "@/lib/agent-llm-config";
 
 const conversationInclude = {
   members: {
@@ -25,12 +31,14 @@ const conversationInclude = {
           duties: true,
           avatar: true,
           status: true,
+          llmConfig: true,
           llmEndpointUrl: true,
           llmUsername: true,
           llmPassword: true,
           llmModel: true,
           llmThinkingMode: true,
           disabledTools: true,
+          abilities: true,
           llmStatus: true,
           llmLastCheckedAt: true,
           llmLastError: true,
@@ -159,10 +167,26 @@ function serializeLatestMessage(
 export function serializeConversation(
   conversation: ConversationWithRelations
 ) {
+  const agentMember = conversation.members.find((member) => member.agent)?.agent ?? null;
+  const storedThreadLlmState = normalizeConversationLlmThreadState(conversation.llmThreadState);
+  const threadLlmState = agentMember
+    ? reconcileConversationLlmThreadState(
+        normalizeAgentLlmConfig(agentMember.llmConfig, {
+          llmEndpointUrl: agentMember.llmEndpointUrl,
+          llmUsername: agentMember.llmUsername,
+          llmPassword: agentMember.llmPassword,
+          llmModel: agentMember.llmModel,
+          llmThinkingMode: agentMember.llmThinkingMode,
+        }),
+        storedThreadLlmState
+      )
+    : storedThreadLlmState;
+
   return {
     id: conversation.id,
     type: conversation.type,
     name: conversation.name,
+    llmThread: getPublicConversationLlmState(threadLlmState),
     createdAt: conversation.createdAt.toISOString(),
     updatedAt: conversation.updatedAt.toISOString(),
     members: conversation.members

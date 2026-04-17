@@ -27,8 +27,6 @@ import {
   RotateCcw,
   Send,
   User,
-  Wifi,
-  WifiOff,
   Wrench,
   X,
   XCircle,
@@ -81,6 +79,36 @@ interface AgentInspectorData {
     id: string; name: string; role: string; status: string;
     llmStatus: string; llmModel: string | null; llmThinkingMode: string;
     llmLastCheckedAt: string | null; llmLastError: string | null; endpointConfigured: boolean;
+  };
+  threadLlm: {
+    selectedModel: string | null;
+    selectedModelKey: string | null;
+    selectedLabel: string | null;
+    selectedProvider: string | null;
+    selectedBy: "auto" | "default" | "user" | "legacy" | null;
+    reasonSummary: string | null;
+    escalationSummary: string | null;
+    auditEvents: Array<{
+      type: "selection" | "override" | "escalation";
+      at: string;
+      summary: string;
+      selectedBy: "auto" | "default" | "user" | "legacy";
+      provider: string | null;
+      model: string | null;
+      modelKey: string | null;
+    }>;
+    availableModels: Array<{
+      key: string;
+      label: string;
+      model: string;
+      provider: string;
+      connectionId: string;
+      connectionLabel: string;
+      isDefault: boolean;
+    }>;
+    autoRoute: boolean;
+    allowUserOverride: boolean;
+    allowEscalation: boolean;
   };
   context: {
     estimatedTokens: number; estimatedSystemPromptTokens: number; estimatedHistoryTokens: number;
@@ -302,7 +330,7 @@ function ContextInspectorDialog({
             </div>
             <div className="rounded-2xl border border-[rgba(255,255,255,0.06)] bg-[#101010] p-4">
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#8D877F]">Model</p>
-              <p className="mt-2 text-sm font-semibold text-[#F6F3EE]">{data.agent.llmModel ?? "Unknown model"}</p>
+              <p className="mt-2 text-sm font-semibold text-[#F6F3EE]">{data.threadLlm.selectedLabel ?? data.agent.llmModel ?? "Unknown model"}</p>
               <p className="mt-1 text-sm text-[#8D877F]">Thinking: {formatThinkingMode(data.agent.llmThinkingMode)}</p>
               <p className="mt-1 text-sm text-[#8D877F]">Last checked: {formatRelativeTime(data.agent.llmLastCheckedAt)}</p>
             </div>
@@ -679,6 +707,7 @@ function AgentChatInline({ agent, onClose }: { agent: Agent; onClose: () => void
 
   const canSend = inspector?.readiness.canSend ?? false;
   const isReady = inspector?.readiness.phase === "ready";
+  const activeThreadModelLabel = inspector?.threadLlm.selectedLabel ?? inspector?.agent.llmModel ?? null;
 
   // Init: create/get conversation, load messages + inspector
   useEffect(() => {
@@ -707,7 +736,9 @@ function AgentChatInline({ agent, onClose }: { agent: Agent; onClose: () => void
         if (msgData.messages) setMessages(msgData.messages);
 
         const inspData = await inspRes.json() as AgentInspectorData;
-        if (inspData.readiness) setInspector(inspData);
+        if (inspData.readiness) {
+          setInspector(inspData);
+        }
       } catch {
         setInspector(null);
       } finally {
@@ -747,7 +778,9 @@ function AgentChatInline({ agent, onClose }: { agent: Agent; onClose: () => void
         // Refresh inspector after clear
         const inspRes = await fetch(`/api/chat/conversations/${conversationId}/inspect`);
         const inspData = await inspRes.json() as AgentInspectorData;
-        if (inspData.readiness) setInspector(inspData);
+        if (inspData.readiness) {
+          setInspector(inspData);
+        }
       }
     } finally {
       setClearingContext(false);
@@ -844,7 +877,11 @@ function AgentChatInline({ agent, onClose }: { agent: Agent; onClose: () => void
       if (conversationId) {
         fetch(`/api/chat/conversations/${conversationId}/inspect`)
           .then((r) => r.json())
-          .then((d: AgentInspectorData) => { if (d.readiness) setInspector(d); })
+          .then((d: AgentInspectorData) => {
+            if (d.readiness) {
+              setInspector(d);
+            }
+          })
           .catch(() => { });
       }
     } catch {
@@ -864,10 +901,13 @@ function AgentChatInline({ agent, onClose }: { agent: Agent; onClose: () => void
     ? [
         `Agent: ${inspector.agent.name} (${inspector.agent.role})`,
         `Status: ${inspector.readiness.label}`,
-        `Model: ${inspector.agent.llmModel ?? "Unknown"}`,
+        `Model: ${inspector.threadLlm.selectedLabel ?? inspector.agent.llmModel ?? "Unknown"}`,
+        `Selected for this thread: ${inspector.threadLlm.selectedBy ?? "unknown"}`,
+        inspector.threadLlm.reasonSummary ? `Routing reason: ${inspector.threadLlm.reasonSummary}` : null,
+        inspector.threadLlm.escalationSummary ? `Escalation: ${inspector.threadLlm.escalationSummary}` : null,
         `Context: ${formatTokensK(inspector.context.estimatedTokens)} / 128K`,
         `History: ${inspector.context.recentHistoryCount}/${inspector.context.historyWindowSize} turns`,
-      ].join("\n")
+      ].filter(Boolean).join("\n")
     : "";
 
   return (
@@ -892,10 +932,10 @@ function AgentChatInline({ agent, onClose }: { agent: Agent; onClose: () => void
           <p className="text-sm font-bold text-[#F0F0F0] truncate">{agent.name}</p>
           <div className="flex items-center gap-1.5 text-xs text-[#6F6A64] truncate">
             <span className="truncate">{agent.role}</span>
-            {inspector?.agent.llmModel && (
+            {activeThreadModelLabel && (
               <>
                 <span className="hidden sm:inline text-[#3A3632]">·</span>
-                <span className="hidden sm:inline truncate">{inspector.agent.llmModel}</span>
+                <span className="hidden sm:inline truncate">{activeThreadModelLabel}</span>
               </>
             )}
             {inspector && (

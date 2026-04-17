@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useSyncExternalStore } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   ArrowRight,
@@ -90,16 +90,6 @@ const TECH_QUOTES: { text: string; author: string }[] = [
   { text: "Vision without execution is just hallucination.", author: "Thomas Edison" },
 ];
 
-// Fisher-Yates shuffle for random quote order
-function shuffleQuotes(arr: typeof TECH_QUOTES) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface ActivityEvent {
@@ -185,12 +175,40 @@ function LangDot({ lang }: { lang: string | null }) {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function getGreeting(name?: string | null) {
-  const hour = new Date().getHours();
-  const firstName = name?.split(" ")[0] ?? "there";
+function getFirstName(name?: string | null) {
+  return name?.split(" ")[0] ?? "there";
+}
+
+function getGreeting(name?: string | null, now = new Date()) {
+  const hour = now.getHours();
+  const firstName = getFirstName(name);
   if (hour < 12) return `Good morning, ${firstName}`;
   if (hour < 17) return `Good afternoon, ${firstName}`;
   return `Good evening, ${firstName}`;
+}
+
+function getInitialGreeting(name?: string | null) {
+  return `Hello, ${getFirstName(name)}`;
+}
+
+function formatDashboardDate(now = new Date()) {
+  return now.toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
+}
+
+function subscribeToHydration() {
+  return () => {};
+}
+
+function getClientHydrationSnapshot() {
+  return true;
+}
+
+function getServerHydrationSnapshot() {
+  return false;
 }
 
 function getActivityMessage(event: ActivityEvent) {
@@ -390,10 +408,16 @@ export function DashboardClient({ user, activity, stats, cardData, recentExecuti
   const [selectedExecution, setSelectedExecution] = useState<ExecutionRecord | null>(null);
   const [localWeather, setLocalWeather] = useState<Props["weather"]>(null);
   const [weatherError, setWeatherError] = useState<string | null>(null);
-  const [shuffledQuotes] = useState(() => shuffleQuotes(TECH_QUOTES));
   const [quoteIndex, setQuoteIndex] = useState(0);
+  const isHydrated = useSyncExternalStore(
+    subscribeToHydration,
+    getClientHydrationSnapshot,
+    getServerHydrationSnapshot
+  );
   const displayedWeather = weatherLocationMode === "user" ? localWeather : weather;
   const displayedWeatherError = weatherLocationMode === "user" ? weatherError : null;
+  const greeting = isHydrated ? getGreeting(user.name) : getInitialGreeting(user.name);
+  const todayLabel = isHydrated ? formatDashboardDate() : "\u00A0";
 
   useEffect(() => {
     if (weatherLocationMode !== "user") return;
@@ -449,11 +473,11 @@ export function DashboardClient({ user, activity, stats, cardData, recentExecuti
   }, [weather, weatherLocationMode]);
 
   useEffect(() => {
-    const id = setInterval(() => setQuoteIndex((i) => (i + 1) % shuffledQuotes.length), 12000);
+    const id = setInterval(() => setQuoteIndex((i) => (i + 1) % TECH_QUOTES.length), 12000);
     return () => clearInterval(id);
-  }, [shuffledQuotes.length]);
+  }, []);
 
-  const currentQuote = shuffledQuotes[quoteIndex];
+  const currentQuote = TECH_QUOTES[quoteIndex % TECH_QUOTES.length];
 
   return (
     <>
@@ -494,7 +518,7 @@ export function DashboardClient({ user, activity, stats, cardData, recentExecuti
                       Daily Briefing
                     </div>
                     <h2 className="mt-3 text-2xl sm:text-[3.2rem] font-black text-[#F0F0F0] tracking-tight leading-[0.96]">
-                      {getGreeting(user.name)}
+                      {greeting}
                     </h2>
                     <p className="text-[#8A8A8A] text-sm flex items-center gap-1.5 mt-2">
                       <span className="h-1.5 w-1.5 rounded-full bg-[#FBBA00]/70" />
@@ -507,7 +531,7 @@ export function DashboardClient({ user, activity, stats, cardData, recentExecuti
                 <div className="xl:hidden px-1">
                   <div className="text-[10px] text-[#6B6B6B] uppercase tracking-[0.3em] font-medium">Today</div>
                   <div className="mt-1 text-2xl font-black tracking-[-0.03em] leading-tight text-[#F6F3EE]">
-                    {new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+                    {todayLabel}
                   </div>
                 </div>
 
@@ -564,7 +588,7 @@ export function DashboardClient({ user, activity, stats, cardData, recentExecuti
                 <div className="hidden xl:block xl:text-right">
                   <div className="text-[10px] text-[#6B6B6B] uppercase tracking-[0.3em] font-medium">Today</div>
                   <div className="mt-2 text-[2.6rem] font-black tracking-[-0.04em] leading-[1.08] text-[#F6F3EE] text-balance max-w-[8ch]">
-                    {new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+                    {todayLabel}
                   </div>
                 </div>
                 <div className="w-full xl:w-[340px] rounded-[28px] border border-[rgba(255,255,255,0.05)] bg-[linear-gradient(135deg,rgba(255,255,255,0.025),rgba(24,24,24,0.9)_55%,rgba(37,99,235,0.05))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_18px_40px_rgba(0,0,0,0.22)]">

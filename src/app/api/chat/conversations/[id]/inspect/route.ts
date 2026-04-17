@@ -1,6 +1,17 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { buildAgentRuntimePreview, probeAgentLlm } from "@/lib/agent-llm";
+import {
+  buildExecutionTargetRuntimeConfig,
+  getPublicAgentLlmCatalog,
+  getPublicConversationLlmState,
+  hasAgentLlmConnection,
+  normalizeAgentLlmConfig,
+  normalizeConversationLlmThreadState,
+  reconcileConversationLlmThreadState,
+  resolveThreadExecutionTarget,
+  serializeConversationLlmThreadState,
+} from "@/lib/agent-llm-config";
 import { buildOrgContext } from "@/lib/agent-context";
 import { getConversationForUser, isMissingChatTablesError } from "@/lib/chat";
 import { prisma } from "@/lib/prisma";
@@ -79,9 +90,21 @@ export async function GET(
       orderBy: { createdAt: "desc" },
       take: 12,
     });
+    const llmConfig = normalizeAgentLlmConfig(agent.llmConfig, {
+      llmEndpointUrl: agent.llmEndpointUrl,
+      llmUsername: agent.llmUsername,
+      llmPassword: agent.llmPassword,
+      llmModel: agent.llmModel,
+      llmThinkingMode: agent.llmThinkingMode,
+    });
+    const storedThreadLlmState = normalizeConversationLlmThreadState(conversation.llmThreadState);
+    const threadLlmState = reconcileConversationLlmThreadState(llmConfig, storedThreadLlmState);
+    const threadExecutionTarget = resolveThreadExecutionTarget(llmConfig, threadLlmState);
+    const shouldPersistThreadLlmState =
+      serializeConversationLlmThreadState(threadLlmState) !== serializeConversationLlmThreadState(storedThreadLlmState);
 
     const [llmHealth, orgContext, senderUser] = await Promise.all([
-      probeAgentLlm(agent),
+      probeAgentLlm(threadExecutionTarget ? buildExecutionTargetRuntimeConfig(threadExecutionTarget) : agent),
       buildOrgContext(),
       prisma.user.findUnique({
         where: { id: session.user.id },
@@ -89,15 +112,26 @@ export async function GET(
       }),
     ]);
 
-    await prisma.aIAgent.update({
-      where: { id: agent.id },
-      data: {
-        llmStatus: llmHealth.llmStatus,
-        llmModel: llmHealth.llmModel,
-        llmLastCheckedAt: llmHealth.llmLastCheckedAt,
-        llmLastError: llmHealth.llmLastError,
-      },
-    });
+    await Promise.all([
+      prisma.aIAgent.update({
+        where: { id: agent.id },
+        data: {
+          llmStatus: llmHealth.llmStatus,
+          llmModel: llmHealth.llmModel,
+          llmLastCheckedAt: llmHealth.llmLastCheckedAt,
+          llmLastError: llmHealth.llmLastError,
+        },
+      }),
+      shouldPersistThreadLlmState
+        ? prisma.conversation.update({
+            where: { id: conversation.id },
+            data: {
+              llmThreadState: serializeConversationLlmThreadState(threadLlmState),
+              updatedAt: new Date(),
+            },
+          })
+        : Promise.resolve(null),
+    ]);
 
     const currentUserName = senderUser?.displayName || senderUser?.name || null;
     const history = recentMessages.reverse().map((entry) => ({
@@ -124,7 +158,14 @@ export async function GET(
         llmThinkingMode: agent.llmThinkingMode,
         llmLastCheckedAt: llmHealth.llmLastCheckedAt?.toISOString() ?? agent.llmLastCheckedAt?.toISOString() ?? null,
         llmLastError: llmHealth.llmLastError,
-        endpointConfigured: Boolean(agent.llmEndpointUrl?.trim()),
+        endpointConfigured: hasAgentLlmConnection(llmConfig) || Boolean(agent.llmEndpointUrl?.trim()),
+      },
+      threadLlm: {
+        ...getPublicConversationLlmState(threadLlmState),
+        availableModels: getPublicAgentLlmCatalog(llmConfig),
+        autoRoute: llmConfig.routing.autoRoute,
+        allowUserOverride: llmConfig.routing.allowUserOverride,
+        allowEscalation: llmConfig.routing.allowEscalation,
       },
       context: {
         estimatedTokens: runtimePreview.estimatedTokens,

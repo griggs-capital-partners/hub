@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { GitCommit, X, ExternalLink } from "lucide-react";
 
@@ -135,7 +135,9 @@ export function CommitHeatmap() {
   const [weeksToShow, setWeeksToShow] = useState(WEEKS);
   const gridRef = useRef<HTMLDivElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
-  const { weeks, monthLabels, yearBoundaries } = buildGrid();
+  const { weeks, monthLabels, yearBoundaries } = useMemo(() => buildGrid(), []);
+  const weekCount = weeks.length;
+  const yearBoundaryCount = yearBoundaries.length;
 
   // Derived slice — only the most-recent weeksToShow weeks
   const startIdx = Math.max(0, weeks.length - weeksToShow);
@@ -152,38 +154,45 @@ export function CommitHeatmap() {
     return wi * (cs + GAP) + numExtraGaps * (YEAR_GAP - GAP);
   }
 
-  // x(wi) = wi*(cellSize+GAP) + numYearGaps(wi)*(YEAR_GAP - GAP)
-  // where numYearGaps(wi) = count of yearBoundaries with weekIdx <= wi
-  function getWeekX(wi: number, cs: number): number {
-    const numExtraGaps = yearBoundaries.filter((b) => b.weekIdx <= wi).length;
-    return wi * (cs + GAP) + numExtraGaps * (YEAR_GAP - GAP);
-  }
-
-  const updateCellSize = useCallback(() => {
-    if (!gridRef.current) return;
-    const w = gridRef.current.getBoundingClientRect().width;
-    const numWeeks = weeks.length;
-    const extraGapTotal = yearBoundaries.length * (YEAR_GAP - GAP);
-    const computed = Math.floor((w - (numWeeks - 1) * GAP - extraGapTotal) / numWeeks);
-
-    if (computed < MIN_CELL) {
-      // Container too narrow for full year — show only the weeks that fit at MIN_CELL
-      const fittable = Math.floor((w + GAP) / (MIN_CELL + GAP));
-      setWeeksToShow(Math.max(4, Math.min(WEEKS, fittable)));
-      setCellSize(MIN_CELL);
-    } else {
-      setCellSize(Math.min(MAX_CELL, computed));
-      setWeeksToShow(WEEKS);
-    }
-    setSelectedDay(null);
-  }, [weeks.length, yearBoundaries.length]);
-
   useEffect(() => {
-    updateCellSize();
-    const ro = new ResizeObserver(updateCellSize);
+    let frameId = 0;
+
+    const measure = () => {
+      if (!gridRef.current) return;
+      const width = gridRef.current.getBoundingClientRect().width;
+      const extraGapTotal = yearBoundaryCount * (YEAR_GAP - GAP);
+      const computed = Math.floor((width - (weekCount - 1) * GAP - extraGapTotal) / weekCount);
+
+      if (computed < MIN_CELL) {
+        // Container too narrow for full year — show only the weeks that fit at MIN_CELL
+        const fittable = Math.floor((width + GAP) / (MIN_CELL + GAP));
+        setWeeksToShow(Math.max(4, Math.min(WEEKS, fittable)));
+        setCellSize(MIN_CELL);
+      } else {
+        setCellSize(Math.min(MAX_CELL, computed));
+        setWeeksToShow(WEEKS);
+      }
+      setSelectedDay(null);
+    };
+
+    const scheduleMeasure = () => {
+      if (frameId) window.cancelAnimationFrame(frameId);
+      frameId = window.requestAnimationFrame(() => {
+        frameId = 0;
+        measure();
+      });
+    };
+
+    scheduleMeasure();
+    const ro = new ResizeObserver(() => {
+      scheduleMeasure();
+    });
     if (gridRef.current) ro.observe(gridRef.current);
-    return () => ro.disconnect();
-  }, [updateCellSize]);
+    return () => {
+      if (frameId) window.cancelAnimationFrame(frameId);
+      ro.disconnect();
+    };
+  }, [weekCount, yearBoundaryCount]);
 
   useEffect(() => {
     fetch("/api/github/heatmap")

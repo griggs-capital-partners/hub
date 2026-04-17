@@ -3,6 +3,15 @@ import type { Prisma } from "@prisma/client";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { generateAgentReply, probeAgentLlm, resolveThinkingMode, streamAgentReply } from "@/lib/agent-llm";
+import {
+  applyResolvedThreadModel,
+  buildExecutionTargetRuntimeConfig,
+  normalizeAgentLlmConfig,
+  normalizeConversationLlmThreadState,
+  planConversationLlmSelection,
+  reconcileConversationLlmThreadState,
+  serializeConversationLlmThreadState,
+} from "@/lib/agent-llm-config";
 import { agentChatTools, executeAgentTool } from "@/lib/agent-tools";
 import { buildOrgContext } from "@/lib/agent-context";
 import { buildMessageRetrievalContext } from "@/lib/agent-retrieval";
@@ -13,6 +22,7 @@ import {
   serializeConversation,
 } from "@/lib/chat";
 import type { LlmMessage } from "@/lib/agent-llm";
+import { resolveAgentLlmRoutingPolicy } from "@/lib/agent-task-context";
 
 type CreatedChatMessage = Prisma.ChatMessageGetPayload<{
   include: {
@@ -61,6 +71,23 @@ function serializeCreatedMessage(entry: {
           }
         : null,
   };
+}
+
+function normalizeAgentExecutionConfig(agent: {
+  llmConfig?: string | null;
+  llmEndpointUrl?: string | null;
+  llmUsername?: string | null;
+  llmPassword?: string | null;
+  llmModel?: string | null;
+  llmThinkingMode?: string | null;
+}) {
+  return normalizeAgentLlmConfig(agent.llmConfig, {
+    llmEndpointUrl: agent.llmEndpointUrl,
+    llmUsername: agent.llmUsername,
+    llmPassword: agent.llmPassword,
+    llmModel: agent.llmModel,
+    llmThinkingMode: agent.llmThinkingMode,
+  });
 }
 
 export async function GET(
@@ -163,17 +190,7 @@ export async function POST(
           let retrievalSources: Awaited<ReturnType<typeof buildMessageRetrievalContext>>["sources"] = [];
 
           try {
-            // Emit meta immediately so the UI transitions away from "Waiting for reply..." at once.
-            const enableThinking = resolveThinkingMode(agent, message);
-            writeEvent({ type: "meta", thinking: enableThinking });
-
-            const agentCheckedRecently =
-              agent.llmStatus === "online" &&
-              agent.llmLastCheckedAt instanceof Date &&
-              Date.now() - agent.llmLastCheckedAt.getTime() < 60_000;
-
-            // Run all context-building queries in parallel, including recent messages.
-            const [recentMessages, llmHealth, orgContext, retrievedContext, senderUser] = await Promise.all([
+            const [recentMessages, orgContext, retrievedContext, senderUser] = await Promise.all([
               prisma.chatMessage.findMany({
                 where: { conversationId: conversation.id },
                 select: {
@@ -199,14 +216,6 @@ export async function POST(
                 orderBy: { createdAt: "desc" },
                 take: 12,
               }),
-              agentCheckedRecently
-                ? Promise.resolve({
-                    llmStatus: agent.llmStatus,
-                    llmModel: agent.llmModel,
-                    llmLastCheckedAt: agent.llmLastCheckedAt,
-                    llmLastError: agent.llmLastError,
-                  } as Awaited<ReturnType<typeof probeAgentLlm>>)
-                : probeAgentLlm(agent),
               buildOrgContext(),
               buildMessageRetrievalContext(message),
               prisma.user.findUnique({
@@ -214,8 +223,33 @@ export async function POST(
                 select: { displayName: true, name: true },
               }),
             ]);
+            const agentConfig = normalizeAgentExecutionConfig(agent);
+            const currentThreadLlmState = reconcileConversationLlmThreadState(
+              agentConfig,
+              normalizeConversationLlmThreadState(conversation.llmThreadState)
+            );
+            const threadLlmPlan = planConversationLlmSelection({
+              config: agentConfig,
+              currentState: currentThreadLlmState,
+              message,
+              historyCount: recentMessages.length,
+              routingPolicy: resolveAgentLlmRoutingPolicy(agent.abilities),
+            });
+            const selectedTarget = threadLlmPlan.target;
+            const selectedRuntimeConfig = selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : null;
+            const selectedThinkingMode = selectedTarget?.thinkingMode ?? agent.llmThinkingMode;
+            const enableThinking = resolveThinkingMode({ ...agent, llmThinkingMode: selectedThinkingMode }, message);
+            writeEvent({ type: "meta", thinking: enableThinking });
+            const llmHealth = await probeAgentLlm(selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : agent);
             retrievalSources = retrievedContext.sources;
             const currentUserName = senderUser?.displayName || senderUser?.name || null;
+            await prisma.conversation.update({
+              where: { id: conversation.id },
+              data: {
+                llmThreadState: serializeConversationLlmThreadState(threadLlmPlan.state),
+                updatedAt: new Date(),
+              },
+            });
             await prisma.aIAgent.update({
               where: { id: agent.id },
               data: {
@@ -235,7 +269,7 @@ export async function POST(
 
             let finalThinking = "";
             let finalContent = "";
-            let resolvedModel = llmHealth.llmModel ?? agent.llmModel ?? null;
+            let resolvedModel = llmHealth.llmModel ?? selectedTarget?.model ?? agent.llmModel ?? null;
             let capturedToolContext: LlmMessage[] | null = null;
 
             // Filter the tool catalog to only tools this agent has enabled.
@@ -261,6 +295,8 @@ export async function POST(
 
             for await (const event of streamAgentReply({
               ...agent,
+              ...(selectedRuntimeConfig ?? {}),
+              llmThinkingMode: selectedThinkingMode,
               orgContext: [orgContext, retrievedContext.text].filter(Boolean).join("\n\n"),
               currentUserName,
               enableThinking,
@@ -325,9 +361,13 @@ export async function POST(
               },
             });
 
+            const resolvedThreadState = applyResolvedThreadModel(threadLlmPlan.state, resolvedModel);
             await prisma.conversation.update({
               where: { id: conversation.id },
-              data: { updatedAt: new Date() },
+              data: {
+                llmThreadState: serializeConversationLlmThreadState(resolvedThreadState),
+                updatedAt: new Date(),
+              },
             });
 
             try {
@@ -452,21 +492,21 @@ export async function POST(
       });
 
       let agentReply: string;
+      const agentConfig = normalizeAgentExecutionConfig(agent);
+      const currentThreadLlmState = reconcileConversationLlmThreadState(
+        agentConfig,
+        normalizeConversationLlmThreadState(conversation.llmThreadState)
+      );
+      const threadLlmPlan = planConversationLlmSelection({
+        config: agentConfig,
+        currentState: currentThreadLlmState,
+        message,
+        historyCount: recentMessages.length,
+        routingPolicy: resolveAgentLlmRoutingPolicy(agent.abilities),
+      });
+      const selectedTarget = threadLlmPlan.target;
       try {
-        const agentCheckedRecently =
-          agent.llmStatus === "online" &&
-          agent.llmLastCheckedAt instanceof Date &&
-          Date.now() - agent.llmLastCheckedAt.getTime() < 60_000;
-
-        const [llmHealth, orgContext, retrievedContext, senderUser] = await Promise.all([
-          agentCheckedRecently
-            ? Promise.resolve({
-                llmStatus: agent.llmStatus,
-                llmModel: agent.llmModel,
-                llmLastCheckedAt: agent.llmLastCheckedAt,
-                llmLastError: agent.llmLastError,
-              } as Awaited<ReturnType<typeof probeAgentLlm>>)
-            : probeAgentLlm(agent),
+        const [orgContext, retrievedContext, senderUser] = await Promise.all([
           buildOrgContext(),
           buildMessageRetrievalContext(message),
           prisma.user.findUnique({
@@ -474,8 +514,18 @@ export async function POST(
             select: { displayName: true, name: true },
           }),
         ]);
+        const selectedRuntimeConfig = selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : null;
+        const selectedThinkingMode = selectedTarget?.thinkingMode ?? agent.llmThinkingMode;
+        const llmHealth = await probeAgentLlm(selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : agent);
         const currentUserName = senderUser?.displayName || senderUser?.name || null;
         retrievalSources = retrievedContext.sources;
+        await prisma.conversation.update({
+          where: { id: conversation.id },
+          data: {
+            llmThreadState: serializeConversationLlmThreadState(threadLlmPlan.state),
+            updatedAt: new Date(),
+          },
+        });
         await prisma.aIAgent.update({
           where: { id: agent.id },
           data: {
@@ -492,9 +542,11 @@ export async function POST(
 
         const response = await generateAgentReply({
           ...agent,
+          ...(selectedRuntimeConfig ?? {}),
+          llmThinkingMode: selectedThinkingMode,
           orgContext: [orgContext, retrievedContext.text].filter(Boolean).join("\n\n"),
           currentUserName,
-          enableThinking: resolveThinkingMode(agent, message),
+          enableThinking: resolveThinkingMode({ ...agent, llmThinkingMode: selectedThinkingMode }, message),
           history: recentMessages.reverse().map((entry) => ({
             role: entry.senderAgentId ? "assistant" : "user",
             content: entry.body,
@@ -510,6 +562,15 @@ export async function POST(
             llmModel: response.model,
             llmLastCheckedAt: new Date(),
             llmLastError: null,
+          },
+        });
+        await prisma.conversation.update({
+          where: { id: conversation.id },
+          data: {
+            llmThreadState: serializeConversationLlmThreadState(
+              applyResolvedThreadModel(threadLlmPlan.state, response.model)
+            ),
+            updatedAt: new Date(),
           },
         });
       } catch (error) {
@@ -555,7 +616,10 @@ export async function POST(
 
     await prisma.conversation.update({
       where: { id: conversation.id },
-      data: { updatedAt: new Date() },
+      data: {
+        llmThreadState: serializeConversationLlmThreadState(normalizeConversationLlmThreadState("")),
+        updatedAt: new Date(),
+      },
     });
 
     const messages = [userMessage, agentMessage]

@@ -329,19 +329,9 @@ function GroupTaskDrawer({
   onTaskGroupChange: (cardId: string, taskGroupId: string | null) => void;
 }) {
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
-
-  // When the drawer opens or the group changes, select the first card
-  useEffect(() => {
-    if (open && cards.length > 0) {
-      setSelectedCardId((prev) => {
-        // Keep current selection if it's still in the group
-        if (prev && cards.find((c) => c.id === prev)) return prev;
-        return cards[0].id;
-      });
-    }
-  }, [open, group?.id, cards]);
-
-  const selectedCard = cards.find((c) => c.id === selectedCardId) ?? cards[0] ?? null;
+  const resolvedSelectedCardId =
+    selectedCardId && cards.some((card) => card.id === selectedCardId) ? selectedCardId : (cards[0]?.id ?? null);
+  const selectedCard = cards.find((c) => c.id === resolvedSelectedCardId) ?? cards[0] ?? null;
 
   const repoOptions = repos.map((repo) => ({
     id: repo.id,
@@ -1543,6 +1533,38 @@ function CompletedTasksDrawer({
 // ─── List View ────────────────────────────────────────────────────────────────
 
 type ListSortKey = "title" | "column" | "priority" | "repo" | "assignees" | "sprint";
+type ListSortDirection = "asc" | "desc";
+
+function SortHeaderButton({
+  label,
+  col,
+  active,
+  sortDir,
+  onToggle,
+}: {
+  label: string;
+  col: ListSortKey;
+  active: boolean;
+  sortDir: ListSortDirection;
+  onToggle: (col: ListSortKey) => void;
+}) {
+  return (
+    <button
+      onClick={() => onToggle(col)}
+      className={cn(
+        "flex items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition-colors whitespace-nowrap",
+        active ? "text-[#F7941D]" : "text-[#575757] hover:text-[#999999]"
+      )}
+    >
+      {label}
+      {active ? (
+        sortDir === "asc" ? <ChevronUp size={10} /> : <ChevronDown size={10} />
+      ) : (
+        <ArrowUpDown size={10} className="opacity-30" />
+      )}
+    </button>
+  );
+}
 
 function KanbanListView({
   cards,
@@ -1554,7 +1576,7 @@ function KanbanListView({
   onUpdate: (cardId: string, updates: Partial<GlobalCard>) => void;
 }) {
   const [sortKey, setSortKey] = useState<ListSortKey>("column");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+  const [sortDir, setSortDir] = useState<ListSortDirection>("asc");
 
   function toggleSort(key: ListSortKey) {
     if (sortKey === key) {
@@ -1602,26 +1624,6 @@ function KanbanListView({
     });
   }, [cards, sortKey, sortDir]);
 
-  function SortHeader({ label, col }: { label: string; col: ListSortKey }) {
-    const active = sortKey === col;
-    return (
-      <button
-        onClick={() => toggleSort(col)}
-        className={cn(
-          "flex items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.14em] transition-colors whitespace-nowrap",
-          active ? "text-[#F7941D]" : "text-[#575757] hover:text-[#999999]"
-        )}
-      >
-        {label}
-        {active ? (
-          sortDir === "asc" ? <ChevronUp size={10} /> : <ChevronDown size={10} />
-        ) : (
-          <ArrowUpDown size={10} className="opacity-30" />
-        )}
-      </button>
-    );
-  }
-
   return (
     <motion.div
       className="px-3 py-4 pb-8 sm:px-6"
@@ -1634,11 +1636,35 @@ function KanbanListView({
         <div className="border-b border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.025)] px-4 py-2.5">
           {/* Mobile header */}
           <div className="flex items-center justify-between sm:hidden">
-            <SortHeader label="Title" col="title" />
+            <SortHeaderButton
+              label="Title"
+              col="title"
+              active={sortKey === "title"}
+              sortDir={sortDir}
+              onToggle={toggleSort}
+            />
             <div className="flex items-center gap-3">
-              <SortHeader label="Status" col="column" />
-              <SortHeader label="Priority" col="priority" />
-              <SortHeader label="People" col="assignees" />
+              <SortHeaderButton
+                label="Status"
+                col="column"
+                active={sortKey === "column"}
+                sortDir={sortDir}
+                onToggle={toggleSort}
+              />
+              <SortHeaderButton
+                label="Priority"
+                col="priority"
+                active={sortKey === "priority"}
+                sortDir={sortDir}
+                onToggle={toggleSort}
+              />
+              <SortHeaderButton
+                label="People"
+                col="assignees"
+                active={sortKey === "assignees"}
+                sortDir={sortDir}
+                onToggle={toggleSort}
+              />
             </div>
           </div>
           {/* Desktop header */}
@@ -1646,12 +1672,48 @@ function KanbanListView({
             className="max-sm:hidden grid items-center gap-3"
             style={{ gridTemplateColumns: "minmax(0,3fr) 1fr 80px 1fr 80px 1fr" }}
           >
-            <SortHeader label="Title" col="title" />
-            <SortHeader label="Status" col="column" />
-            <SortHeader label="Priority" col="priority" />
-            <SortHeader label="Repo" col="repo" />
-            <SortHeader label="People" col="assignees" />
-            <SortHeader label="Sprint" col="sprint" />
+            <SortHeaderButton
+              label="Title"
+              col="title"
+              active={sortKey === "title"}
+              sortDir={sortDir}
+              onToggle={toggleSort}
+            />
+            <SortHeaderButton
+              label="Status"
+              col="column"
+              active={sortKey === "column"}
+              sortDir={sortDir}
+              onToggle={toggleSort}
+            />
+            <SortHeaderButton
+              label="Priority"
+              col="priority"
+              active={sortKey === "priority"}
+              sortDir={sortDir}
+              onToggle={toggleSort}
+            />
+            <SortHeaderButton
+              label="Repo"
+              col="repo"
+              active={sortKey === "repo"}
+              sortDir={sortDir}
+              onToggle={toggleSort}
+            />
+            <SortHeaderButton
+              label="People"
+              col="assignees"
+              active={sortKey === "assignees"}
+              sortDir={sortDir}
+              onToggle={toggleSort}
+            />
+            <SortHeaderButton
+              label="Sprint"
+              col="sprint"
+              active={sortKey === "sprint"}
+              sortDir={sortDir}
+              onToggle={toggleSort}
+            />
           </div>
         </div>
 
