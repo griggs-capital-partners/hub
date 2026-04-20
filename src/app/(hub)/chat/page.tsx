@@ -3,14 +3,14 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { TeamClient } from "@/components/team/TeamClient";
 import { ensurePlaceholderUsersForInvites, inviteUserId } from "@/lib/team-invites";
-import { listConversationsForUser } from "@/lib/chat";
+import { listChatProjects, listConversationsForUser } from "@/lib/chat";
 import { redirect } from "next/navigation";
 
 export default async function TeamPage() {
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  const [invites, agents, conversations] = await Promise.all([
+  const [invites, agents, conversations, chatProjects] = await Promise.all([
     prisma.teamInvite.findMany({
       where: { usedAt: null },
       orderBy: { createdAt: "desc" },
@@ -28,6 +28,7 @@ export default async function TeamPage() {
       },
     }),
     listConversationsForUser(session.user.id),
+    listChatProjects(),
   ]);
 
   await ensurePlaceholderUsersForInvites(prisma, invites);
@@ -89,6 +90,10 @@ export default async function TeamPage() {
     updatedAt: a.updatedAt.toISOString(),
     llmLastCheckedAt: a.llmLastCheckedAt?.toISOString() ?? null,
   }));
+  const serializedProjects = chatProjects.map((project) => ({
+    id: project.id,
+    name: project.name,
+  }));
 
   return (
     <Suspense>
@@ -97,6 +102,7 @@ export default async function TeamPage() {
         users={serializedUsers}
         invites={serializedInvites}
         agents={serializedAgents}
+        projects={serializedProjects}
         initialConversations={conversations}
         activeSprint={null}
       />

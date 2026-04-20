@@ -8,6 +8,12 @@ import {
 } from "@/lib/agent-llm-config";
 
 const conversationInclude = {
+  chatProject: {
+    select: {
+      id: true,
+      name: true,
+    },
+  },
   members: {
     include: {
       user: {
@@ -68,6 +74,20 @@ const conversationInclude = {
       },
     },
   },
+  documents: {
+    orderBy: { createdAt: "desc" as const },
+    include: {
+      uploader: {
+        select: {
+          id: true,
+          name: true,
+          displayName: true,
+          email: true,
+          image: true,
+        },
+      },
+    },
+  },
 } as const;
 
 const messageInclude = {
@@ -88,9 +108,35 @@ const messageInclude = {
   },
 } as const;
 
+const SEARCH_RESULT_LIMIT = 50;
+
 type ConversationWithRelations = Prisma.ConversationGetPayload<{
   include: typeof conversationInclude;
 }>;
+
+type ChatProjectSummary = {
+  id: string;
+  name: string;
+};
+
+function resolveConversationAgentMemberInternal(
+  conversation: ConversationWithRelations
+) {
+  const storedThreadLlmState = normalizeConversationLlmThreadState(conversation.llmThreadState);
+  const agentMembers = conversation.members.filter(
+    (member): member is ConversationWithRelations["members"][number] & { agent: NonNullable<ConversationWithRelations["members"][number]["agent"]> } =>
+      Boolean(member.agent)
+  );
+
+  if (storedThreadLlmState.activeAgentId) {
+    const explicitAgentMember = agentMembers.find((member) => member.agent.id === storedThreadLlmState.activeAgentId);
+    if (explicitAgentMember) {
+      return explicitAgentMember;
+    }
+  }
+
+  return agentMembers[0] ?? null;
+}
 
 function displayUserName(user: {
   displayName: string | null;
@@ -164,36 +210,188 @@ function serializeLatestMessage(
   };
 }
 
+function serializeConversationDocument(
+  document: ConversationWithRelations["documents"][number]
+) {
+  return {
+    id: document.id,
+    filename: document.filename,
+    mimeType: document.mimeType,
+    fileType: document.fileType,
+    fileSize: document.fileSize,
+    createdAt: document.createdAt.toISOString(),
+    uploader: {
+      id: document.uploader.id,
+      name: document.uploader.displayName || document.uploader.name || document.uploader.email,
+      email: document.uploader.email,
+      image: document.uploader.image,
+    },
+  };
+}
+
 export function serializeConversation(
   conversation: ConversationWithRelations
 ) {
-  const agentMember = conversation.members.find((member) => member.agent)?.agent ?? null;
+  const activeAgentMember = resolveConversationAgentMemberInternal(conversation)?.agent ?? null;
   const storedThreadLlmState = normalizeConversationLlmThreadState(conversation.llmThreadState);
-  const threadLlmState = agentMember
+  const threadLlmState = activeAgentMember
     ? reconcileConversationLlmThreadState(
-        normalizeAgentLlmConfig(agentMember.llmConfig, {
-          llmEndpointUrl: agentMember.llmEndpointUrl,
-          llmUsername: agentMember.llmUsername,
-          llmPassword: agentMember.llmPassword,
-          llmModel: agentMember.llmModel,
-          llmThinkingMode: agentMember.llmThinkingMode,
+        normalizeAgentLlmConfig(activeAgentMember.llmConfig, {
+          llmEndpointUrl: activeAgentMember.llmEndpointUrl,
+          llmUsername: activeAgentMember.llmUsername,
+          llmPassword: activeAgentMember.llmPassword,
+          llmModel: activeAgentMember.llmModel,
+          llmThinkingMode: activeAgentMember.llmThinkingMode,
         }),
         storedThreadLlmState
       )
     : storedThreadLlmState;
+  const publicThreadLlmState = {
+    ...threadLlmState,
+    activeAgentId:
+      threadLlmState.activeAgentId && activeAgentMember?.id === threadLlmState.activeAgentId
+        ? threadLlmState.activeAgentId
+        : null,
+  };
 
   return {
     id: conversation.id,
     type: conversation.type,
     name: conversation.name,
-    llmThread: getPublicConversationLlmState(threadLlmState),
+    project: conversation.chatProject
+      ? {
+          id: conversation.chatProject.id,
+          name: conversation.chatProject.name,
+        }
+      : null,
+    llmThread: getPublicConversationLlmState(publicThreadLlmState),
     createdAt: conversation.createdAt.toISOString(),
     updatedAt: conversation.updatedAt.toISOString(),
     members: conversation.members
       .map(serializeConversationMember)
       .filter((member): member is NonNullable<typeof member> => member !== null),
     latestMessage: serializeLatestMessage(conversation.messages[0]),
+    documents: conversation.documents.map(serializeConversationDocument),
   };
+}
+
+function includesNormalizedQuery(value: string | null | undefined, normalizedQuery: string) {
+  return value?.toLocaleLowerCase().includes(normalizedQuery) ?? false;
+}
+
+function buildMessageMatchSnippet(body: string, query: string) {
+  const collapsedBody = body.replace(/\s+/g, " ").trim();
+  if (!collapsedBody) {
+    return "Matched in message content.";
+  }
+
+  const normalizedBody = collapsedBody.toLocaleLowerCase();
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const matchIndex = normalizedBody.indexOf(normalizedQuery);
+
+  if (matchIndex < 0) {
+    return collapsedBody.length > 160
+      ? `${collapsedBody.slice(0, 157).trimEnd()}...`
+      : collapsedBody;
+  }
+
+  const radius = 72;
+  const start = Math.max(0, matchIndex - radius);
+  const end = Math.min(collapsedBody.length, matchIndex + query.trim().length + radius);
+  const prefix = start > 0 ? "..." : "";
+  const suffix = end < collapsedBody.length ? "..." : "";
+
+  return `${prefix}${collapsedBody.slice(start, end).trim()}${suffix}`;
+}
+
+function getSerializedSearchSenderName(message: {
+  senderUser: {
+    name: string | null;
+    displayName: string | null;
+  } | null;
+  senderAgent: {
+    name: string;
+  } | null;
+}) {
+  if (message.senderUser) {
+    return message.senderUser.displayName || message.senderUser.name || "Unknown user";
+  }
+
+  if (message.senderAgent) {
+    return message.senderAgent.name;
+  }
+
+  return null;
+}
+
+export function resolveConversationAgentMember(
+  conversation: ConversationWithRelations
+) {
+  return resolveConversationAgentMemberInternal(conversation);
+}
+
+export async function listChatProjects() {
+  try {
+    return await prisma.chatProject.findMany({
+      orderBy: { name: "asc" },
+      select: {
+        id: true,
+        name: true,
+      },
+    });
+  } catch (error) {
+    if (isMissingChatTablesError(error)) {
+      return [];
+    }
+
+    throw error;
+  }
+}
+
+export async function resolveChatProjectSelection(params: {
+  projectId?: string | null;
+  projectName?: string | null;
+}): Promise<{ project: ChatProjectSummary | null; created: boolean }> {
+  const requestedProjectId = params.projectId?.trim() ?? "";
+  const requestedProjectName = params.projectName?.trim() ?? "";
+
+  if (requestedProjectId) {
+    const project = await prisma.chatProject.findUnique({
+      where: { id: requestedProjectId },
+      select: { id: true, name: true },
+    });
+
+    if (!project) {
+      throw new Error("Project not found");
+    }
+
+    return { project, created: false };
+  }
+
+  if (!requestedProjectName) {
+    return { project: null, created: false };
+  }
+
+  const existingProject = await prisma.chatProject.findFirst({
+    where: {
+      name: {
+        equals: requestedProjectName,
+        mode: "insensitive",
+      },
+    },
+    select: { id: true, name: true },
+  });
+
+  if (existingProject) {
+    return { project: existingProject, created: false };
+  }
+
+  const createdProject = await prisma.chatProject.create({
+    data: { name: requestedProjectName },
+    select: { id: true, name: true },
+  });
+
+  return { project: createdProject, created: true };
 }
 
 export async function listConversationsForUser(userId: string) {
@@ -329,10 +527,237 @@ export function isMissingChatTablesError(error: unknown) {
     code?: unknown;
     meta?: {
       table?: unknown;
+      column?: unknown;
     };
   };
 
-  return prismaError.code === "P2021"
+  const missingChatTable = prismaError.code === "P2021"
     && typeof prismaError.meta?.table === "string"
-    && ["public.conversations", "public.conversation_members", "public.chat_messages"].includes(prismaError.meta.table);
+    && [
+      "public.conversations",
+      "public.conversation_members",
+      "public.chat_messages",
+      "public.chat_projects",
+      "public.conversation_documents",
+    ].includes(prismaError.meta.table);
+
+  const missingChatColumn = prismaError.code === "P2022"
+    && typeof prismaError.meta?.column === "string"
+    && [
+      "conversations.chatProjectId",
+      "public.conversations.chatProjectId",
+      "conversations.repoId",
+      "public.conversations.repoId",
+    ].includes(prismaError.meta.column);
+
+  return missingChatTable || missingChatColumn;
+}
+
+export async function searchConversationsForUser(userId: string, rawQuery: string) {
+  const query = rawQuery.trim();
+
+  if (!query) {
+    return [];
+  }
+
+  try {
+    const conversations = await prisma.conversation.findMany({
+      where: {
+        members: {
+          some: { userId },
+        },
+        OR: [
+          {
+            name: {
+              contains: query,
+              mode: "insensitive",
+            },
+          },
+          {
+            chatProject: {
+              is: {
+                name: {
+                  contains: query,
+                  mode: "insensitive",
+                },
+              },
+            },
+          },
+          {
+            members: {
+              some: {
+                OR: [
+                  {
+                    user: {
+                      is: {
+                        displayName: {
+                          contains: query,
+                          mode: "insensitive",
+                        },
+                      },
+                    },
+                  },
+                  {
+                    user: {
+                      is: {
+                        name: {
+                          contains: query,
+                          mode: "insensitive",
+                        },
+                      },
+                    },
+                  },
+                  {
+                    user: {
+                      is: {
+                        email: {
+                          contains: query,
+                          mode: "insensitive",
+                        },
+                      },
+                    },
+                  },
+                  {
+                    agent: {
+                      is: {
+                        name: {
+                          contains: query,
+                          mode: "insensitive",
+                        },
+                      },
+                    },
+                  },
+                  {
+                    agent: {
+                      is: {
+                        role: {
+                          contains: query,
+                          mode: "insensitive",
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+          {
+            messages: {
+              some: {
+                body: {
+                  contains: query,
+                  mode: "insensitive",
+                },
+              },
+            },
+          },
+        ],
+      },
+      include: conversationInclude,
+      orderBy: [{ updatedAt: "desc" }],
+      take: SEARCH_RESULT_LIMIT,
+    });
+
+    const serializedConversations = conversations.map(serializeConversation);
+    const normalizedQuery = query.toLocaleLowerCase();
+    const conversationIds = conversations.map((conversation) => conversation.id);
+    const matchingMessageByConversationId = new Map<string, Prisma.ChatMessageGetPayload<{ include: typeof messageInclude }>>();
+
+    if (conversationIds.length > 0) {
+      const matchingMessages = await prisma.chatMessage.findMany({
+        where: {
+          conversationId: { in: conversationIds },
+          body: {
+            contains: query,
+            mode: "insensitive",
+          },
+        },
+        include: messageInclude,
+        orderBy: [{ createdAt: "desc" }],
+      });
+
+      for (const message of matchingMessages) {
+        if (!matchingMessageByConversationId.has(message.conversationId)) {
+          matchingMessageByConversationId.set(message.conversationId, message);
+        }
+      }
+    }
+
+    return serializedConversations.map((conversation) => {
+      const matchingMessage = matchingMessageByConversationId.get(conversation.id);
+      if (matchingMessage) {
+        return {
+          conversation,
+          match: {
+            kind: "message" as const,
+            snippet: buildMessageMatchSnippet(matchingMessage.body, query),
+            senderName: getSerializedSearchSenderName(matchingMessage),
+            matchedAt: matchingMessage.createdAt.toISOString(),
+          },
+        };
+      }
+
+      const customName = conversation.name?.trim() ?? "";
+      if (includesNormalizedQuery(customName, normalizedQuery)) {
+        return {
+          conversation,
+          match: {
+            kind: "thread" as const,
+            snippet: customName,
+            senderName: null,
+            matchedAt: conversation.updatedAt,
+          },
+        };
+      }
+
+      const projectName = conversation.project?.name?.trim() || "General";
+      if (includesNormalizedQuery(projectName, normalizedQuery)) {
+        return {
+          conversation,
+          match: {
+            kind: "project" as const,
+            snippet: projectName,
+            senderName: null,
+            matchedAt: conversation.updatedAt,
+          },
+        };
+      }
+
+      const matchingMember = conversation.members.find((member) =>
+        includesNormalizedQuery(member.name, normalizedQuery)
+        || includesNormalizedQuery(member.role, normalizedQuery)
+        || includesNormalizedQuery(member.email, normalizedQuery)
+      );
+
+      if (matchingMember) {
+        return {
+          conversation,
+          match: {
+            kind: "participant" as const,
+            snippet: matchingMember.role
+              ? `${matchingMember.name} / ${matchingMember.role}`
+              : matchingMember.name,
+            senderName: null,
+            matchedAt: conversation.updatedAt,
+          },
+        };
+      }
+
+      return {
+        conversation,
+        match: {
+          kind: "thread" as const,
+          snippet: conversation.latestMessage?.body || customName || "Conversation match",
+          senderName: null,
+          matchedAt: conversation.updatedAt,
+        },
+      };
+    });
+  } catch (error) {
+    if (isMissingChatTablesError(error)) {
+      return [];
+    }
+
+    throw error;
+  }
 }

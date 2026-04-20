@@ -114,6 +114,7 @@ export type ConversationLlmAuditEvent = {
 };
 
 export type ConversationLlmThreadState = {
+  activeAgentId: string | null;
   selectedConnectionId: string | null;
   selectedConnectionLabel: string | null;
   selectedProvider: string | null;
@@ -459,9 +460,11 @@ function buildSelectionState(
   selectedBy: ConversationLlmThreadState["selectedBy"],
   reasonSummary: string | null,
   escalationSummary: string | null,
-  auditEvents: ConversationLlmAuditEvent[]
+  auditEvents: ConversationLlmAuditEvent[],
+  activeAgentId: string | null = null
 ): ConversationLlmThreadState {
   return {
+    activeAgentId,
     selectedConnectionId: target?.connectionId ?? null,
     selectedConnectionLabel: target?.connectionLabel ?? null,
     selectedProvider: target?.provider ?? null,
@@ -934,6 +937,7 @@ export function normalizeConversationLlmThreadState(raw: unknown): ConversationL
     : null;
 
   return {
+    activeAgentId: typeof state.activeAgentId === "string" ? state.activeAgentId : null,
     selectedConnectionId: typeof state.selectedConnectionId === "string" ? state.selectedConnectionId : null,
     selectedConnectionLabel: typeof state.selectedConnectionLabel === "string" ? state.selectedConnectionLabel : null,
     selectedProvider: typeof state.selectedProvider === "string" ? state.selectedProvider : null,
@@ -966,6 +970,7 @@ export function serializeConversationLlmThreadState(state: ConversationLlmThread
 
 export function getPublicConversationLlmState(state: ConversationLlmThreadState) {
   return {
+    activeAgentId: state.activeAgentId,
     selectedModel: state.selectedModel,
     selectedModelKey: state.selectedModelKey,
     selectedLabel: state.selectedLabel,
@@ -1013,13 +1018,14 @@ export function reconcileConversationLlmThreadState(
       inferSelectionSource(config, target, normalizedState.selectedBy),
       normalizedState.reasonSummary,
       normalizedState.escalationSummary,
-      normalizedState.auditEvents
+      normalizedState.auditEvents,
+      normalizedState.activeAgentId
     );
   }
 
   const fallbackTarget = getFallbackTarget(config);
   if (!fallbackTarget) {
-    return buildSelectionState(null, null, null, null, normalizedState.auditEvents);
+    return buildSelectionState(null, null, null, null, normalizedState.auditEvents, normalizedState.activeAgentId);
   }
 
   const selectedBy = inferSelectionSource(config, fallbackTarget, normalizedState.selectedBy);
@@ -1034,7 +1040,8 @@ export function reconcileConversationLlmThreadState(
     selectedBy,
     reasonSummary,
     null,
-    normalizedState.auditEvents
+    normalizedState.auditEvents,
+    normalizedState.activeAgentId
   );
 }
 
@@ -1135,7 +1142,7 @@ export function planConversationLlmSelection(params: {
       return {
         target,
         eventType: "escalation",
-        state: buildSelectionState(target, "auto", currentState.reasonSummary, summary, auditEvents),
+        state: buildSelectionState(target, "auto", currentState.reasonSummary, summary, auditEvents, currentState.activeAgentId),
       };
     }
 
@@ -1191,7 +1198,7 @@ export function planConversationLlmSelection(params: {
     return {
       target,
       eventType: "selection",
-      state: buildSelectionState(target, selectedBy, summary, null, auditEvents),
+      state: buildSelectionState(target, selectedBy, summary, null, auditEvents, currentState.activeAgentId),
     };
   }
 
@@ -1209,6 +1216,6 @@ export function planConversationLlmSelection(params: {
   return {
     target: fallbackTarget,
     eventType: fallbackTarget ? "selection" : null,
-    state: buildSelectionState(fallbackTarget, fallbackTarget ? "legacy" : null, summary, null, auditEvents),
+    state: buildSelectionState(fallbackTarget, fallbackTarget ? "legacy" : null, summary, null, auditEvents, currentState.activeAgentId),
   };
 }

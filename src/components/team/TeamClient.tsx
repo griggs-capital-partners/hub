@@ -1,514 +1,149 @@
 "use client";
 
-import type { FormEvent, KeyboardEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { useSearchParams } from "next/navigation";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import { TOOL_LABELS } from "@/lib/agent-tools";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
-  ArrowLeft,
-  Bot,
-  Check,
   Copy,
-  Eye,
-  Hash,
   Mail,
-  MessageSquare,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Pencil,
-  Send,
-  Trash2,
   UserPlus,
   UsersRound,
-  Wrench,
   X,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
-import { Avatar } from "@/components/ui/Avatar";
 import { Button } from "@/components/ui/Button";
-import { Input, Textarea } from "@/components/ui/Input";
+import { Input } from "@/components/ui/Input";
 import { cn } from "@/lib/utils";
 import { deriveInviteName } from "@/lib/team-invites";
+import { ConversationPane } from "@/components/team/ConversationPane";
+import { NewThreadModal } from "@/components/team/NewThreadModal";
+import { TeamDiscoveryPane } from "@/components/team/TeamDiscoveryPane";
+import { type ThreadDocumentUploadState } from "@/components/team/ThreadDocumentsPanel";
+import { ThreadDrawer } from "@/components/team/ThreadDrawer";
+import { ThreadRail } from "@/components/team/ThreadRail";
+import {
+  type AIAgent,
+  type AgentInspectorData,
+  type ChatMessage,
+  type ChatProjectOption,
+  type ConversationDocumentSummary,
+  type ConversationMemberSummary,
+  type ConversationSearchResult,
+  type ConversationSummary,
+  type NewThreadSelection,
+  type PendingInvite,
+  type TeamMember,
+  MAX_CONTEXT_TOKENS,
+  dedupeChatMessages,
+  formatContextMeter,
+  formatRelativeTime,
+  formatThinkingMode,
+  formatTokensK,
+  getAgentSidebarStatus,
+  getConversationAvatar,
+  getConversationLabel,
+  getConversationProjectSections,
+  getConversationParticipantSummary,
+  getConversationTimestamp,
+  getConversationWorkspaceLabel,
+  getDirectConversationPartner,
+  getPrimaryAgentParticipant,
+  getMemberDisplayName,
+  getOnlineStatus,
+} from "@/components/team/team-chat-shared";
+import { validateConversationDocument } from "@/lib/conversation-documents";
 
-interface TeamMember {
-  id: string;
-  name: string | null;
-  displayName: string | null;
-  email: string;
-  image: string | null;
-  role: string;
-  lastSeen: string | null;
-  sprintTasks: unknown[];
-}
-
-interface PendingInvite {
-  id: string;
-  userId: string;
-  name: string | null;
-  image: string | null;
-  email: string;
-  createdAt: string;
-}
-
-interface AIAgent {
-  id: string;
-  name: string;
-  role: string;
-  description: string | null;
-  persona: string;
-  duties: string;
-  avatar: string | null;
-  status: string;
-  llmStatus: string;
-  llmModel: string | null;
-  llmThinkingMode: string;
-  llmLastCheckedAt: string | null;
-  llmLastError: string | null;
-  createdById: string;
-  createdAt: string;
-  _count: { sprintTasks: number };
-}
-
-interface ConversationMemberSummary {
-  kind: "user" | "agent";
-  id: string;
-  name: string;
-  image: string | null;
-  role?: string;
-  email?: string;
-  lastSeen?: string | null;
-  status?: string;
-  llmModel?: string | null;
-  llmThinkingMode?: string;
-  llmStatus?: string;
-  llmLastCheckedAt?: string | null;
-  llmLastError?: string | null;
-}
-
-interface ConversationSummary {
-  id: string;
-  type: "direct" | "group" | string;
-  name: string | null;
-  llmThread?: {
-    selectedModel: string | null;
-    selectedModelKey: string | null;
-    selectedLabel: string | null;
-    selectedProvider: string | null;
-    selectedBy: "auto" | "default" | "user" | "legacy" | null;
-    reasonSummary: string | null;
-    escalationSummary: string | null;
-    auditEvents: Array<{
-      type: "selection" | "override" | "escalation";
-      at: string;
-      summary: string;
-      selectedBy: "auto" | "default" | "user" | "legacy";
-      provider: string | null;
-      model: string | null;
-      modelKey: string | null;
-    }>;
-  };
-  createdAt: string;
-  updatedAt: string;
-  members: ConversationMemberSummary[];
-  latestMessage: {
-    id: string;
-    body: string;
-    createdAt: string;
-    sender: {
-      kind: "user" | "agent";
-      id: string;
-      name: string;
-      image: string | null;
-    } | null;
-  } | null;
-}
-
-interface ToolActivity {
-  id: string;
-  name: string;
-  args: Record<string, unknown>;
-  status: "running" | "done";
-  result?: string;
-}
-
-interface ChatMessage {
-  id: string;
-  body: string;
-  thinking?: string | null;
-  thinkingEnabled?: boolean;
-  isStreaming?: boolean;
-  streamState?: "thinking" | "responding" | "using_tools";
-  toolActivity?: ToolActivity[];
-  retrievalSources?: Array<{
-    kind: string;
-    label: string;
-    target: string;
-    detail: string;
-  }>;
-  createdAt: string;
-  sender: {
-    kind: "user" | "agent";
-    id: string;
-    name: string;
-    image: string | null;
-  } | null;
-}
-
-interface AgentInspectorData {
-  conversationId: string;
-  readiness: {
-    phase: "ready" | "offline" | "disconnected";
-    canSend: boolean;
-    label: string;
-    detail: string;
-  };
-  agent: {
-    id: string;
-    name: string;
-    role: string;
-    status: string;
-    llmStatus: string;
-    llmModel: string | null;
-    llmThinkingMode: string;
-    llmLastCheckedAt: string | null;
-    llmLastError: string | null;
-    endpointConfigured: boolean;
-  };
-  threadLlm: {
-    selectedModel: string | null;
-    selectedModelKey: string | null;
-    selectedLabel: string | null;
-    selectedProvider: string | null;
-    selectedBy: "auto" | "default" | "user" | "legacy" | null;
-    reasonSummary: string | null;
-    escalationSummary: string | null;
-    auditEvents: Array<{
-      type: "selection" | "override" | "escalation";
-      at: string;
-      summary: string;
-      selectedBy: "auto" | "default" | "user" | "legacy";
-      provider: string | null;
-      model: string | null;
-      modelKey: string | null;
-    }>;
-    availableModels: Array<{
-      key: string;
-      label: string;
-      model: string;
-      provider: string;
-      connectionId: string;
-      connectionLabel: string;
-      isDefault: boolean;
-    }>;
-    autoRoute: boolean;
-    allowUserOverride: boolean;
-    allowEscalation: boolean;
-  };
-  context: {
-    estimatedTokens: number;
-    estimatedSystemPromptTokens: number;
-    estimatedHistoryTokens: number;
-    recentHistoryCount: number;
-    historyWindowSize: number;
-    knowledgeSources: Array<{
-      id: string;
-      label: string;
-      description: string;
-    }>;
-  };
-  payload: {
-    currentUserName: string | null;
-    systemPrompt: string;
-    history: Array<{
-      role: "user" | "assistant";
-      content: string;
-    }>;
-    orgContext: string;
-  };
-}
-
-function dedupeChatMessages(messages: ChatMessage[]) {
-  const seen = new Set<string>();
-  const unique: ChatMessage[] = [];
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (seen.has(message.id)) continue;
-    seen.add(message.id);
-    unique.unshift(message);
-  }
-
-  return unique;
-}
-
-interface ActiveSprint {
-  id: string;
-  name: string;
-  status: string;
-  startDate: string;
-  endDate: string;
-}
-
-interface Props {
+type Props = {
   currentUserId: string;
   users: TeamMember[];
   invites: PendingInvite[];
   agents: AIAgent[];
+  projects: ChatProjectOption[];
   initialConversations: ConversationSummary[];
-  activeSprint: ActiveSprint | null;
-}
-
-const STATUS_COLORS = { online: "#22C55E", away: "#FBBA00", offline: "#505050" };
-const STATUS_LABELS = { online: "Online", away: "Away", offline: "Offline" };
-
-const chatMarkdownComponents = {
-  p: ({ children }: { children?: React.ReactNode }) => (
-    <p className="mb-2 last:mb-0 leading-5">{children}</p>
-  ),
-  strong: ({ children }: { children?: React.ReactNode }) => (
-    <strong className="font-semibold text-[#F6F3EE]">{children}</strong>
-  ),
-  em: ({ children }: { children?: React.ReactNode }) => (
-    <em className="italic text-[#DEDEDE]">{children}</em>
-  ),
-  h1: ({ children }: { children?: React.ReactNode }) => (
-    <p className="mb-2 text-base font-bold text-[#F6F3EE]">{children}</p>
-  ),
-  h2: ({ children }: { children?: React.ReactNode }) => (
-    <p className="mb-1.5 text-sm font-bold text-[#F6F3EE]">{children}</p>
-  ),
-  h3: ({ children }: { children?: React.ReactNode }) => (
-    <p className="mb-1 text-sm font-semibold text-[#DEDEDE]">{children}</p>
-  ),
-  ul: ({ children }: { children?: React.ReactNode }) => (
-    <ul className="mb-2 space-y-0.5 pl-4">{children}</ul>
-  ),
-  ol: ({ children }: { children?: React.ReactNode }) => (
-    <ol className="mb-2 space-y-0.5 pl-4 list-decimal marker:text-[#8D877F]">{children}</ol>
-  ),
-  li: ({ children }: { children?: React.ReactNode }) => (
-    <li className="leading-5 flex gap-2">
-      <span className="mt-2 w-1 h-1 rounded-full bg-[#7EC8E3]/60 flex-shrink-0" />
-      <span className="flex-1">{children}</span>
-    </li>
-  ),
-  code: ({ className, children }: { className?: string; children?: React.ReactNode }) => {
-    const isBlock = /language-/.test(className ?? "");
-    if (isBlock) {
-      return (
-        <pre className="my-2 overflow-x-auto rounded-xl bg-[#0D0D0D] px-3 py-2 text-xs font-mono text-[#C8C8C8] leading-relaxed whitespace-pre border border-[rgba(255,255,255,0.08)]">
-          <code>{children}</code>
-        </pre>
-      );
-    }
-    return (
-      <code className="px-1.5 py-0.5 rounded bg-[rgba(126,200,227,0.12)] text-[#9FCBE0] text-xs font-mono border border-[rgba(126,200,227,0.18)]">
-        {children}
-      </code>
-    );
-  },
-  blockquote: ({ children }: { children?: React.ReactNode }) => (
-    <blockquote className="my-2 pl-3 border-l-2 border-[#7EC8E3]/40 text-[#CFC9C2] italic">{children}</blockquote>
-  ),
-  hr: () => <hr className="my-3 border-[rgba(255,255,255,0.08)]" />,
-  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
-    <a href={href} target="_blank" rel="noopener noreferrer" className="text-[#9FCBE0] underline underline-offset-2 hover:text-[#7EC8E3]">
-      {children}
-    </a>
-  ),
+  activeSprint?: {
+    id: string;
+    name: string;
+    status: string;
+    startDate: string;
+    endDate: string;
+  } | null;
 };
 
-function getOnlineStatus(lastSeen: string | null): "online" | "away" | "offline" {
-  if (!lastSeen) return "offline";
-  const diff = Date.now() - new Date(lastSeen).getTime();
-  if (diff < 5 * 60 * 1000) return "online";
-  if (diff < 20 * 60 * 1000) return "away";
-  return "offline";
-}
+type ThreadDocumentUploadMap = Record<string, ThreadDocumentUploadState[]>;
 
-function formatPreviewTime(iso: string) {
-  const date = new Date(iso);
-  const now = new Date();
-  const sameDay = date.toDateString() === now.toDateString();
-  return sameDay
-    ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
-    : date.toLocaleDateString([], { month: "short", day: "numeric" });
-}
-
-function formatMessageTime(iso: string) {
-  return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-}
-
-function formatRelativeTime(iso: string | null) {
-  if (!iso) return "Not checked yet";
-
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const diffMinutes = Math.max(0, Math.round(diffMs / 60000));
-  if (diffMinutes < 1) return "Just now";
-  if (diffMinutes < 60) return `${diffMinutes}m ago`;
-  const diffHours = Math.round(diffMinutes / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  const diffDays = Math.round(diffHours / 24);
-  return `${diffDays}d ago`;
-}
-
-function formatThinkingMode(mode?: string) {
-  if (mode === "always") return "Always";
-  if (mode === "off") return "Off";
-  return "Auto";
-}
-
-function formatContextMeter(estimatedTokens: number) {
-  if (estimatedTokens < 1000) return "Light";
-  if (estimatedTokens < 3000) return "Moderate";
-  if (estimatedTokens < 6000) return "Heavy";
-  return "Very heavy";
-}
-
-const MAX_CONTEXT_TOKENS = 128_000;
-
-function formatTokensK(tokens: number): string {
-  return `${(tokens / 1000).toFixed(1)}K`;
-}
-
-function RadialContextBar({ tokens, maxTokens = MAX_CONTEXT_TOKENS }: { tokens: number; maxTokens?: number }) {
-  const pct = Math.min(1, tokens / maxTokens);
-  const r = 7;
-  const circumference = 2 * Math.PI * r;
-  const offset = circumference * (1 - pct);
-  const color =
-    pct < 0.5 ? "#4ade80" : pct < 0.75 ? "#facc15" : pct < 0.9 ? "#f97316" : "#ef4444";
-  return (
-    <svg width="18" height="18" viewBox="0 0 20 20" style={{ transform: "rotate(-90deg)", flexShrink: 0 }}>
-      <circle cx="10" cy="10" r={r} fill="none" stroke="rgba(255,255,255,0.1)" strokeWidth="2.5" />
-      <circle
-        cx="10"
-        cy="10"
-        r={r}
-        fill="none"
-        stroke={color}
-        strokeWidth="2.5"
-        strokeDasharray={circumference}
-        strokeDashoffset={offset}
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
-
-function getMemberDisplayName(member: TeamMember) {
-  return member.displayName || member.name || member.email;
-}
-
-function getDirectConversationPartner(conversation: ConversationSummary, currentUserId: string) {
-  return conversation.members.find((member) => member.id !== currentUserId) ?? null;
-}
-
-function getConversationLabel(conversation: ConversationSummary, currentUserId: string) {
-  if (conversation.type === "group") {
-    return conversation.name || "Untitled group";
+function mergeChatProjects(
+  current: ChatProjectOption[],
+  incoming: ChatProjectOption[]
+) {
+  const mergedProjects = new Map(current.map((project) => [project.id, project]));
+  for (const project of incoming) {
+    mergedProjects.set(project.id, project);
   }
 
-  return getDirectConversationPartner(conversation, currentUserId)?.name || "New conversation";
+  return Array.from(mergedProjects.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function getConversationSubtext(conversation: ConversationSummary, currentUserId: string) {
-  if (conversation.type === "group") {
-    return `${conversation.members.length} members`;
-  }
-
-  const partner = getDirectConversationPartner(conversation, currentUserId);
-  if (partner?.kind === "agent") {
-    return partner.llmStatus === "online"
-      ? "LLM Brain Online"
-      : partner.llmStatus === "offline"
-        ? "LLM Brain Offline"
-        : "LLM Brain Not Connected";
-  }
-  return "Direct message";
-}
-
-function getConversationAvatar(conversation: ConversationSummary, currentUserId: string) {
-  if (conversation.type === "group") {
-    return { name: conversation.name || "Group", image: null, kind: "group" as const };
-  }
-
-  const partner = getDirectConversationPartner(conversation, currentUserId);
-  return {
-    name: partner?.name || "Conversation",
-    image: partner?.image || null,
-    kind: partner?.kind || "user",
-  };
-}
-
-function getPreviewText(conversation: ConversationSummary | undefined) {
-  if (!conversation?.latestMessage) return "No messages yet";
-  const senderName = conversation.latestMessage.sender?.name;
-  return senderName
-    ? `${senderName}: ${conversation.latestMessage.body}`
-    : conversation.latestMessage.body;
-}
-
-function getAgentSidebarStatus(status?: string) {
-  if (status === "online") {
-    return {
-      label: "Ready",
-      description: "Configured and ready to chat",
-      dot: "#22C55E",
-      chipClassName: "border-[rgba(75,156,211,0.28)] bg-[rgba(75,156,211,0.16)] text-[#B9E4F6]",
-      metaClassName: "text-[#7EC8E3]",
+type TeamChatRouteState =
+  | { kind: "rail" }
+  | { kind: "discovery" }
+  | { kind: "project"; projectId: string }
+  | { kind: "search"; query: string; projectId?: string | null }
+  | {
+      kind: "thread";
+      conversationId: string;
+      context?: "discover" | "project" | "search";
+      projectId?: string | null;
+      query?: string;
     };
+
+function buildTeamChatHref(pathname: string, routeState: TeamChatRouteState) {
+  const params = new URLSearchParams();
+
+  switch (routeState.kind) {
+    case "thread":
+      params.set("view", "thread");
+      params.set("conversationId", routeState.conversationId);
+      if (routeState.context) {
+        params.set("context", routeState.context);
+      }
+      if (routeState.projectId) {
+        params.set("projectId", routeState.projectId);
+      }
+      if (routeState.context === "search" && routeState.query?.trim()) {
+        params.set("q", routeState.query.trim());
+      }
+      break;
+    case "project":
+      params.set("view", "project");
+      params.set("projectId", routeState.projectId);
+      break;
+    case "search": {
+      const query = routeState.query.trim();
+      if (!query) {
+        return buildTeamChatHref(
+          pathname,
+          routeState.projectId
+            ? { kind: "project", projectId: routeState.projectId }
+            : { kind: "discovery" }
+        );
+      }
+
+      params.set("view", "search");
+      params.set("q", query);
+      if (routeState.projectId) {
+        params.set("projectId", routeState.projectId);
+      }
+      break;
+    }
+    case "discovery":
+      params.set("view", "discover");
+      break;
+    case "rail":
+      break;
   }
 
-  if (status === "offline") {
-    return {
-      label: "Offline",
-      description: "Connection needs attention",
-      dot: "#EF4444",
-      chipClassName: "border-[rgba(239,68,68,0.22)] bg-[rgba(239,68,68,0.12)] text-[#F5B4B4]",
-      metaClassName: "text-[#F08B8B]",
-    };
-  }
-
-  return {
-    label: "Not Ready",
-    description: "No LLM connection configured",
-    dot: "#8D877F",
-    chipClassName: "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] text-[#B7B0A8]",
-    metaClassName: "text-[#A39B92]",
-  };
-}
-
-function OnlineDot({ status }: { status: "online" | "away" | "offline" }) {
-  return (
-    <span
-      className={cn("block h-2.5 w-2.5 rounded-full border border-[#111111]", status === "online" && "animate-pulse")}
-      style={{ backgroundColor: STATUS_COLORS[status] }}
-    />
-  );
-}
-
-function PresenceBadge({ status }: { status: "online" | "away" | "offline" }) {
-  return (
-    <span
-      className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em]"
-      style={{
-        color: status === "online" ? "#B7F7C8" : status === "away" ? "#FFE08A" : "#B0AAA4",
-        backgroundColor:
-          status === "online"
-            ? "rgba(34,197,94,0.14)"
-            : status === "away"
-              ? "rgba(251,186,0,0.14)"
-              : "rgba(255,255,255,0.06)",
-      }}
-    >
-      <OnlineDot status={status} />
-      {STATUS_LABELS[status]}
-    </span>
-  );
+  const queryString = params.toString();
+  return queryString ? `${pathname}?${queryString}` : pathname;
 }
 
 function InviteMemberDialog({
@@ -594,160 +229,6 @@ function InviteMemberDialog({
             </Button>
             <Button type="submit" variant="primary" className="flex-1" loading={loading}>
               Send Invite
-            </Button>
-          </div>
-        </form>
-      </motion.div>
-    </div>
-  );
-}
-
-function NewGroupDialog({
-  currentUserId,
-  users,
-  onClose,
-  onCreated,
-}: {
-  currentUserId: string;
-  users: TeamMember[];
-  onClose: () => void;
-  onCreated: (conversation: ConversationSummary) => void;
-}) {
-  const selectableUsers = users.filter((user) => user.id !== currentUserId);
-  const [name, setName] = useState("");
-  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-
-  function toggleUser(userId: string) {
-    setSelectedUserIds((current) =>
-      current.includes(userId) ? current.filter((id) => id !== userId) : [...current, userId]
-    );
-  }
-
-  async function handleCreate(event: FormEvent) {
-    event.preventDefault();
-    if (!name.trim()) {
-      setError("Group name is required");
-      return;
-    }
-
-    if (selectedUserIds.length === 0) {
-      setError("Choose at least one teammate");
-      return;
-    }
-
-    setLoading(true);
-    setError("");
-
-    try {
-      const response = await fetch("/api/chat/conversations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "group",
-          name: name.trim(),
-          memberUserIds: selectedUserIds,
-        }),
-      });
-      const data = await response.json();
-
-      if (!response.ok) {
-        setError(data.error ?? "Failed to create group");
-        return;
-      }
-
-      onCreated(data.conversation);
-      onClose();
-    } catch {
-      setError("Unable to create the group right now");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
-      <motion.div
-        initial={{ opacity: 0, y: 12, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        onClick={(event) => event.stopPropagation()}
-        className="relative w-full max-w-lg rounded-3xl border border-[rgba(255,255,255,0.08)] bg-[#161616] p-6 shadow-2xl"
-      >
-        <div className="mb-5 flex items-center gap-3">
-          <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[rgba(247,148,29,0.14)] text-[#F7941D]">
-            <UsersRound size={18} />
-          </div>
-          <div>
-            <h2 className="text-lg font-semibold text-[#F6F3EE]">Create named group</h2>
-            <p className="text-sm text-[#8D877F]">Spin up a shared room for a project, topic, or team.</p>
-          </div>
-        </div>
-
-        <form onSubmit={handleCreate} className="space-y-4">
-          <Input
-            label="Channel Name"
-            value={name}
-            onChange={(event) => setName(event.target.value)}
-            placeholder="Product launch"
-            autoFocus
-          />
-
-          <div>
-            <p className="mb-2 text-xs font-semibold uppercase tracking-[0.22em] text-[#8D877F]">
-              Add teammates
-            </p>
-            <div className="max-h-72 space-y-2 overflow-y-auto rounded-2xl border border-[rgba(255,255,255,0.06)] bg-[#111111] p-3">
-              {selectableUsers.map((user) => {
-                const checked = selectedUserIds.includes(user.id);
-                const status = getOnlineStatus(user.lastSeen);
-                const label = getMemberDisplayName(user);
-                return (
-                  <button
-                    key={user.id}
-                    type="button"
-                    onClick={() => toggleUser(user.id)}
-                    className={cn(
-                      "flex w-full items-center gap-3 rounded-2xl border px-3 py-2.5 text-left transition-all",
-                      checked
-                        ? "border-[rgba(247,148,29,0.3)] bg-[rgba(247,148,29,0.08)]"
-                        : "border-transparent bg-[#181818] hover:border-[rgba(255,255,255,0.08)]"
-                    )}
-                  >
-                    <div className="relative">
-                      <Avatar src={user.image} name={label} size="sm" />
-                      <span className="absolute -bottom-0.5 -right-0.5">
-                        <OnlineDot status={status} />
-                      </span>
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-medium text-[#F6F3EE]">{label}</p>
-                      <p className="truncate text-xs text-[#8D877F]">{user.role}</p>
-                    </div>
-                    <span
-                      className={cn(
-                        "flex h-5 w-5 items-center justify-center rounded-full border text-[10px] font-semibold",
-                        checked
-                          ? "border-[rgba(247,148,29,0.4)] bg-[#F7941D] text-[#111111]"
-                          : "border-[rgba(255,255,255,0.12)] text-[#8D877F]"
-                      )}
-                    >
-                      {checked ? "✓" : ""}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {error ? <p className="text-sm text-[#EF4444]">{error}</p> : null}
-          <div className="flex gap-2">
-            <Button type="button" variant="secondary" className="flex-1" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button type="submit" variant="primary" className="flex-1" loading={loading}>
-              Create Group
             </Button>
           </div>
         </form>
@@ -986,54 +467,17 @@ function ContextInspectorDialog({
   );
 }
 
-function SidebarRow({
-  active,
-  icon,
-  title,
-  preview,
-  meta,
-  onClick,
-  trailing,
-}: {
-  active: boolean;
-  icon: React.ReactNode;
-  title: string;
-  preview: string;
-  meta?: string | null;
-  onClick: () => void;
-  trailing?: React.ReactNode;
-}) {
-  return (
-    <div
-      onClick={onClick}
-      className={cn(
-        "flex items-center gap-2.5 rounded-2xl border px-2.5 py-1.5 transition-all cursor-pointer active:scale-[0.99]",
-        active
-          ? "border-[rgba(247,148,29,0.25)] bg-[linear-gradient(135deg,rgba(247,148,29,0.14),rgba(247,148,29,0.02))]"
-          : "border-transparent bg-transparent hover:border-[rgba(255,255,255,0.06)] hover:bg-[rgba(255,255,255,0.03)]"
-      )}
-    >
-      {icon}
-      <div className="min-w-0 flex-1 text-left">
-        <div className="flex items-center justify-between gap-2">
-          <p className="truncate text-sm font-semibold text-[#F6F3EE]">{title}</p>
-          {meta ? <span className="shrink-0 text-[11px] text-[#8D877F]">{meta}</span> : null}
-        </div>
-        <p className="mt-0.5 truncate text-[12px] text-[#8D877F]">{preview}</p>
-      </div>
-      {trailing}
-    </div>
-  );
-}
-
 export function TeamClient({
   currentUserId,
   users,
   invites,
   agents,
+  projects,
   initialConversations,
 }: Props) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [isDesktop, setIsDesktop] = useState(false);
   useEffect(() => {
     const mq = window.matchMedia("(min-width: 768px)");
@@ -1045,7 +489,15 @@ export function TeamClient({
   const [members, setMembers] = useState(users);
   const [pendingInvites, setPendingInvites] = useState(invites);
   const [conversations, setConversations] = useState(initialConversations);
+  const [chatProjects, setChatProjects] = useState(projects);
+  const [chatProjectsLoading, setChatProjectsLoading] = useState(false);
+  const [chatProjectsError, setChatProjectsError] = useState<string | null>(null);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [discoveryQuery, setDiscoveryQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<ConversationSearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [messageInput, setMessageInput] = useState("");
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -1065,24 +517,35 @@ export function TeamClient({
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [copiedInspectorView, setCopiedInspectorView] = useState<"pretty" | "json" | null>(null);
   const [showInvite, setShowInvite] = useState(false);
-  const [showNewGroup, setShowNewGroup] = useState(false);
+  const [showNewThreadModal, setShowNewThreadModal] = useState(false);
+  const [showDiscoveryView, setShowDiscoveryView] = useState(initialConversations.length === 0);
+  const [newThreadInitialProjectId, setNewThreadInitialProjectId] = useState<string | null>(null);
+  const [showAddParticipantsModal, setShowAddParticipantsModal] = useState(false);
+  const [participantActionError, setParticipantActionError] = useState<string | null>(null);
+  const [projectActionError, setProjectActionError] = useState<string | null>(null);
+  const [threadDocumentError, setThreadDocumentError] = useState<string | null>(null);
+  const [threadDocumentUploads, setThreadDocumentUploads] = useState<ThreadDocumentUploadMap>({});
+  const [switchingActiveAgentId, setSwitchingActiveAgentId] = useState<string | null>(null);
+  const [clearingActiveAgentPin, setClearingActiveAgentPin] = useState(false);
+  const [removingParticipantId, setRemovingParticipantId] = useState<string | null>(null);
+  const [removingDocumentId, setRemovingDocumentId] = useState<string | null>(null);
+  const [movingProject, setMovingProject] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
   const userScrolledUpRef = useRef(false);
   const conversationsRef = useRef(conversations);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [showThreadStarter, setShowThreadStarter] = useState(initialConversations.length === 0);
+  const [threadDrawerOpen, setThreadDrawerOpen] = useState(false);
   const hasStreamingAgentMessage = messages.some((message) => message.isStreaming);
-  const searchParams = useSearchParams();
-
-  // Auto-open agent chat from ?agent= query param (e.g. coming from /agents dashboard)
-  useEffect(() => {
-    const agentId = searchParams.get("agent");
-    if (!agentId) return;
-    setSidebarCollapsed(true);
-    void openDirectConversation({ agentId });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  const hasHandledAgentParamRef = useRef(false);
+  const routeView = searchParams.get("view");
+  const routeContext = searchParams.get("context");
+  const routeConversationId = searchParams.get("conversationId");
+  const routeProjectId = searchParams.get("projectId");
+  const routeQuery = searchParams.get("q") ?? "";
+  const routeAgentId = searchParams.get("agent");
 
   conversationsRef.current = conversations;
 
@@ -1101,6 +564,307 @@ export function TeamClient({
 
   const currentUser = members.find((member) => member.id === currentUserId);
   const currentUserName = currentUser ? getMemberDisplayName(currentUser) : "You";
+
+  const syncTeamChatRoute = useCallback((routeState: TeamChatRouteState, history: "push" | "replace" = "push") => {
+    const nextHref = buildTeamChatHref(pathname, routeState);
+    const currentQuery = searchParams.toString();
+    const currentHref = currentQuery ? `${pathname}?${currentQuery}` : pathname;
+
+    if (nextHref === currentHref) {
+      return;
+    }
+
+    if (history === "replace") {
+      router.replace(nextHref, { scroll: false });
+      return;
+    }
+
+    router.push(nextHref, { scroll: false });
+  }, [pathname, router, searchParams]);
+
+  const getThreadOriginState = useCallback((): Exclude<TeamChatRouteState, { kind: "rail" } | { kind: "thread" }> | null => {
+    const trimmedQuery = discoveryQuery.trim();
+
+    if (trimmedQuery) {
+      return {
+        kind: "search",
+        query: trimmedQuery,
+        projectId: selectedProjectId,
+      };
+    }
+
+    if (selectedProjectId) {
+      return {
+        kind: "project",
+        projectId: selectedProjectId,
+      };
+    }
+
+    if (showDiscoveryView) {
+      return { kind: "discovery" };
+    }
+
+    return null;
+  }, [discoveryQuery, selectedProjectId, showDiscoveryView]);
+
+  const getThreadRouteState = useCallback((conversationId: string): Extract<TeamChatRouteState, { kind: "thread" }> => {
+    const origin = getThreadOriginState();
+
+    if (!origin) {
+      return { kind: "thread", conversationId };
+    }
+
+    if (origin.kind === "search") {
+      return {
+        kind: "thread",
+        conversationId,
+        context: "search",
+        projectId: origin.projectId,
+        query: origin.query,
+      };
+    }
+
+    if (origin.kind === "project") {
+      return {
+        kind: "thread",
+        conversationId,
+        context: "project",
+        projectId: origin.projectId,
+      };
+    }
+
+    return {
+      kind: "thread",
+      conversationId,
+      context: "discover",
+    };
+  }, [getThreadOriginState]);
+
+  const getFallbackRouteState = useCallback((): TeamChatRouteState => {
+    return getThreadOriginState() ?? { kind: "rail" };
+  }, [getThreadOriginState]);
+
+  function openSearchDiscovery() {
+    setSelectedConversationId(null);
+    setSelectedProjectId(null);
+    setDiscoveryQuery("");
+    setShowDiscoveryView(true);
+    syncTeamChatRoute({ kind: "discovery" });
+  }
+
+  function openProjectSummary(projectId: string) {
+    setSelectedConversationId(null);
+    setSelectedProjectId(projectId);
+    setDiscoveryQuery("");
+    setShowDiscoveryView(true);
+    syncTeamChatRoute({ kind: "project", projectId });
+  }
+
+  function openConversationFromRail(conversationId: string) {
+    const nextRouteState = getThreadRouteState(conversationId);
+    setSelectedConversationId(conversationId);
+    if (!nextRouteState.context) {
+      setSelectedProjectId(null);
+      setDiscoveryQuery("");
+      setShowDiscoveryView(false);
+    }
+    syncTeamChatRoute(nextRouteState);
+  }
+
+  function openConversationFromDiscovery(conversationId: string) {
+    setSelectedConversationId(conversationId);
+    syncTeamChatRoute(getThreadRouteState(conversationId));
+  }
+
+  function handleDiscoveryQueryChange(value: string) {
+    const trimmedValue = value.trim();
+    const nextRouteState = trimmedValue
+      ? {
+          kind: "search" as const,
+          query: value,
+          projectId: selectedProjectId,
+        }
+      : selectedProjectId
+        ? {
+            kind: "project" as const,
+            projectId: selectedProjectId,
+          }
+        : {
+            kind: "discovery" as const,
+          };
+
+    setSelectedConversationId(null);
+    setDiscoveryQuery(value);
+    setShowDiscoveryView(true);
+    syncTeamChatRoute(nextRouteState, searchParams.get("view") === "search" ? "replace" : "push");
+  }
+
+  function openNewThreadComposer(projectId?: string | null) {
+    setShowThreadStarter(false);
+    setNewThreadInitialProjectId(projectId ?? null);
+    setShowNewThreadModal(true);
+  }
+
+  function closeNewThreadModal() {
+    setShowNewThreadModal(false);
+    setNewThreadInitialProjectId(null);
+  }
+
+  function closeDiscoveryPane() {
+    setSelectedProjectId(null);
+    setDiscoveryQuery("");
+    setShowDiscoveryView(false);
+    syncTeamChatRoute({ kind: "rail" }, "replace");
+  }
+
+  function closeActiveConversation() {
+    setSelectedConversationId(null);
+    syncTeamChatRoute(getFallbackRouteState(), "replace");
+  }
+
+  async function loadChatProjects(options?: { silent?: boolean }) {
+    const silent = options?.silent === true;
+
+    if (!silent) {
+      setChatProjectsLoading(true);
+    }
+    setChatProjectsError(null);
+
+    try {
+      const response = await fetch("/api/chat/projects");
+      const data = await response.json();
+
+      if (!response.ok || !Array.isArray(data.projects)) {
+        throw new Error(data.error ?? "Unable to load chat projects right now.");
+      }
+
+      setChatProjects((current) => mergeChatProjects(current, data.projects as ChatProjectOption[]));
+    } catch (error) {
+      if (!silent) {
+        setChatProjectsError(error instanceof Error ? error.message : "Unable to load chat projects right now.");
+      }
+    } finally {
+      if (!silent) {
+        setChatProjectsLoading(false);
+      }
+    }
+  }
+
+  async function createChatProject(name: string) {
+    const projectName = name.trim();
+    if (!projectName) {
+      throw new Error("Project name is required.");
+    }
+
+    const response = await fetch("/api/chat/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: projectName }),
+    });
+    const data = await response.json();
+
+    if (!response.ok || !data.project || typeof data.project.id !== "string") {
+      throw new Error(data.error ?? "Unable to create that chat project right now.");
+    }
+
+    const project = data.project as ChatProjectOption;
+    setChatProjects((current) => mergeChatProjects(current, [project]));
+    return project;
+  }
+
+  async function renameChatProject(projectId: string, name: string) {
+    const projectName = name.trim();
+    if (!projectName) {
+      throw new Error("Project name is required.");
+    }
+
+    const response = await fetch(`/api/chat/projects/${projectId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: projectName }),
+    });
+    const data = await response.json();
+
+    if (!response.ok || !data.project || typeof data.project.id !== "string") {
+      throw new Error(data.error ?? "Unable to rename that chat project right now.");
+    }
+
+    const project = data.project as ChatProjectOption;
+    setChatProjects((current) => mergeChatProjects(current.filter((entry) => entry.id !== project.id), [project]));
+    setConversations((current) =>
+      current.map((conversation) =>
+        conversation.project?.id === project.id
+          ? {
+              ...conversation,
+              project,
+            }
+          : conversation
+      )
+    );
+
+    return project;
+  }
+
+  async function deleteChatProject(projectId: string) {
+    const response = await fetch(`/api/chat/projects/${projectId}`, {
+      method: "DELETE",
+    });
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error ?? "Unable to delete that chat project right now.");
+    }
+
+    setChatProjects((current) => current.filter((project) => project.id !== projectId));
+    if (selectedProjectId === projectId) {
+      const nextProjectId = "general";
+      setSelectedProjectId(nextProjectId);
+      setShowDiscoveryView(true);
+      syncTeamChatRoute(
+        discoveryQuery.trim()
+          ? {
+              kind: "search",
+              query: discoveryQuery,
+              projectId: nextProjectId,
+            }
+          : {
+              kind: "project",
+              projectId: nextProjectId,
+            },
+        "replace"
+      );
+    }
+    setConversations((current) =>
+      current.map((conversation) =>
+        conversation.project?.id === projectId
+          ? {
+              ...conversation,
+              project: null,
+            }
+          : conversation
+      )
+    );
+
+    return data as { deletedProjectId: string; movedThreadCount: number };
+  }
+
+  async function ensureChatProjectForSelection(selection: NewThreadSelection) {
+    const selectedProjectId = chatProjects.some((project) => project.id === selection.projectId)
+      ? selection.projectId
+      : null;
+
+    if (selectedProjectId) {
+      return selectedProjectId;
+    }
+
+    const projectName = selection.projectName.trim();
+    if (!projectName) {
+      return null;
+    }
+
+    const project = await createChatProject(projectName);
+    return project.id;
+  }
 
   useEffect(() => {
     function pingPresence() {
@@ -1135,12 +899,6 @@ export function TeamClient({
         const data = await response.json();
         if (data.conversations) {
           setConversations(data.conversations);
-          setSelectedConversationId((current) => {
-            if (current && data.conversations.some((conversation: ConversationSummary) => conversation.id === current)) {
-              return current;
-            }
-            return null;
-          });
         }
       } catch {
       }
@@ -1150,9 +908,47 @@ export function TeamClient({
     return () => clearInterval(interval);
   }, [isDesktop]);
 
+  useEffect(() => {
+    void loadChatProjects({ silent: projects.length > 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const conversationProjects = conversations
+      .map((conversation) => conversation.project)
+      .filter((project): project is ChatProjectOption => project !== null);
+
+    if (conversationProjects.length === 0) {
+      return;
+    }
+
+    setChatProjects((current) => {
+      return mergeChatProjects(current, conversationProjects);
+    });
+  }, [conversations]);
+
+  useEffect(() => {
+    if (!showNewThreadModal) return;
+    void loadChatProjects();
+  }, [showNewThreadModal]);
+
+  useEffect(() => {
+    if (!threadDrawerOpen) return;
+    void loadChatProjects({ silent: chatProjects.length > 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadDrawerOpen]);
+
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId]
+  );
+  const activeConversationDirectPartner = useMemo(
+    () => (activeConversation?.type === "direct" ? getDirectConversationPartner(activeConversation, currentUserId) : null),
+    [activeConversation, currentUserId]
+  );
+  const activeConversationPrimaryAgent = useMemo(
+    () => getPrimaryAgentParticipant(activeConversation),
+    [activeConversation]
   );
   const renderedMessages = useMemo(() => dedupeChatMessages(messages), [messages]);
 
@@ -1212,12 +1008,25 @@ export function TeamClient({
   }, [messages]);
 
   useEffect(() => {
+    if (selectedConversationId) {
+      setShowThreadStarter(false);
+    }
+  }, [selectedConversationId]);
+
+  useEffect(() => {
     isAtBottomRef.current = true;
     userScrolledUpRef.current = false;
     bottomRef.current?.scrollIntoView({ behavior: "instant" });
     setEditingMessageId(null);
     setEditingDraft("");
     setShowContextInspector(false);
+    setShowAddParticipantsModal(false);
+    setParticipantActionError(null);
+    setProjectActionError(null);
+    setThreadDocumentError(null);
+    setClearingActiveAgentPin(false);
+    setRemovingDocumentId(null);
+    setMovingProject(false);
   }, [selectedConversationId]);
 
   useEffect(() => {
@@ -1230,7 +1039,7 @@ export function TeamClient({
       }
 
       const convo = conversationsRef.current.find((conversation) => conversation.id === selectedConversationId);
-      const isAgentConversation = convo?.type === "direct" && convo.members.some((member) => member.kind === "agent");
+      const isAgentConversation = convo?.members.some((member) => member.kind === "agent");
 
       if (!isAgentConversation) {
         setAgentInspector(null);
@@ -1261,7 +1070,7 @@ export function TeamClient({
               ...conversation,
               llmThread: data.threadLlm,
               members: conversation.members.map((member) =>
-                member.kind === "agent"
+                member.kind === "agent" && member.id === data.agent.id
                   ? {
                       ...member,
                       llmStatus: data.agent.llmStatus,
@@ -1285,7 +1094,30 @@ export function TeamClient({
     }
 
     void inspectActiveAgentConversation();
-  }, [selectedConversationId]);
+  }, [selectedConversationId, activeConversationPrimaryAgent?.id]);
+
+  const threadSections = useMemo(
+    () => getConversationProjectSections(conversations, chatProjects),
+    [chatProjects, conversations]
+  );
+
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    if (threadSections.some((section) => section.id === selectedProjectId)) return;
+    setSelectedProjectId(null);
+    syncTeamChatRoute(
+      selectedConversationId ? { kind: "thread", conversationId: selectedConversationId } : getFallbackRouteState(),
+      "replace"
+    );
+  }, [getFallbackRouteState, selectedConversationId, selectedProjectId, syncTeamChatRoute, threadSections]);
+
+  useEffect(() => {
+    if (!selectedConversationId) return;
+    if (conversations.some((conversation) => conversation.id === selectedConversationId)) return;
+
+    setSelectedConversationId(null);
+    syncTeamChatRoute(getFallbackRouteState(), "replace");
+  }, [conversations, getFallbackRouteState, selectedConversationId, syncTeamChatRoute]);
 
   const groupConversations = useMemo(
     () =>
@@ -1300,7 +1132,7 @@ export function TeamClient({
     for (const conversation of conversations) {
       if (conversation.type !== "direct") continue;
       const partner = getDirectConversationPartner(conversation, currentUserId);
-      if (partner?.kind === "user") {
+      if (partner?.kind === "user" && !map.has(partner.id)) {
         map.set(partner.id, conversation);
       }
     }
@@ -1312,7 +1144,7 @@ export function TeamClient({
     for (const conversation of conversations) {
       if (conversation.type !== "direct") continue;
       const partner = getDirectConversationPartner(conversation, currentUserId);
-      if (partner?.kind === "agent") {
+      if (partner?.kind === "agent" && !map.has(partner.id)) {
         map.set(partner.id, conversation);
       }
     }
@@ -1321,21 +1153,227 @@ export function TeamClient({
 
   const onlineCount = members.filter((member) => member.id === currentUserId || getOnlineStatus(member.lastSeen) === "online").length;
 
-  async function openDirectConversation(target: { userId?: string; agentId?: string }) {
-    const targetId = target.userId ?? target.agentId ?? "";
+  function upsertConversation(nextConversation: ConversationSummary) {
+    const nextProject = nextConversation.project;
+    if (nextProject) {
+      setChatProjects((current) => mergeChatProjects(current, [nextProject]));
+    }
 
-    const existingConversation = target.userId
-      ? directConversationByUserId.get(target.userId)
-      : target.agentId
-        ? directConversationByAgentId.get(target.agentId)
-        : undefined;
+    setConversations((current) =>
+      [nextConversation, ...current.filter((conversation) => conversation.id !== nextConversation.id)].sort(
+        (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+      )
+    );
+  }
+
+  async function patchConversationById(
+    conversationId: string,
+    body: Record<string, unknown>,
+    fallbackError: string
+  ) {
+    const response = await fetch(`/api/chat/conversations/${conversationId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json();
+
+    if (!response.ok || !data.conversation) {
+      throw new Error(data.error ?? fallbackError);
+    }
+
+    upsertConversation(data.conversation);
+    if (selectedConversationId === conversationId) {
+      setSelectedConversationId(data.conversation.id);
+    }
+    if (data.conversation.members.some((member: ConversationMemberSummary) => member.kind === "agent")) {
+      setBootstrappingConversationId(data.conversation.id);
+    } else {
+      setBootstrappingConversationId((current) => (current === data.conversation.id ? null : current));
+    }
+
+    return data.conversation as ConversationSummary;
+  }
+
+  async function patchConversationThread(
+    body: Record<string, unknown>,
+    fallbackError: string
+  ) {
+    if (!selectedConversationId) {
+      throw new Error("Choose a thread first.");
+    }
+
+    return patchConversationById(selectedConversationId, body, fallbackError);
+  }
+
+  function updateThreadDocumentUploads(
+    conversationId: string,
+    updater: (current: ThreadDocumentUploadState[]) => ThreadDocumentUploadState[]
+  ) {
+    setThreadDocumentUploads((current) => {
+      const nextUploads = updater(current[conversationId] ?? []);
+      if (nextUploads.length === 0) {
+        if (!(conversationId in current)) {
+          return current;
+        }
+
+        const rest = { ...current };
+        delete rest[conversationId];
+        return rest;
+      }
+
+      return {
+        ...current,
+        [conversationId]: nextUploads,
+      };
+    });
+  }
+
+  function dismissThreadUpload(uploadId: string) {
+    if (!selectedConversationId) {
+      return;
+    }
+
+    updateThreadDocumentUploads(
+      selectedConversationId,
+      (current) => current.filter((upload) => upload.id !== uploadId)
+    );
+  }
+
+  async function uploadThreadDocuments(files: File[]) {
+    if (!selectedConversationId || files.length === 0) {
+      return;
+    }
+
+    const conversationId = selectedConversationId;
+    setThreadDocumentError(null);
+
+    for (const file of files) {
+      const uploadId = `upload-${conversationId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      const validationError = validateConversationDocument(file);
+      if (validationError) {
+        updateThreadDocumentUploads(conversationId, (current) => [
+          {
+            id: uploadId,
+            conversationId,
+            filename: file.name,
+            fileSize: file.size,
+            status: "failed",
+            error: validationError,
+          },
+          ...current,
+        ]);
+        continue;
+      }
+
+      updateThreadDocumentUploads(conversationId, (current) => [
+        {
+          id: uploadId,
+          conversationId,
+          filename: file.name,
+          fileSize: file.size,
+          status: "uploading",
+          error: null,
+        },
+        ...current,
+      ]);
+
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const response = await fetch(`/api/chat/conversations/${conversationId}/documents`, {
+          method: "POST",
+          body: formData,
+        });
+        const data = await response.json();
+
+        if (!response.ok || !data.conversation) {
+          throw new Error(data.error ?? `Unable to upload ${file.name} right now.`);
+        }
+
+        upsertConversation(data.conversation as ConversationSummary);
+        updateThreadDocumentUploads(
+          conversationId,
+          (current) => current.filter((upload) => upload.id !== uploadId)
+        );
+      } catch (error) {
+        updateThreadDocumentUploads(conversationId, (current) =>
+          current.map((upload) =>
+            upload.id === uploadId
+              ? {
+                  ...upload,
+                  status: "failed",
+                  error: error instanceof Error ? error.message : `Unable to upload ${file.name} right now.`,
+                }
+              : upload
+          )
+        );
+      }
+    }
+  }
+
+  async function removeThreadDocument(document: ConversationDocumentSummary) {
+    if (!selectedConversationId) {
+      return;
+    }
+
+    if (typeof window !== "undefined" && !window.confirm(`Remove ${document.filename} from this thread?`)) {
+      return;
+    }
+
+    setThreadDocumentError(null);
+    setRemovingDocumentId(document.id);
+
+    try {
+      const response = await fetch(
+        `/api/chat/conversations/${selectedConversationId}/documents/${document.id}`,
+        { method: "DELETE" }
+      );
+      const data = await response.json();
+
+      if (!response.ok || !data.conversation) {
+        if (response.status === 404) {
+          await refreshConversationData();
+          throw new Error("That document is no longer attached to this thread.");
+        }
+
+        throw new Error(data.error ?? "Unable to remove that document right now.");
+      }
+
+      upsertConversation(data.conversation as ConversationSummary);
+    } catch (error) {
+      setThreadDocumentError(
+        error instanceof Error ? error.message : "Unable to remove that document right now."
+      );
+    } finally {
+      setRemovingDocumentId(null);
+    }
+  }
+
+  async function openDirectConversation(
+    target: { userId?: string; agentId?: string },
+    options?: { forceNew?: boolean; projectId?: string | null; history?: "push" | "replace" }
+  ): Promise<ConversationSummary | null> {
+    const targetId = target.userId ?? target.agentId ?? "";
+    const shouldForceNew = options?.forceNew === true;
+
+    const existingConversation = shouldForceNew
+      ? undefined
+      : target.userId
+        ? directConversationByUserId.get(target.userId)
+        : target.agentId
+          ? directConversationByAgentId.get(target.agentId)
+          : undefined;
 
     if (existingConversation) {
       if (target.agentId) {
         setBootstrappingConversationId(existingConversation.id);
       }
       setSelectedConversationId(existingConversation.id);
-      return;
+      syncTeamChatRoute({ kind: "thread", conversationId: existingConversation.id }, options?.history ?? "push");
+      return existingConversation;
     }
 
     setOpeningDirectId(targetId);
@@ -1345,6 +1383,8 @@ export function TeamClient({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           type: "direct",
+          ...(shouldForceNew ? { forceNew: true } : {}),
+          ...(shouldForceNew && options?.projectId ? { projectId: options.projectId } : {}),
           ...(target.userId ? { userId: target.userId } : {}),
           ...(target.agentId ? { agentId: target.agentId } : {}),
         }),
@@ -1354,16 +1394,440 @@ export function TeamClient({
         if (target.agentId) {
           setBootstrappingConversationId(data.conversation.id);
         }
-        setConversations((current) => {
-          const others = current.filter((conversation) => conversation.id !== data.conversation.id);
-          return [data.conversation, ...others].sort(
-            (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
-          );
-        });
+        upsertConversation(data.conversation);
         setSelectedConversationId(data.conversation.id);
+        syncTeamChatRoute({ kind: "thread", conversationId: data.conversation.id }, options?.history ?? "push");
+        return data.conversation as ConversationSummary;
       }
     } finally {
       setOpeningDirectId(null);
+    }
+
+    return null;
+  }
+
+  useEffect(() => {
+    if (!routeAgentId) {
+      hasHandledAgentParamRef.current = false;
+      return;
+    }
+
+    if (hasHandledAgentParamRef.current) {
+      return;
+    }
+
+    hasHandledAgentParamRef.current = true;
+    setSidebarCollapsed(true);
+    void openDirectConversation({ agentId: routeAgentId }, { history: "replace" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeAgentId]);
+
+  useEffect(() => {
+    if (routeAgentId) {
+      return;
+    }
+
+    if (routeView === "thread" && routeConversationId) {
+      setSelectedConversationId(routeConversationId);
+      if (routeContext === "search") {
+        const trimmedRouteQuery = routeQuery.trim();
+        if (trimmedRouteQuery) {
+          setSelectedProjectId(routeProjectId || null);
+          setDiscoveryQuery(routeQuery);
+          setShowDiscoveryView(true);
+          return;
+        }
+      }
+
+      if (routeContext === "project" && routeProjectId) {
+        setSelectedProjectId(routeProjectId);
+        setDiscoveryQuery("");
+        setShowDiscoveryView(true);
+        return;
+      }
+
+      if (routeContext === "discover") {
+        setSelectedProjectId(null);
+        setDiscoveryQuery("");
+        setShowDiscoveryView(true);
+        return;
+      }
+
+      setSelectedProjectId(null);
+      setDiscoveryQuery("");
+      setShowDiscoveryView(false);
+      return;
+    }
+
+    if (routeView === "project" && routeProjectId) {
+      setSelectedConversationId(null);
+      setSelectedProjectId(routeProjectId);
+      setDiscoveryQuery("");
+      setShowDiscoveryView(true);
+      return;
+    }
+
+    if (routeView === "search") {
+      const trimmedRouteQuery = routeQuery.trim();
+
+      if (!trimmedRouteQuery) {
+        setSelectedConversationId(null);
+        setSelectedProjectId(routeProjectId || null);
+        setDiscoveryQuery("");
+        setShowDiscoveryView(true);
+        syncTeamChatRoute(
+          routeProjectId
+            ? { kind: "project", projectId: routeProjectId }
+            : { kind: "discovery" },
+          "replace"
+        );
+        return;
+      }
+
+      setSelectedConversationId(null);
+      setSelectedProjectId(routeProjectId || null);
+      setDiscoveryQuery(routeQuery);
+      setShowDiscoveryView(true);
+      return;
+    }
+
+    if (routeView === "discover") {
+      setSelectedConversationId(null);
+      setSelectedProjectId(null);
+      setDiscoveryQuery("");
+      setShowDiscoveryView(true);
+      return;
+    }
+
+    setSelectedConversationId(null);
+    setSelectedProjectId(null);
+    setDiscoveryQuery("");
+    setShowDiscoveryView(initialConversations.length === 0);
+  }, [
+    initialConversations.length,
+    routeAgentId,
+    routeContext,
+    routeConversationId,
+    routeProjectId,
+    routeQuery,
+    syncTeamChatRoute,
+    routeView,
+  ]);
+
+  useEffect(() => {
+    const trimmedQuery = discoveryQuery.trim();
+
+    if (!trimmedQuery) {
+      setSearchResults([]);
+      setSearchLoading(false);
+      setSearchError(null);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(async () => {
+      setSearchLoading(true);
+      setSearchError(null);
+
+      try {
+        const response = await fetch(`/api/chat/conversations/search?q=${encodeURIComponent(trimmedQuery)}`, {
+          signal: controller.signal,
+        });
+        const data = await response.json();
+
+        if (!response.ok || !Array.isArray(data.results)) {
+          throw new Error(data.error ?? "Unable to search Team Chat right now.");
+        }
+
+        setSearchResults(data.results as ConversationSearchResult[]);
+      } catch (error) {
+        if (controller.signal.aborted) {
+          return;
+        }
+
+        setSearchResults([]);
+        setSearchError(
+          error instanceof Error ? error.message : "Unable to search Team Chat right now."
+        );
+      } finally {
+        if (!controller.signal.aborted) {
+          setSearchLoading(false);
+        }
+      }
+    }, 180);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeoutId);
+    };
+  }, [discoveryQuery]);
+
+  async function createFreshThread(selection: NewThreadSelection) {
+    const userIds = Array.from(
+      new Set(
+        selection.userIds.filter((id) => typeof id === "string" && id.trim().length > 0 && id !== currentUserId)
+      )
+    );
+    const agentIds = Array.from(
+      new Set(selection.agentIds.filter((id) => typeof id === "string" && id.trim().length > 0))
+    );
+    const projectId = await ensureChatProjectForSelection(selection);
+    const totalSelected = userIds.length + agentIds.length;
+
+    if (totalSelected === 0) {
+      throw new Error("Choose at least one teammate or agent.");
+    }
+
+    setThreadDrawerOpen(false);
+
+    if (totalSelected === 1) {
+      const conversation = await openDirectConversation(
+        userIds.length === 1 ? { userId: userIds[0] } : { agentId: agentIds[0] },
+        { forceNew: true, projectId }
+      );
+
+      if (!conversation) {
+        throw new Error("Unable to create a fresh thread right now.");
+      }
+
+      return;
+    }
+
+    const response = await fetch("/api/chat/conversations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "group",
+        ...(selection.name.trim() ? { name: selection.name.trim() } : {}),
+        ...(projectId ? { projectId } : {}),
+        memberUserIds: userIds,
+        memberAgentIds: agentIds,
+      }),
+    });
+    const data = await response.json();
+
+    if (!response.ok || !data.conversation) {
+      throw new Error(data.error ?? "Unable to create the thread right now.");
+    }
+
+    upsertConversation(data.conversation);
+    setSelectedConversationId(data.conversation.id);
+    syncTeamChatRoute({ kind: "thread", conversationId: data.conversation.id });
+  }
+
+  async function addParticipantsToThread(selection: NewThreadSelection) {
+    if (!selectedConversationId || !activeConversation) {
+      throw new Error("Choose a thread before adding participants.");
+    }
+
+    const existingUserIds = new Set(
+      activeConversation.members
+        .filter((member): member is typeof activeConversation.members[number] & { kind: "user" } => member.kind === "user")
+        .map((member) => member.id)
+    );
+    const existingAgentIds = new Set(
+      activeConversation.members
+        .filter((member): member is typeof activeConversation.members[number] & { kind: "agent" } => member.kind === "agent")
+        .map((member) => member.id)
+    );
+    const userIds = Array.from(
+      new Set(
+        selection.userIds.filter(
+          (id) => typeof id === "string" && id.trim().length > 0 && id !== currentUserId && !existingUserIds.has(id)
+        )
+      )
+    );
+    const agentIds = Array.from(
+      new Set(selection.agentIds.filter((id) => typeof id === "string" && id.trim().length > 0 && !existingAgentIds.has(id)))
+    );
+
+    if (userIds.length + agentIds.length === 0) {
+      throw new Error("Choose at least one new participant.");
+    }
+
+    await patchConversationThread(
+      {
+        addUserIds: userIds,
+        addAgentIds: agentIds,
+      },
+      "Unable to add participants right now."
+    );
+  }
+
+  async function moveThreadToProject(projectId: string | null) {
+    if (!selectedConversationId || !activeConversation) {
+      return;
+    }
+
+    const currentProjectId = activeConversation.project?.id ?? null;
+    if (currentProjectId === projectId) {
+      return;
+    }
+
+    setProjectActionError(null);
+    setMovingProject(true);
+
+    try {
+      await patchConversationById(
+        selectedConversationId,
+        { projectId },
+        projectId
+          ? "Unable to move this thread to that project right now."
+          : "Unable to move this thread back to General right now."
+      );
+    } catch (error) {
+      setProjectActionError(
+        error instanceof Error
+          ? error.message
+          : projectId
+            ? "Unable to move this thread to that project right now."
+            : "Unable to move this thread back to General right now."
+      );
+    } finally {
+      setMovingProject(false);
+    }
+  }
+
+  async function moveConversationToProjectById(conversationId: string, projectId: string | null) {
+    const conversation = conversationsRef.current.find((entry) => entry.id === conversationId);
+    if (!conversation) {
+      throw new Error("Thread not found.");
+    }
+
+    const currentProjectId = conversation.project?.id ?? null;
+    if (currentProjectId === projectId) {
+      return conversation;
+    }
+
+    return patchConversationById(
+      conversationId,
+      { projectId },
+      projectId
+        ? "Unable to move this thread to that project right now."
+        : "Unable to move this thread back to General right now."
+    );
+  }
+
+  async function renameThread(name: string | null) {
+    if (!selectedConversationId || !activeConversation) {
+      return;
+    }
+
+    await patchConversationById(
+      selectedConversationId,
+      { name },
+      name
+        ? "Unable to rename this thread right now."
+        : "Unable to return this thread to its automatic title right now."
+    );
+  }
+
+  async function renameConversationById(conversationId: string, name: string | null) {
+    const conversation = conversationsRef.current.find((entry) => entry.id === conversationId);
+    if (!conversation) {
+      throw new Error("Thread not found.");
+    }
+
+    const nextName = name?.trim() || null;
+    const currentName = conversation.name?.trim() || null;
+    if (currentName === nextName) {
+      return conversation;
+    }
+
+    return patchConversationById(
+      conversationId,
+      { name: nextName },
+      nextName
+        ? "Unable to rename this thread right now."
+        : "Unable to return this thread to its automatic title right now."
+    );
+  }
+
+  async function setActiveAgentForThread(agentId: string) {
+    if (!selectedConversationId || !activeConversation) {
+      return;
+    }
+
+    if (activeConversationPrimaryAgent?.id === agentId && activeConversation.llmThread?.activeAgentId === agentId) {
+      return;
+    }
+
+    setParticipantActionError(null);
+    setSwitchingActiveAgentId(agentId);
+
+    try {
+      await patchConversationThread(
+        { activeAgentId: agentId },
+        "Unable to switch the active agent right now."
+      );
+    } catch (error) {
+      setParticipantActionError(
+        error instanceof Error ? error.message : "Unable to switch the active agent right now."
+      );
+    } finally {
+      setSwitchingActiveAgentId(null);
+    }
+  }
+
+  async function clearActiveAgentPinForThread() {
+    if (!selectedConversationId || !activeConversation?.llmThread?.activeAgentId) {
+      return;
+    }
+
+    setParticipantActionError(null);
+    setClearingActiveAgentPin(true);
+
+    try {
+      await patchConversationThread(
+        { activeAgentId: null },
+        "Unable to return this thread to fallback agent routing right now."
+      );
+    } catch (error) {
+      setParticipantActionError(
+        error instanceof Error ? error.message : "Unable to return this thread to fallback agent routing right now."
+      );
+    } finally {
+      setClearingActiveAgentPin(false);
+    }
+  }
+
+  async function removeParticipantFromThread(participant: ConversationMemberSummary) {
+    if (!selectedConversationId || !activeConversation) {
+      return;
+    }
+
+    if (participant.kind === "user" && participant.id === currentUserId) {
+      setParticipantActionError("You cannot remove yourself from a thread yet.");
+      return;
+    }
+
+    const participantLabel = participant.name || "this participant";
+    const removingActiveAgent =
+      participant.kind === "agent" && participant.id === activeConversationPrimaryAgent?.id;
+    const confirmMessage = removingActiveAgent
+      ? `Remove ${participantLabel} from this thread? Another remaining agent will take over automatically, or the thread will become human-only if none remain.`
+      : `Remove ${participantLabel} from this thread?`;
+
+    if (typeof window !== "undefined" && !window.confirm(confirmMessage)) {
+      return;
+    }
+
+    setParticipantActionError(null);
+    setRemovingParticipantId(`${participant.kind}-${participant.id}`);
+
+    try {
+      await patchConversationThread(
+        participant.kind === "user"
+          ? { removeUserIds: [participant.id] }
+          : { removeAgentIds: [participant.id] },
+        "Unable to remove that participant right now."
+      );
+    } catch (error) {
+      setParticipantActionError(
+        error instanceof Error ? error.message : "Unable to remove that participant right now."
+      );
+    } finally {
+      setRemovingParticipantId(null);
     }
   }
 
@@ -1372,7 +1836,7 @@ export function TeamClient({
     if (activeAgentSendBlocked) return;
 
     const text = messageInput.trim();
-    const isAgentConversation = activePartner?.kind === "agent";
+    const isAgentConversation = Boolean(activeConversationPrimaryAgent);
     const optimisticMessage: ChatMessage = {
       id: `temp-${Date.now()}`,
       body: text,
@@ -1395,9 +1859,9 @@ export function TeamClient({
         createdAt: new Date().toISOString(),
         sender: {
           kind: "agent",
-          id: activePartner.id,
-          name: activePartner.name,
-          image: activePartner.image ?? null,
+          id: activeConversationPrimaryAgent?.id ?? "agent",
+          name: activeConversationPrimaryAgent?.name ?? "Agent",
+          image: activeConversationPrimaryAgent?.image ?? null,
         },
       }
       : null;
@@ -1703,7 +2167,12 @@ export function TeamClient({
   }
 
   async function clearAgentConversation() {
-    if (!selectedConversationId || !activePartner || activePartner.kind !== "agent" || clearingConversation) {
+    if (
+      !selectedConversationId
+      || !activeConversationPrimaryAgent
+      || activeConversation?.type !== "direct"
+      || clearingConversation
+    ) {
       return;
     }
 
@@ -1742,57 +2211,117 @@ export function TeamClient({
     }
   }
 
-  const inspectorPrettyText = agentInspector
-    ? [
-        `Agent: ${agentInspector.agent.name} (${agentInspector.agent.role})`,
-        `Status: ${agentInspector.readiness.label}`,
-        `Model: ${agentInspector.threadLlm.selectedLabel ?? agentInspector.agent.llmModel ?? "Unknown"}`,
-        `Selected for this thread: ${agentInspector.threadLlm.selectedBy ?? "unknown"}`,
-        agentInspector.threadLlm.reasonSummary ? `Routing reason: ${agentInspector.threadLlm.reasonSummary}` : null,
-        agentInspector.threadLlm.escalationSummary ? `Escalation: ${agentInspector.threadLlm.escalationSummary}` : null,
-        `Thinking mode: ${formatThinkingMode(agentInspector.agent.llmThinkingMode)}`,
-        `Context: ${formatTokensK(agentInspector.context.estimatedTokens)} / 128K (${formatContextMeter(agentInspector.context.estimatedTokens)})`,
-        `History: ${agentInspector.context.recentHistoryCount}/${agentInspector.context.historyWindowSize} turns loaded`,
-        "",
-        "Knowledge sources:",
-        ...agentInspector.context.knowledgeSources.map((source) => `- ${source.label}: ${source.description}`),
-        "",
-        "Org context:",
-        agentInspector.payload.orgContext,
-        "",
-        "System prompt:",
-        agentInspector.payload.systemPrompt,
-      ].filter(Boolean).join("\n")
-    : "";
-
   const activeConversationAvatar = activeConversation
     ? getConversationAvatar(activeConversation, currentUserId)
     : null;
-  const activePartner =
-    activeConversation?.type === "direct"
-      ? getDirectConversationPartner(activeConversation, currentUserId)
+  const activePartner = activeConversationDirectPartner;
+  const activeAgentParticipant = activeConversationPrimaryAgent;
+  const activeAgentInspector =
+    activeAgentParticipant && agentInspector?.agent.id === activeAgentParticipant.id
+      ? agentInspector
       : null;
+  const activeAgentInspectorError =
+    activeAgentParticipant ? agentInspectorError : null;
   const activeAgentBootstrapPending =
-    activePartner?.kind === "agent"
+    Boolean(activeAgentParticipant)
       && (agentInspectorLoading || bootstrappingConversationId === selectedConversationId);
-  const activeThreadModelLabel = agentInspector?.threadLlm.selectedLabel
+  const activeThreadModelLabel = activeAgentInspector?.threadLlm.selectedLabel
     ?? activeConversation?.llmThread?.selectedLabel
-    ?? agentInspector?.threadLlm.selectedModel
+    ?? activeAgentInspector?.threadLlm.selectedModel
     ?? activeConversation?.llmThread?.selectedModel
-    ?? agentInspector?.agent.llmModel
+    ?? activeAgentInspector?.agent.llmModel
     ?? null;
   const activeAgentReady =
-    activePartner?.kind === "agent"
-      ? Boolean(agentInspector?.readiness.canSend)
+    activeAgentParticipant
+      ? activeAgentInspector
+        ? Boolean(activeAgentInspector.readiness.canSend)
+        : activeAgentParticipant.llmStatus === "online"
       : true;
   const activeAgentSendBlocked =
-    activePartner?.kind === "agent" && (!activeAgentReady || activeAgentBootstrapPending);
+    Boolean(activeAgentParticipant) && (!activeAgentReady || activeAgentBootstrapPending);
   const activeAgentStatusLabel =
-    activePartner?.kind === "agent"
+    activeAgentParticipant
       ? activeAgentBootstrapPending
         ? "Initializing agent"
-        : agentInspector?.readiness.label || getConversationSubtext(activeConversation!, currentUserId)
+        : activeAgentInspector?.readiness.label || getAgentSidebarStatus(activeAgentParticipant.llmStatus).label
       : null;
+  const clearThreadAvailable = Boolean(activeConversation?.type === "direct" && activeAgentParticipant);
+  const activeConversationMembers = activeConversation?.members ?? [];
+  const activeConversationParticipantSummary = activeConversation
+    ? getConversationParticipantSummary(activeConversation)
+    : null;
+  const activeConversationWorkspaceLabel = activeConversation
+    ? getConversationWorkspaceLabel(activeConversation)
+    : null;
+  const activeConversationTimestamp = activeConversation
+    ? getConversationTimestamp(activeConversation)
+    : null;
+  const activeThreadDocumentUploads = activeConversation
+    ? threadDocumentUploads[activeConversation.id] ?? []
+    : [];
+  const activeThreadOriginLabel = useMemo(() => {
+    if (routeView !== "thread" || !selectedConversationId) {
+      return null;
+    }
+
+    if (routeContext === "search") {
+      return routeQuery.trim() ? "Back to Search" : null;
+    }
+
+    if (routeContext === "discover") {
+      return "Back to Discover";
+    }
+
+    if (routeContext === "project") {
+      if (!routeProjectId) {
+        return null;
+      }
+
+      if (routeProjectId === "general") {
+        return "Back to General";
+      }
+
+      const projectName =
+        chatProjects.find((project) => project.id === routeProjectId)?.name
+        ?? (activeConversation?.project?.id === routeProjectId ? activeConversation.project.name : null);
+
+      return projectName ? `Back to ${projectName}` : "Back to Project";
+    }
+
+    return null;
+  }, [
+    activeConversation?.project,
+    chatProjects,
+    routeContext,
+    routeProjectId,
+    routeQuery,
+    routeView,
+    selectedConversationId,
+  ]);
+  const inspectorPrettyText = activeAgentInspector
+    ? [
+        `Agent: ${activeAgentInspector.agent.name} (${activeAgentInspector.agent.role})`,
+        `Status: ${activeAgentInspector.readiness.label}`,
+        `Model: ${activeAgentInspector.threadLlm.selectedLabel ?? activeAgentInspector.agent.llmModel ?? "Unknown"}`,
+        `Selected for this thread: ${activeAgentInspector.threadLlm.selectedBy ?? "unknown"}`,
+        activeAgentInspector.threadLlm.reasonSummary ? `Routing reason: ${activeAgentInspector.threadLlm.reasonSummary}` : null,
+        activeAgentInspector.threadLlm.escalationSummary ? `Escalation: ${activeAgentInspector.threadLlm.escalationSummary}` : null,
+        `Thinking mode: ${formatThinkingMode(activeAgentInspector.agent.llmThinkingMode)}`,
+        `Context: ${formatTokensK(activeAgentInspector.context.estimatedTokens)} / 128K (${formatContextMeter(activeAgentInspector.context.estimatedTokens)})`,
+        `History: ${activeAgentInspector.context.recentHistoryCount}/${activeAgentInspector.context.historyWindowSize} turns loaded`,
+        "",
+        "Knowledge sources:",
+        ...activeAgentInspector.context.knowledgeSources.map((source) => `- ${source.label}: ${source.description}`),
+        "",
+        "Org context:",
+        activeAgentInspector.payload.orgContext,
+        "",
+        "System prompt:",
+        activeAgentInspector.payload.systemPrompt,
+      ].filter(Boolean).join("\n")
+    : "";
+  const showDiscoveryPane = !activeConversation && (isDesktop || showDiscoveryView || selectedProjectId !== null);
+  const hasMainPaneSelection = Boolean(activeConversation || showDiscoveryView || selectedProjectId !== null);
 
   return (
     <div className="-mx-4 -mt-4 flex flex-col overflow-hidden h-[calc(100dvh-5rem)] md:mx-auto md:mt-0 md:max-w-7xl md:gap-4 md:h-[calc(100dvh-4.75rem)]">
@@ -1813,767 +2342,177 @@ export function TeamClient({
 
       <div className="flex-1 min-h-0 overflow-hidden md:rounded-[28px] border-t md:border border-[rgba(255,255,255,0.06)] bg-[radial-gradient(circle_at_top_left,rgba(247,148,29,0.08),transparent_28%),linear-gradient(180deg,#171717,#111111)] md:shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
         <div className={cn("grid h-full", sidebarCollapsed ? "md:grid-cols-[64px_minmax(0,1fr)]" : "md:grid-cols-[280px_minmax(0,1fr)]")}>
-          <aside className={cn("bg-[#121212] flex flex-col min-h-0 md:border-r md:border-[rgba(255,255,255,0.06)]", activeConversation ? "hidden md:flex" : "flex")}>
-            {/* ── Collapsed icon rail — desktop only ── */}
-            {sidebarCollapsed && (
-              <div className="hidden md:flex md:flex-col md:h-full">
-                <div className="border-b border-[rgba(255,255,255,0.06)] flex items-center justify-center py-4 md:py-[18px]">
-                  <button
-                    onClick={() => setSidebarCollapsed(false)}
-                    className="flex h-9 w-9 items-center justify-center rounded-xl bg-[rgba(255,255,255,0.06)] text-[#9A9A9A] hover:text-[#F0F0F0] hover:bg-[rgba(255,255,255,0.1)] transition-all"
-                    title="Expand sidebar"
-                  >
-                    <PanelLeftOpen size={17} />
-                  </button>
-                </div>
-                <div className="flex-1 overflow-y-auto py-3 min-h-0 flex flex-col items-center gap-2 px-2">
-                  {groupConversations.map((conversation) => (
-                    <button
-                      key={conversation.id}
-                      onClick={() => setSelectedConversationId(conversation.id)}
-                      title={getConversationLabel(conversation, currentUserId)}
-                      className={cn(
-                        "flex h-10 w-10 items-center justify-center rounded-2xl border transition-all",
-                        conversation.id === selectedConversationId
-                          ? "border-[rgba(247,148,29,0.5)] bg-[rgba(247,148,29,0.22)]"
-                          : "border-transparent bg-[rgba(247,148,29,0.1)] hover:bg-[rgba(247,148,29,0.18)]"
-                      )}
-                    >
-                      <Hash size={17} className="text-[#F7941D]" />
-                    </button>
-                  ))}
+            <ThreadRail
+              currentUserId={currentUserId}
+              members={members}
+              agents={agents}
+              pendingInvites={pendingInvites}
+              projects={chatProjects}
+              threadSections={threadSections}
+              groupConversations={groupConversations}
+              directConversationByUserId={directConversationByUserId}
+              directConversationByAgentId={directConversationByAgentId}
+              selectedConversationId={selectedConversationId}
+              selectedProjectId={selectedProjectId}
+              sidebarCollapsed={sidebarCollapsed}
+              onlineCount={onlineCount}
+              showThreadStarter={showThreadStarter}
+              openingDirectId={openingDirectId}
+              hasActiveConversation={hasMainPaneSelection}
+              onOpenInvite={() => setShowInvite(true)}
+              onOpenSearch={openSearchDiscovery}
+              onCollapseSidebar={() => setSidebarCollapsed(true)}
+              onExpandSidebar={() => setSidebarCollapsed(false)}
+              onOpenNewThreadModal={() => openNewThreadComposer(null)}
+              onSelectConversation={openConversationFromRail}
+              onSelectProject={openProjectSummary}
+              onOpenFreshUserThread={(userId) => {
+                setSelectedProjectId(null);
+                setDiscoveryQuery("");
+                setShowDiscoveryView(false);
+                void openDirectConversation({ userId }, { forceNew: true });
+              }}
+              onOpenFreshAgentThread={(agentId) => {
+                setSelectedProjectId(null);
+                setDiscoveryQuery("");
+                setShowDiscoveryView(false);
+                void openDirectConversation({ agentId }, { forceNew: true });
+              }}
+              onCreateProject={(name) => createChatProject(name)}
+              onRenameProject={(projectId, name) => renameChatProject(projectId, name)}
+              onDeleteProject={(projectId) => deleteChatProject(projectId)}
+              onRenameThread={async (conversationId, name) => {
+                await renameConversationById(conversationId, name);
+              }}
+              onMoveThread={async (conversationId, projectId) => {
+                await moveConversationToProjectById(conversationId, projectId);
+              }}
+            />
 
-                  {groupConversations.length > 0 && (
-                    <div className="w-8 h-px bg-[rgba(255,255,255,0.07)]" />
-                  )}
-
-                  {members
-                    .filter((member) => member.id !== currentUserId)
-                    .map((member) => {
-                      const conversation = directConversationByUserId.get(member.id);
-                      const status = getOnlineStatus(member.lastSeen);
-                      const label = getMemberDisplayName(member);
-                      return (
-                        <button
-                          key={member.id}
-                          onClick={() => void openDirectConversation({ userId: member.id })}
-                          title={label}
-                          className={cn(
-                            "relative rounded-full transition-all outline-none",
-                            conversation?.id === selectedConversationId
-                              ? "ring-2 ring-[rgba(247,148,29,0.6)] ring-offset-1 ring-offset-[#121212]"
-                              : "hover:ring-2 hover:ring-[rgba(255,255,255,0.15)] hover:ring-offset-1 hover:ring-offset-[#121212]"
-                          )}
-                        >
-                          <Avatar src={member.image} name={label} size="sm" />
-                          <span className="absolute -bottom-0.5 -right-0.5">
-                            <OnlineDot status={status} />
-                          </span>
-                        </button>
-                      );
-                    })}
-
-                  {members.filter((m) => m.id !== currentUserId).length > 0 && agents.length > 0 && (
-                    <div className="w-8 h-px bg-[rgba(255,255,255,0.07)]" />
-                  )}
-
-                  {agents.map((agent) => {
-                    const conversation = directConversationByAgentId.get(agent.id);
-                    const agentStatus = getAgentSidebarStatus(agent.llmStatus);
-                    return (
-                      <button
-                        key={agent.id}
-                        onClick={() => void openDirectConversation({ agentId: agent.id })}
-                        title={agent.name}
-                        className={cn(
-                          "relative flex h-10 w-10 shrink-0 items-center justify-center rounded-[18px] border transition-all overflow-hidden",
-                          conversation?.id === selectedConversationId
-                            ? "border-[rgba(75,156,211,0.7)] bg-[rgba(75,156,211,0.28)]"
-                            : "border-[rgba(75,156,211,0.28)] bg-[rgba(75,156,211,0.1)] hover:bg-[rgba(75,156,211,0.2)]"
-                        )}
-                      >
-                        {agent.avatar
-                          ? (agent.avatar.startsWith("data:") || agent.avatar.startsWith("https://"))
-                            ? <img src={agent.avatar} alt={agent.name} className="w-full h-full object-cover" />
-                            : <span className="text-sm">{agent.avatar}</span>
-                          : <Bot size={16} className="text-[#7EC8E3]" />}
-                        <span
-                          className="absolute bottom-0.5 right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#121212]"
-                          style={{ backgroundColor: agentStatus.dot }}
-                        />
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* ── Expanded full sidebar — always on mobile, desktop when not collapsed ── */}
-            <div className={cn("flex flex-col h-full", sidebarCollapsed ? "md:hidden" : "")}>
-                <div className="border-b border-[rgba(255,255,255,0.06)] px-4 py-4 md:py-[18px] flex items-center justify-between">
-                  <h2 className="text-xl font-bold text-[#F6F3EE]">Chat</h2>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => setShowNewGroup(true)}
-                      className="flex h-9 w-9 items-center justify-center rounded-xl bg-[rgba(255,255,255,0.06)] text-[#9A9A9A] hover:text-[#F0F0F0] hover:bg-[rgba(255,255,255,0.1)] transition-all"
-                      title="New Group"
-                    >
-                      <UsersRound size={17} />
-                    </button>
-                    <button
-                      onClick={() => setShowInvite(true)}
-                      className="flex h-9 w-9 items-center justify-center rounded-xl bg-[rgba(255,255,255,0.06)] text-[#9A9A9A] hover:text-[#F0F0F0] hover:bg-[rgba(255,255,255,0.1)] transition-all"
-                      title="Invite Member"
-                    >
-                      <UserPlus size={17} />
-                    </button>
-                    <button
-                      onClick={() => setSidebarCollapsed(true)}
-                      className="flex h-9 w-9 items-center justify-center rounded-xl bg-[rgba(255,255,255,0.06)] text-[#9A9A9A] hover:text-[#F0F0F0] hover:bg-[rgba(255,255,255,0.1)] transition-all"
-                      title="Collapse sidebar"
-                    >
-                      <PanelLeftClose size={17} />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex-1 space-y-4 overflow-y-auto px-3 py-3 min-h-0">
-                  <section>
-                    <div className="mb-2 flex items-center justify-between px-2">
-                      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[#8D877F]">Channels</p>
-                      <button
-                        onClick={() => setShowNewGroup(true)}
-                        className="text-xs font-medium text-[#F7941D] transition-colors hover:text-[#FDBA4D]"
-                      >
-                        New Group
-                      </button>
-                    </div>
-                    <div className="space-y-1.5">
-                      {groupConversations.length > 0 ? (
-                        groupConversations.map((conversation) => (
-                          <SidebarRow
-                            key={conversation.id}
-                            active={conversation.id === selectedConversationId}
-                            icon={
-                              <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[rgba(247,148,29,0.14)] text-[#F7941D]">
-                                <Hash size={18} />
-                              </div>
-                            }
-                            title={getConversationLabel(conversation, currentUserId)}
-                            preview={getPreviewText(conversation)}
-                            meta={conversation.latestMessage ? formatPreviewTime(conversation.latestMessage.createdAt) : null}
-                            onClick={() => setSelectedConversationId(conversation.id)}
-                          />
-                        ))
-                      ) : (
-                        <div className="px-2 py-2">
-                          <p className="text-sm text-[#6F6A64]">No group channels yet.</p>
-                        </div>
-                      )}
-                    </div>
-                  </section>
-
-                  <section>
-                    <p className="mb-2 px-2 text-xs font-semibold uppercase tracking-[0.22em] text-[#8D877F]">Humans</p>
-                    <div className="space-y-1.5">
-                      {members
-                        .filter((member) => member.id !== currentUserId)
-                        .map((member) => {
-                          const conversation = directConversationByUserId.get(member.id);
-                          const status = getOnlineStatus(member.lastSeen);
-                          const label = getMemberDisplayName(member);
-                          return (
-                            <SidebarRow
-                              key={member.id}
-                              active={conversation?.id === selectedConversationId}
-                              icon={
-                                <div className="relative">
-                                  <Avatar src={member.image} name={label} size="sm" />
-                                  <span className="absolute -bottom-0.5 -right-0.5">
-                                    <OnlineDot status={status} />
-                                  </span>
-                                </div>
-                              }
-                              title={label}
-                              preview={getPreviewText(conversation)}
-                              meta={conversation?.latestMessage ? formatPreviewTime(conversation.latestMessage.createdAt) : null}
-                              onClick={() => openDirectConversation({ userId: member.id })}
-                              trailing={
-                                openingDirectId === member.id ? (
-                                  <div className="h-4 w-4 rounded-full border-2 border-[rgba(247,148,29,0.25)] border-t-[#F7941D] animate-spin" />
-                                ) : null
-                              }
-                            />
-                          );
-                        })}
-                    </div>
-                  </section>
-
-                  <section>
-                    <p className="mb-2 px-2 text-xs font-semibold uppercase tracking-[0.22em] text-[#8D877F]">AI Agents</p>
-                    <div className="space-y-1.5">
-                      {agents.map((agent) => {
-                        const conversation = directConversationByAgentId.get(agent.id);
-                        const agentStatus = getAgentSidebarStatus(agent.llmStatus);
-                        return (
-                          <div
-                            key={agent.id}
-                            onClick={() => void openDirectConversation({ agentId: agent.id })}
-                            className={cn(
-                              "rounded-2xl border px-2.5 py-2 transition-all cursor-pointer active:scale-[0.99]",
-                              conversation?.id === selectedConversationId
-                                ? "border-[rgba(75,156,211,0.38)] bg-[linear-gradient(135deg,rgba(75,156,211,0.22),rgba(75,156,211,0.06))] shadow-[0_0_0_1px_rgba(75,156,211,0.08)_inset]"
-                                : "border-transparent bg-transparent hover:border-[rgba(75,156,211,0.16)] hover:bg-[rgba(75,156,211,0.06)]"
-                            )}
-                          >
-                            <div className="flex items-center gap-2.5">
-                              <div className="relative">
-                                <div className="flex h-10 w-10 items-center justify-center rounded-[18px] border border-[rgba(75,156,211,0.34)] bg-[linear-gradient(180deg,rgba(75,156,211,0.18),rgba(75,156,211,0.08))] text-[#A9DCF3] shadow-[0_8px_24px_rgba(75,156,211,0.12)] overflow-hidden">
-                                  {agent.avatar
-                                    ? (agent.avatar.startsWith("data:") || agent.avatar.startsWith("https://"))
-                                      ? <img src={agent.avatar} alt={agent.name} className="w-full h-full object-cover" />
-                                      : <span className="text-sm">{agent.avatar}</span>
-                                    : <Bot size={16} />}
-                                </div>
-                                <span
-                                  className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-[#121212]"
-                                  style={{ backgroundColor: agentStatus.dot }}
-                                />
-                              </div>
-
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-start justify-between gap-2">
-                                  <div className="min-w-0">
-                                    <div className="flex items-center gap-2">
-                                      <p className="truncate text-[13px] font-semibold text-[#F6F3EE]">{agent.name}</p>
-                                      <span className="rounded-full border border-[rgba(75,156,211,0.18)] bg-[rgba(75,156,211,0.1)] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.2em] text-[#7EC8E3]">
-                                        AI
-                                      </span>
-                                    </div>
-                                    <p className="mt-0.5 truncate text-[10px] uppercase tracking-[0.18em] text-[#6FAFD2]">
-                                      {agent.role}
-                                    </p>
-                                  </div>
-                                  <div className="flex items-center gap-2">
-                                    {conversation?.latestMessage ? (
-                                      <span className="shrink-0 text-[11px] text-[#8D877F]">
-                                        {formatPreviewTime(conversation.latestMessage.createdAt)}
-                                      </span>
-                                    ) : null}
-                                    {openingDirectId === agent.id ? (
-                                      <div className="h-4 w-4 rounded-full border-2 border-[rgba(75,156,211,0.25)] border-t-[#4B9CD3] animate-spin" />
-                                    ) : null}
-                                  </div>
-                                </div>
-
-                                <div className="mt-1.5">
-                                  <p className="min-w-0 truncate text-[12px] text-[#8D877F]">
-                                    {getPreviewText(conversation) || agentStatus.description}
-                                  </p>
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </section>
-
-                  {pendingInvites.length > 0 ? (
-                    <section>
-                      <p className="mb-2 px-2 text-xs font-semibold uppercase tracking-[0.22em] text-[#8D877F]">Pending Invites</p>
-                      <div className="space-y-1.5">
-                        {pendingInvites.map((invite) => (
-                          <div
-                            key={invite.id}
-                            className="flex items-center gap-3 rounded-2xl border border-[rgba(255,255,255,0.04)] bg-[rgba(255,255,255,0.02)] px-3 py-2.5 transition-all hover:border-[rgba(255,255,255,0.08)]"
-                          >
-                            <Avatar src={invite.image} name={invite.name ?? invite.email} size="md" className="opacity-70" />
-                            <button
-                              onClick={() => router.push(`/profile/${encodeURIComponent(invite.userId)}`)}
-                              className="min-w-0 flex-1 text-left"
-                            >
-                              <p className="truncate text-sm font-medium text-[#D9D4CC]">
-                                {invite.name ?? deriveInviteName(invite.email)}
-                              </p>
-                              <p className="truncate text-xs text-[#8D877F]">{invite.email}</p>
-                            </button>
-                            <span className="rounded-full bg-[rgba(255,255,255,0.04)] px-2 py-0.5 text-[11px] text-[#8D877F]">
-                              Invited
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </section>
-                  ) : null}
-                </div>
-            </div>
-          </aside>
-
-          <section className={cn("flex min-h-0 flex-col overflow-hidden", !activeConversation ? "hidden md:flex" : "flex")}>
             {activeConversation ? (
-              <>
-                <div className="shrink-0 flex items-center justify-between gap-3 border-b border-[rgba(255,255,255,0.06)] px-3 py-2.5 md:px-5 md:py-3">
-                  <div className="flex min-w-0 items-center gap-3">
-                    <button
-                      onClick={() => setSelectedConversationId(null)}
-                      className="flex h-10 w-10 items-center justify-center rounded-2xl border border-[rgba(255,255,255,0.07)] bg-[#181818] text-[#8D877F] md:hidden"
-                    >
-                      <ArrowLeft size={18} />
-                    </button>
-
-                    {activeConversationAvatar?.kind === "group" ? (
-                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[rgba(247,148,29,0.14)] text-[#F7941D]">
-                        <Hash size={20} />
-                      </div>
-                    ) : activeConversationAvatar?.kind === "agent" ? (
-                      <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-[rgba(75,156,211,0.3)] bg-[rgba(75,156,211,0.16)] text-[#7EC8E3] overflow-hidden">
-                        {activeConversationAvatar.image
-                          ? (activeConversationAvatar.image.startsWith("data:") || activeConversationAvatar.image.startsWith("https://"))
-                            ? <img src={activeConversationAvatar.image} alt={activeConversationAvatar.name} className="w-full h-full object-cover" />
-                            : <span className="text-lg">{activeConversationAvatar.image}</span>
-                          : <Bot size={20} />}
-                      </div>
-                    ) : (
-                      <Avatar src={activeConversationAvatar?.image} name={activeConversationAvatar?.name} size="lg" />
-                    )}
-
-                    <div className="min-w-0">
-                      <button
-                        className={cn(
-                          "truncate text-left text-base font-semibold text-[#F6F3EE] md:text-lg",
-                          activePartner ? "hover:text-[#FDBA4D]" : "cursor-default"
-                        )}
-                        onClick={() => {
-                          if (!activePartner) return;
-                          router.push(
-                            activePartner.kind === "agent"
-                              ? `/agents/${activePartner.id}/profile`
-                              : `/profile/${activePartner.id}`
-                          );
-                        }}
-                      >
-                        {getConversationLabel(activeConversation, currentUserId)}
-                      </button>
-                      <div className="flex items-center gap-1.5 text-xs text-[#6F6A64]">
-                        <span>{activePartner?.kind === "agent" ? activeAgentStatusLabel : getConversationSubtext(activeConversation, currentUserId)}</span>
-                        {activePartner?.kind === "user" ? (
-                          <>
-                            <span className="text-[#3A3632]">·</span>
-                            <PresenceBadge status={getOnlineStatus(activePartner.lastSeen ?? null)} />
-                          </>
-                        ) : null}
-                        {activePartner?.kind === "agent" && activeThreadModelLabel ? (
-                          <>
-                            <span className="text-[#3A3632]">·</span>
-                            <span>{activeThreadModelLabel}</span>
-                          </>
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {activePartner?.kind === "agent" ? (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        className="hidden md:inline-flex"
-                        icon={<Eye size={14} />}
-                        onClick={() => setShowContextInspector(true)}
-                        disabled={agentInspectorLoading || !!agentInspectorError}
-                      >
-                        Inspect Context
-                      </Button>
-                    ) : null}
-                    {activePartner?.kind === "agent" && activeAgentReady ? (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        loading={clearingConversation}
-                        icon={<Trash2 size={14} />}
-                        className="border-[rgba(255,255,255,0.08)] bg-[#181818] text-[#B7B0A8] hover:bg-[rgba(255,255,255,0.06)] hover:text-[#F6F3EE]"
-                        onClick={() => setShowClearContextModal(true)}
-                      >
-                        <span className="hidden md:inline">Clear Chat</span>
-                      </Button>
-                    ) : null}
-
-                  </div>
-                </div>
-
-                <div ref={chatScrollRef} onScroll={handleChatScroll} className="chat-scroll flex-1 overflow-y-auto overflow-x-hidden bg-[linear-gradient(180deg,rgba(255,255,255,0.01),transparent)] px-3 py-3 md:min-h-0 md:px-5 md:py-4">
-                  {loadingMessages && messages.length === 0 ? (
-                    <div className="flex h-full items-center justify-center">
-                      <div className="h-6 w-6 rounded-full border-2 border-[rgba(247,148,29,0.2)] border-t-[#F7941D] animate-spin" />
-                    </div>
-                  ) : activePartner?.kind === "agent" && activeAgentBootstrapPending ? (
-                    <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-                      <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(75,156,211,0.12)] text-[#7EC8E3]">
-                        <Bot size={28} />
-                      </div>
-                      <p className="text-lg font-semibold text-[#F6F3EE]">Initializing {activePartner.name}</p>
-                      <p className="mt-1 max-w-md text-sm leading-6 text-[#8D877F]">
-                        Checking the model connection, loading recent conversation history, and preparing the context bundle.
-                      </p>
-                      <div className="mt-4 flex items-center gap-2 rounded-2xl border border-[rgba(75,156,211,0.16)] bg-[rgba(75,156,211,0.08)] px-4 py-3 text-sm text-[#9FCBE0]">
-                        <div className="h-4 w-4 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                        <span>Preparing a clean start before you type</span>
-                      </div>
-                    </div>
-                  ) : activePartner?.kind === "agent" && !activeAgentReady ? (
-                    <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-                      <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(75,156,211,0.12)] text-[#7EC8E3]">
-                        <Bot size={28} />
-                      </div>
-                      <p className="text-lg font-semibold text-[#F6F3EE]">{activePartner.name} isn&apos;t ready to chat yet</p>
-                      <p className="mt-1 max-w-md text-sm leading-6 text-[#8D877F]">
-                        {agentInspectorError || agentInspector?.readiness.detail || "Connect this agent's LLM brain on the profile page before starting a conversation."}
-                      </p>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        className="mt-4"
-                        onClick={() => router.push(`/agents/${activePartner.id}/profile`)}
-                      >
-                        Open Agent Profile
-                      </Button>
-                    </div>
-                  ) : renderedMessages.length === 0 ? (
-                    <div className="flex h-full flex-col items-center justify-center text-center">
-                      <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(247,148,29,0.12)] text-[#F7941D]">
-                        <MessageSquare size={28} />
-                      </div>
-                      <p className="text-lg font-semibold text-[#F6F3EE]">Start the conversation</p>
-                      <p className="mt-1 max-w-md text-sm text-[#8D877F]">
-                        {activeConversation.type === "group"
-                          ? "Drop the first update, question, or decision into this channel."
-                          : `Send a quick message to ${getConversationLabel(activeConversation, currentUserId)}.`}
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="space-y-1.5">
-                      {renderedMessages.map((message) => {
-                        const isCurrentUser = message.sender?.id === currentUserId && message.sender?.kind === "user";
-                        const isEditing = editingMessageId === message.id;
-                        return (
-                          <div
-                            key={message.id}
-                            className={cn("group flex gap-3", isCurrentUser ? "justify-end" : "justify-start")}
-                          >
-                            {!isCurrentUser ? (
-                              message.sender?.kind === "agent" ? (
-                                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-[rgba(75,156,211,0.3)] bg-[rgba(75,156,211,0.16)] text-[#7EC8E3] overflow-hidden">
-                                  {message.sender.image
-                                    ? (message.sender.image.startsWith("data:") || message.sender.image.startsWith("https://"))
-                                      ? <img src={message.sender.image} alt={message.sender.name ?? ""} className="w-full h-full object-cover" />
-                                      : <span>{message.sender.image}</span>
-                                    : <Bot size={16} />}
-                                </div>
-                              ) : (
-                                <Avatar src={message.sender?.image} name={message.sender?.name} size="sm" />
-                              )
-                            ) : null}
-
-                            <div className={cn("min-w-0 max-w-[82%] md:max-w-[68%]", isCurrentUser ? "items-end" : "items-start")} style={{ display: "flex", flexDirection: "column" }}>
-                              {!isCurrentUser && message.sender?.name ? (
-                                <p className="mb-0.5 px-1 text-[11px] font-medium text-[#8D877F]">{message.sender.name}</p>
-                              ) : null}
-                              {isEditing ? (
-                                <div
-                                  className="w-full rounded-[22px] border border-[rgba(247,148,29,0.2)] bg-[rgba(255,255,255,0.04)] p-3"
-                                  style={{ minWidth: "280px" }}
-                                >
-                                  <Textarea
-                                    value={editingDraft}
-                                    onChange={(event) => setEditingDraft(event.target.value)}
-                                    rows={3}
-                                    className="min-h-[88px] border-[rgba(255,255,255,0.08)] bg-[#191919]"
-                                  />
-                                  <div className="mt-2 flex justify-end gap-2">
-                                    <button
-                                      onClick={cancelEditingMessage}
-                                      className="flex h-8 w-8 items-center justify-center rounded-xl border border-[rgba(255,255,255,0.08)] bg-[#181818] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
-                                      type="button"
-                                      title="Cancel"
-                                    >
-                                      <X size={14} />
-                                    </button>
-                                    <button
-                                      onClick={() => void saveEditedMessage(message.id)}
-                                      className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#F7941D] text-[#111111] transition-opacity hover:opacity-90 disabled:opacity-50"
-                                      type="button"
-                                      disabled={!editingDraft.trim() || savingMessageId === message.id}
-                                      title="Save"
-                                    >
-                                      {savingMessageId === message.id ? (
-                                        <div className="h-3.5 w-3.5 rounded-full border-2 border-[#111111]/20 border-t-[#111111] animate-spin" />
-                                      ) : (
-                                        <Check size={14} />
-                                      )}
-                                    </button>
-                                  </div>
-                                </div>
-                              ) : (
-                                <div
-                                  className="chat-scroll max-h-[min(60vh,36rem)] overflow-y-auto overflow-x-hidden rounded-[20px] px-3.5 py-2 text-sm leading-5 shadow-sm [overflow-wrap:anywhere]"
-                                  style={
-                                    isCurrentUser
-                                      ? {
-                                        background: "linear-gradient(135deg, rgba(247,148,29,0.22), rgba(247,148,29,0.1))",
-                                        color: "#F6F3EE",
-                                        borderBottomRightRadius: "6px",
-                                      }
-                                      : message.sender?.kind === "agent"
-                                        ? {
-                                          background: "rgba(75,156,211,0.15)",
-                                          color: "#F6F3EE",
-                                          border: "1px solid rgba(75,156,211,0.2)",
-                                          borderBottomLeftRadius: "6px",
-                                        }
-                                        : {
-                                          background: "rgba(255,255,255,0.05)",
-                                          color: "#F6F3EE",
-                                          border: "1px solid rgba(255,255,255,0.06)",
-                                          borderBottomLeftRadius: "6px",
-                                        }
-                                  }
-                                >
-                                  {message.thinking ? (
-                                    <div className="mb-2 rounded-xl border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-3 py-2">
-                                      <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8D877F]">
-                                        Thinking
-                                      </p>
-                                      <p className="whitespace-pre-wrap text-xs leading-5 text-[#CFC9C2] [overflow-wrap:anywhere]">{message.thinking}</p>
-                                      {message.isStreaming && !message.body ? (
-                                        <div className="mt-2 flex items-center gap-2 text-[11px] text-[#9FCBE0]">
-                                          <div className="h-3 w-3 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                                          <span>
-                                            {message.streamState === "responding"
-                                              ? "Turning thoughts into a reply..."
-                                              : "Thinking through it..."}
-                                          </span>
-                                        </div>
-                                      ) : null}
-                                    </div>
-                                  ) : null}
-                                  {message.body ? (
-                                    message.sender?.kind === "agent" ? (
-                                      <div className="[overflow-wrap:anywhere] prose-chat">
-                                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={chatMarkdownComponents}>
-                                          {message.body}
-                                        </ReactMarkdown>
-                                      </div>
-                                    ) : (
-                                      <div className="whitespace-pre-wrap [overflow-wrap:anywhere]">{message.body}</div>
-                                    )
-                                  ) : message.isStreaming ? (
-                                    <div className="flex items-center gap-2 text-[#CFC9C2]">
-                                      <div className="h-3.5 w-3.5 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                                      <span>
-                                        {message.streamState === "using_tools"
-                                          ? "Working on it..."
-                                          : message.streamState === "responding"
-                                          ? "Drafting reply..."
-                                          : message.thinkingEnabled === false
-                                            ? "Gathering context..."
-                                            : message.thinking
-                                            ? "Thinking through it..."
-                                            : "Thinking..."}
-                                      </span>
-                                    </div>
-                                  ) : null}
-                                  {message.isStreaming && message.body ? (
-                                    <div className="mt-2 flex items-center gap-2 text-[11px] text-[#9FCBE0]">
-                                      <div className="h-3 w-3 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                                      <span>Streaming reply...</span>
-                                    </div>
-                                  ) : null}
-                                  {message.toolActivity && message.toolActivity.length > 0 ? (
-                                    <div className="mt-2 rounded-xl border border-[rgba(126,200,227,0.15)] bg-[rgba(75,156,211,0.07)] px-3 py-2">
-                                      <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#7EC8E3]">
-                                        Actions Taken
-                                      </p>
-                                      <div className="flex flex-col gap-1">
-                                        {message.toolActivity.map((tool) => (
-                                          <div key={tool.id} className="flex items-center gap-2 text-[11px]">
-                                            {tool.status === "running" ? (
-                                              <div className="h-3 w-3 shrink-0 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                                            ) : (
-                                              <Wrench size={11} className="shrink-0 text-[#7EC8E3]" />
-                                            )}
-                                            <span className="text-[#A9DCF3]">
-                                              {TOOL_LABELS[tool.name] ?? tool.name}
-                                            </span>
-                                            {tool.status === "running" && (
-                                              <span className="text-[#5A8FA8]">…</span>
-                                            )}
-                                          </div>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  ) : null}
-                                  {message.retrievalSources && message.retrievalSources.length > 0 ? (
-                                    <div className="mt-3 rounded-xl border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-3 py-2">
-                                      <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8D877F]">
-                                        Read-Only Context Retrieved
-                                      </p>
-                                      <div className="flex flex-wrap gap-1.5">
-                                        {message.retrievalSources.map((source, index) => (
-                                          <span
-                                            key={`${source.kind}-${source.target}-${index}`}
-                                            className="rounded-full border border-[rgba(75,156,211,0.18)] bg-[rgba(75,156,211,0.08)] px-2 py-1 text-[10px] text-[#A9DCF3]"
-                                            title={`${source.target} — ${source.detail}`}
-                                          >
-                                            {source.label}
-                                          </span>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  ) : null}
-                                </div>
-                              )}
-                              {!isEditing && message.body ? (
-                                <div
-                                  className={cn(
-                                    "mt-1 flex items-center gap-2 px-1 transition-opacity",
-                                    isCurrentUser ? "opacity-0 group-hover:opacity-100" : "opacity-100 md:opacity-0 md:group-hover:opacity-100"
-                                  )}
-                                >
-                                  {!isCurrentUser ? (
-                                    <button
-                                      onClick={() => void copyToClipboard(message.body, "message", message.id)}
-                                      type="button"
-                                      className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
-                                    >
-                                      <Copy size={12} />
-                                      {copiedMessageId === message.id ? "Copied" : "Copy"}
-                                    </button>
-                                  ) : null}
-                                  {isCurrentUser ? (
-                                    <button
-                                      onClick={() => void copyToClipboard(message.body, "message", message.id)}
-                                      type="button"
-                                      className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
-                                    >
-                                      <Copy size={12} />
-                                      {copiedMessageId === message.id ? "Copied" : "Copy"}
-                                    </button>
-                                  ) : null}
-                                  {isCurrentUser ? (
-                                    <>
-                                  <button
-                                    onClick={() => startEditingMessage(message)}
-                                    type="button"
-                                    className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
-                                  >
-                                    <Pencil size={12} />
-                                    Edit
-                                  </button>
-                                  <button
-                                    onClick={() => void deleteMessage(message.id)}
-                                    type="button"
-                                    disabled={deletingMessageId === message.id}
-                                    className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#EF4444] disabled:opacity-50"
-                                  >
-                                    <Trash2 size={12} />
-                                    Delete
-                                  </button>
-                                    </>
-                                  ) : null}
-                                </div>
-                              ) : null}
-                              <p className="mt-0.5 px-1 text-[10px] text-[#6F6A64]">{formatMessageTime(message.createdAt)}</p>
-                            </div>
-                          </div>
-                        );
-                      })}
-                      <div ref={bottomRef} />
-                    </div>
-                  )}
-                </div>
-
-                {activePartner?.kind === "agent" && !activeAgentReady ? (
-                  <div className="shrink-0 border-t border-[rgba(255,255,255,0.06)] bg-[#121212] px-3 py-3 md:px-5 md:py-4">
-                    <div className="flex items-center justify-center gap-2.5 rounded-2xl border border-[rgba(239,68,68,0.15)] bg-[rgba(239,68,68,0.06)] px-4 py-3 text-sm text-[#9A9A9A]">
-                      <span className="h-2 w-2 rounded-full bg-[#EF4444] shrink-0" />
-                      {agentInspector?.readiness.detail || "Agent not online. Configure the LLM connection in the agent profile to start chatting."}
-                    </div>
-                  </div>
-                ) : (
-                  <form onSubmit={handleSendMessage} className="shrink-0 border-t border-[rgba(255,255,255,0.06)] bg-[#121212] px-3 py-2.5 md:px-5 md:py-3">
-                    {activePartner?.kind === "agent" && agentInspector ? (
-                      <div className="mb-2 flex items-center gap-2 text-[11px] text-[#4E4A45]">
-                        <span className={agentInspector.readiness.label === "Ready" ? "text-[#4ade80]" : "text-[#9FCBE0]"}>
-                          {agentInspector.readiness.label}
-                        </span>
-                        <span>·</span>
-                        <span className="inline-flex items-center gap-1">
-                          <RadialContextBar tokens={agentInspector.context.estimatedTokens} />
-                          <span>{formatTokensK(agentInspector.context.estimatedTokens)} / 128K</span>
-                        </span>
-                        <span>·</span>
-                        <span>{agentInspector.context.recentHistoryCount}/{agentInspector.context.historyWindowSize} msgs</span>
-                        <span>·</span>
-                        <span>{formatThinkingMode(agentInspector.agent.llmThinkingMode)} thinking</span>
-                      </div>
-                    ) : null}
-                    <div className="flex items-center gap-2">
-                      <div className="min-w-0 flex-1">
-                        <Textarea
-                          value={messageInput}
-                          onChange={(event) => setMessageInput(event.target.value)}
-                          placeholder={
-                            activePartner?.kind === "agent" && activeAgentBootstrapPending
-                              ? `Preparing ${activePartner.name}...`
-                              : `Message ${getConversationLabel(activeConversation, currentUserId)}...`
-                          }
-                          rows={1}
-                          className="min-h-[44px] md:min-h-[56px] w-full rounded-2xl border-[rgba(255,255,255,0.08)] bg-[#191919] px-4 py-2.5 md:py-3 resize-none"
-                          disabled={sending || activeAgentSendBlocked}
-                          onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
-                            if (event.key === "Enter" && !event.shiftKey) {
-                              event.preventDefault();
-                              void sendCurrentMessage();
-                            }
-                          }}
-                        />
-                      </div>
-                      <Button
-                        type="submit"
-                        variant="primary"
-                        size="md"
-                        disabled={!messageInput.trim() || sending || activeAgentSendBlocked}
-                        loading={sending}
-                        className="h-11 md:h-14 w-11 md:w-auto shrink-0 rounded-2xl px-0 md:px-5"
-                      >
-                        {!sending ? <Send size={15} /> : null}
-                      </Button>
-                    </div>
-                    <p className="hidden md:block mt-2 text-xs text-[#6F6A64]">
-                      {activePartner?.kind === "agent"
-                        ? activeAgentBootstrapPending
-                          ? "We are initializing the model, refreshing readiness, and loading the context bundle before input is enabled."
-                          : "Connected agents stream live replies here. Open Inspect Context to verify the exact knowledge bundle being sent."
-                        : "Direct messages and channels send immediately. Press Enter to send and Shift+Enter for a new line."}
-                    </p>
-                  </form>
-                )}
-              </>
-            ) : (
-              <div className="hidden h-full flex-col items-center justify-center bg-[radial-gradient(circle_at_center,rgba(247,148,29,0.08),transparent_34%)] px-8 text-center md:flex">
-                <div className="mb-4 flex h-20 w-20 items-center justify-center rounded-[28px] bg-[rgba(247,148,29,0.12)] text-[#F7941D]">
-                  <MessageSquare size={34} />
-                </div>
-                <h2 className="text-2xl font-semibold text-[#F6F3EE]">Choose a teammate to start chatting</h2>
-                <p className="mt-2 max-w-lg text-sm leading-6 text-[#8D877F]">
-                  Direct messages, named group channels, and 1:1 AI chats now live here. Pick someone from the left or create a new group.
-                </p>
-              </div>
-            )}
-          </section>
+              <ConversationPane
+                currentUserId={currentUserId}
+                activeConversation={activeConversation}
+                activeConversationAvatar={activeConversationAvatar}
+                activeConversationMembers={activeConversationMembers}
+                activeConversationParticipantSummary={activeConversationParticipantSummary}
+                activeConversationWorkspaceLabel={activeConversationWorkspaceLabel}
+                activeConversationTimestamp={activeConversationTimestamp}
+                activePartner={activePartner}
+                activeAgentParticipant={activeAgentParticipant}
+                activeThreadModelLabel={activeThreadModelLabel}
+                threadDrawerOpen={threadDrawerOpen}
+                threadOriginLabel={activeThreadOriginLabel}
+                loadingMessages={loadingMessages}
+                rawMessageCount={messages.length}
+                renderedMessages={renderedMessages}
+                messageInput={messageInput}
+                sending={sending}
+                editingMessageId={editingMessageId}
+                editingDraft={editingDraft}
+                savingMessageId={savingMessageId}
+                deletingMessageId={deletingMessageId}
+                copiedMessageId={copiedMessageId}
+                chatScrollRef={chatScrollRef}
+                bottomRef={bottomRef}
+                threadDocumentUploads={activeThreadDocumentUploads}
+                threadDocumentError={threadDocumentError}
+                removingDocumentId={removingDocumentId}
+                activeAgentReady={activeAgentReady}
+                activeAgentSendBlocked={activeAgentSendBlocked}
+                activeAgentBootstrapPending={activeAgentBootstrapPending}
+                agentInspector={activeAgentInspector}
+                agentInspectorError={activeAgentInspectorError}
+                onBack={closeActiveConversation}
+                onOpenThreadTarget={() => {
+                  if (!activePartner) return;
+                  router.push(
+                    activePartner.kind === "agent"
+                      ? `/agents/${activePartner.id}/profile`
+                      : `/profile/${activePartner.id}`
+                  );
+                }}
+                onOpenActiveAgentProfile={() => {
+                  if (!activeAgentParticipant) return;
+                  router.push(`/agents/${activeAgentParticipant.id}/profile`);
+                }}
+                onToggleDrawer={() => setThreadDrawerOpen((current) => !current)}
+                onHandleChatScroll={handleChatScroll}
+                onChangeMessageInput={setMessageInput}
+                onUploadThreadDocuments={uploadThreadDocuments}
+                onSubmitMessage={handleSendMessage}
+                onSendMessage={sendCurrentMessage}
+                onChangeEditingDraft={setEditingDraft}
+                onCancelEditingMessage={cancelEditingMessage}
+                onSaveEditedMessage={saveEditedMessage}
+                onRemoveThreadDocument={removeThreadDocument}
+                onDismissThreadUpload={dismissThreadUpload}
+                onCopyMessage={(body, messageId) => void copyToClipboard(body, "message", messageId)}
+                onStartEditingMessage={startEditingMessage}
+                onDeleteMessage={deleteMessage}
+              />
+            ) : showDiscoveryPane ? (
+              <TeamDiscoveryPane
+                currentUserId={currentUserId}
+                projects={chatProjects}
+                conversations={conversations}
+                threadSections={threadSections}
+                searchResults={searchResults}
+                searchLoading={searchLoading}
+                searchError={searchError}
+                selectedProjectId={selectedProjectId}
+                searchQuery={discoveryQuery}
+                isDesktop={isDesktop}
+                onChangeSearchQuery={handleDiscoveryQueryChange}
+                onOpenConversation={openConversationFromDiscovery}
+                onOpenProject={openProjectSummary}
+                onOpenNewThread={openNewThreadComposer}
+                onBack={closeDiscoveryPane}
+              />
+            ) : null}
         </div>
       </div>
+
+      <ThreadDrawer
+        open={Boolean(activeConversation && threadDrawerOpen)}
+        conversation={activeConversation}
+        currentUserId={currentUserId}
+        messageCount={renderedMessages.length}
+        threadModelLabel={activeThreadModelLabel}
+        agentInspector={activeAgentInspector}
+        agentInspectorLoading={agentInspectorLoading}
+        agentInspectorError={activeAgentInspectorError}
+        activeAgentParticipant={activeAgentParticipant}
+        activeAgentStatusLabel={activeAgentStatusLabel}
+        activeAgentReady={activeAgentReady}
+        activeAgentBootstrapPending={activeAgentBootstrapPending}
+        clearThreadAvailable={clearThreadAvailable}
+        clearingConversation={clearingConversation}
+        participantActionError={participantActionError}
+        projectActionError={projectActionError}
+        switchingActiveAgentId={switchingActiveAgentId}
+        clearingActiveAgentPin={clearingActiveAgentPin}
+        removingParticipantId={removingParticipantId}
+        projects={chatProjects}
+        projectsLoading={chatProjectsLoading}
+        projectsError={chatProjectsError}
+        movingProject={movingProject}
+        threadDocumentUploads={activeThreadDocumentUploads}
+        threadDocumentError={threadDocumentError}
+        removingDocumentId={removingDocumentId}
+        onOpenAddParticipants={() => setShowAddParticipantsModal(true)}
+        onOpenInspector={() => setShowContextInspector(true)}
+        onOpenClearThread={() => setShowClearContextModal(true)}
+        onSwitchActiveAgent={(agentId) => void setActiveAgentForThread(agentId)}
+        onClearActiveAgentPin={() => void clearActiveAgentPinForThread()}
+        onRemoveParticipant={(participant) => void removeParticipantFromThread(participant)}
+        onMoveProject={moveThreadToProject}
+        onCreateProject={createChatProject}
+        onRenameThread={renameThread}
+        onRemoveThreadDocument={removeThreadDocument}
+        onDismissThreadUpload={dismissThreadUpload}
+        onClose={() => setThreadDrawerOpen(false)}
+      />
 
       {showInvite ? (
         <InviteMemberDialog
@@ -2582,21 +2521,39 @@ export function TeamClient({
         />
       ) : null}
 
-      {showNewGroup ? (
-        <NewGroupDialog
+      {showNewThreadModal ? (
+        <NewThreadModal
           currentUserId={currentUserId}
+          currentUserName={currentUserName}
           users={members}
-          onClose={() => setShowNewGroup(false)}
-          onCreated={(conversation) => {
-            setConversations((current) => [conversation, ...current.filter((item) => item.id !== conversation.id)]);
-            setSelectedConversationId(conversation.id);
-          }}
+          agents={agents}
+          projects={chatProjects}
+          projectsLoading={chatProjectsLoading}
+          projectsError={chatProjectsError}
+          initialProjectId={newThreadInitialProjectId}
+          onClose={closeNewThreadModal}
+          onSubmit={createFreshThread}
         />
       ) : null}
 
-      {showClearContextModal && activePartner?.kind === "agent" ? (
+      {showAddParticipantsModal && activeConversation ? (
+        <NewThreadModal
+          currentUserId={currentUserId}
+          currentUserName={currentUserName}
+          users={members}
+          agents={agents}
+          mode="add"
+          threadLabel={activeConversation.name ?? getConversationLabel(activeConversation, currentUserId)}
+          existingUserIds={activeConversation.members.filter((member) => member.kind === "user").map((member) => member.id)}
+          existingAgentIds={activeConversation.members.filter((member) => member.kind === "agent").map((member) => member.id)}
+          onClose={() => setShowAddParticipantsModal(false)}
+          onSubmit={addParticipantsToThread}
+        />
+      ) : null}
+
+      {showClearContextModal && clearThreadAvailable && activeAgentParticipant ? (
         <ClearAgentContextDialog
-          agentName={activePartner.name}
+          agentName={activeAgentParticipant.name}
           loading={clearingConversation}
           onClose={() => {
             if (!clearingConversation) setShowClearContextModal(false);
@@ -2605,13 +2562,13 @@ export function TeamClient({
         />
       ) : null}
 
-      {showContextInspector && agentInspector ? (
+      {showContextInspector && activeAgentInspector ? (
         <ContextInspectorDialog
-          data={agentInspector}
+          data={activeAgentInspector}
           copiedView={copiedInspectorView}
           onClose={() => setShowContextInspector(false)}
           onCopyPretty={() => void copyToClipboard(inspectorPrettyText, "pretty")}
-          onCopyJson={() => void copyToClipboard(JSON.stringify(agentInspector, null, 2), "json")}
+          onCopyJson={() => void copyToClipboard(JSON.stringify(activeAgentInspector, null, 2), "json")}
         />
       ) : null}
     </div>

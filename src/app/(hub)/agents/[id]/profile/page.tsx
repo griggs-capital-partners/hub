@@ -1816,19 +1816,66 @@ function FireAgentModal({
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function AgentProfilePage() {
-  const { id } = useParams<{ id: string }>();
+  const params = useParams<{ id?: string | string[] }>();
+  const id = Array.isArray(params.id) ? params.id[0] : params.id ?? "";
   const router = useRouter();
   const [agent, setAgent] = useState<Agent | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(id));
   const [notFound, setNotFound] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(id ? null : "Agent id is missing.");
   const [showFireModal, setShowFireModal] = useState(false);
   const [activeTab, setActiveTab] = useState<"profile" | "abilities" | "brain" | "tools" | "manage">("profile");
 
   useEffect(() => {
-    fetch(`/api/agents/${id}`)
-      .then((r) => { if (r.status === 404) { setNotFound(true); return null; } return r.json(); })
-      .then((d) => { if (d?.agent) setAgent(d.agent); })
-      .finally(() => setLoading(false));
+    if (!id) return;
+
+    let cancelled = false;
+    async function loadAgent() {
+      setLoading(true);
+      setNotFound(false);
+      setLoadError(null);
+
+      try {
+        const response = await fetch(`/api/agents/${id}`);
+        if (cancelled) return;
+
+        if (response.status === 404) {
+          setAgent(null);
+          setNotFound(true);
+          return;
+        }
+
+        const data = await response.json().catch(() => null);
+
+        if (!response.ok) {
+          setAgent(null);
+          setLoadError(data?.error ?? "Unable to load this agent right now.");
+          return;
+        }
+
+        if (data?.agent) {
+          setAgent(data.agent);
+          return;
+        }
+
+        setAgent(null);
+        setLoadError("Unable to load this agent right now.");
+      } catch {
+        if (cancelled) return;
+        setAgent(null);
+        setLoadError("Unable to load this agent right now.");
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    }
+
+    void loadAgent();
+
+    return () => {
+      cancelled = true;
+    };
   }, [id]);
 
   async function fireAgent() {
@@ -1861,11 +1908,23 @@ export default function AgentProfilePage() {
     );
   }
 
-  if (notFound || !agent) {
+  if (notFound) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
         <Bot size={48} className="text-[#333333]" />
         <p className="text-[#606060]">Agent not found.</p>
+        <Button variant="secondary" size="sm" onClick={() => router.push("/agents")} icon={<ArrowLeft size={14} />}>
+          Back to Agents
+        </Button>
+      </div>
+    );
+  }
+
+  if (loadError || !agent) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[400px] gap-4">
+        <Bot size={48} className="text-[#333333]" />
+        <p className="text-center text-[#606060]">{loadError ?? "Unable to load this agent right now."}</p>
         <Button variant="secondary" size="sm" onClick={() => router.push("/agents")} icon={<ArrowLeft size={14} />}>
           Back to Agents
         </Button>

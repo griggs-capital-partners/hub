@@ -13,7 +13,7 @@ import {
   serializeConversationLlmThreadState,
 } from "@/lib/agent-llm-config";
 import { buildOrgContext } from "@/lib/agent-context";
-import { getConversationForUser, isMissingChatTablesError } from "@/lib/chat";
+import { getConversationForUser, isMissingChatTablesError, resolveConversationAgentMember } from "@/lib/chat";
 import { prisma } from "@/lib/prisma";
 
 function buildReadiness(llmStatus: string, llmLastError: string | null) {
@@ -60,14 +60,12 @@ export async function GET(
       return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
     }
 
-    const agentMember = conversation.type === "direct"
-      ? conversation.members.find((member) => member.agentId)
-      : null;
+    const agentMember = resolveConversationAgentMember(conversation);
 
     const agent = agentMember?.agent ?? null;
 
     if (!agent) {
-      return NextResponse.json({ error: "Inspector is only available for direct agent chats" }, { status: 400 });
+      return NextResponse.json({ error: "Inspector is only available for threads with an agent participant" }, { status: 400 });
     }
 
     const recentMessages = await prisma.chatMessage.findMany({

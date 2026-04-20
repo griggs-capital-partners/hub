@@ -19,6 +19,7 @@ import {
   getConversationForUser,
   isMissingChatTablesError,
   listMessagesForConversation,
+  resolveConversationAgentMember,
   serializeConversation,
 } from "@/lib/chat";
 import type { LlmMessage } from "@/lib/agent-llm";
@@ -173,9 +174,7 @@ export async function POST(
       },
     });
 
-    const agentMember = conversation.type === "direct"
-      ? conversation.members.find((member) => member.agentId)
-      : null;
+    const agentMember = resolveConversationAgentMember(conversation);
 
     const agent = agentMember?.agent ?? null;
 

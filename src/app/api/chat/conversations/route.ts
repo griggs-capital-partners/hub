@@ -3,8 +3,10 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import {
   findDirectConversation,
+  getConversationForUser,
   isMissingChatTablesError,
   listConversationsForUser,
+  resolveChatProjectSelection,
   serializeConversation,
 } from "@/lib/chat";
 
@@ -36,97 +38,87 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const body = await request.json();
+  const body = (await request.json()) as Record<string, unknown>;
   const type = body?.type === "group" ? "group" : "direct";
+  const forceNew = body?.forceNew === true;
+  const requestedProjectId = typeof body?.projectId === "string" ? body.projectId.trim() : "";
+  const requestedProjectName = typeof body?.projectName === "string" ? body.projectName.trim() : "";
 
   try {
+    let resolvedProject: Awaited<ReturnType<typeof resolveChatProjectSelection>>;
+    try {
+      resolvedProject = await resolveChatProjectSelection({
+        projectId: requestedProjectId,
+        projectName: requestedProjectName,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === "Project not found") {
+        return NextResponse.json({ error: "Project not found" }, { status: 404 });
+      }
+
+      throw error;
+    }
+
     if (type === "group") {
-    const name = typeof body?.name === "string" ? body.name.trim() : "";
-    const memberUserIds = Array.isArray(body?.memberUserIds)
-      ? body.memberUserIds.filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0)
-      : [];
+      const name = typeof body?.name === "string" ? body.name.trim() : "";
+      const memberUserIds = Array.isArray(body?.memberUserIds)
+        ? body.memberUserIds.filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0)
+        : [];
+      const memberAgentIds = Array.isArray(body?.memberAgentIds)
+        ? body.memberAgentIds.filter((id: unknown): id is string => typeof id === "string" && id.trim().length > 0)
+        : [];
 
-    const uniqueMemberUserIds = Array.from(new Set([session.user.id, ...memberUserIds]));
-    if (!name) {
-      return NextResponse.json({ error: "Group name is required" }, { status: 400 });
-    }
+      const uniqueMemberUserIds = Array.from(new Set([session.user.id, ...memberUserIds]));
+      const uniqueMemberAgentIds = Array.from(new Set(memberAgentIds));
 
-    if (uniqueMemberUserIds.length < 2) {
-      return NextResponse.json({ error: "Choose at least one teammate" }, { status: 400 });
-    }
+      if (uniqueMemberUserIds.length + uniqueMemberAgentIds.length < 2) {
+        return NextResponse.json({ error: "Choose at least one teammate or agent" }, { status: 400 });
+      }
 
-    const users = await prisma.user.findMany({
-      where: { id: { in: uniqueMemberUserIds } },
-      select: { id: true },
-    });
+      const [users, agents] = await Promise.all([
+        prisma.user.findMany({
+          where: { id: { in: uniqueMemberUserIds } },
+          select: { id: true },
+        }),
+        uniqueMemberAgentIds.length > 0
+          ? prisma.aIAgent.findMany({
+              where: { id: { in: uniqueMemberAgentIds } },
+              select: { id: true },
+            })
+          : Promise.resolve([]),
+      ]);
 
-    if (users.length !== uniqueMemberUserIds.length) {
-      return NextResponse.json({ error: "One or more selected teammates were not found" }, { status: 400 });
-    }
+      if (users.length !== uniqueMemberUserIds.length) {
+        return NextResponse.json({ error: "One or more selected teammates were not found" }, { status: 400 });
+      }
 
-      const conversation = await prisma.conversation.create({
-      data: {
-        type: "group",
-        name,
-        createdById: session.user.id,
-        members: {
-          create: uniqueMemberUserIds.map((userId) => ({
-            userId,
-          })),
-        },
-      },
-      include: {
-        members: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                displayName: true,
-                email: true,
-                image: true,
-                role: true,
-                lastSeen: true,
-              },
-            },
-            agent: {
-              select: {
-                id: true,
-                name: true,
-                role: true,
-                avatar: true,
-                status: true,
-                llmThinkingMode: true,
-                llmStatus: true,
-                llmLastCheckedAt: true,
-              },
-            },
-          },
-          orderBy: { joinedAt: "asc" },
-        },
-        messages: {
-          take: 1,
-          orderBy: { createdAt: "desc" },
-          include: {
-            senderUser: {
-              select: {
-                id: true,
-                name: true,
-                displayName: true,
-                image: true,
-              },
-            },
-            senderAgent: {
-              select: {
-                id: true,
-                name: true,
-                avatar: true,
-              },
-            },
+      if (agents.length !== uniqueMemberAgentIds.length) {
+        return NextResponse.json({ error: "One or more selected agents were not found" }, { status: 400 });
+      }
+
+      const createdConversation = await prisma.conversation.create({
+        data: {
+          type: "group",
+          name: name || null,
+          createdById: session.user.id,
+          ...(resolvedProject.project ? { chatProjectId: resolvedProject.project.id } : {}),
+          members: {
+            create: [
+              ...uniqueMemberUserIds.map((userId) => ({
+                userId,
+              })),
+              ...uniqueMemberAgentIds.map((agentId) => ({
+                agentId,
+              })),
+            ],
           },
         },
-      },
-    });
+      });
+
+      const conversation = await getConversationForUser(createdConversation.id, session.user.id);
+      if (!conversation) {
+        return NextResponse.json({ error: "Unable to load the new thread" }, { status: 500 });
+      }
 
       return NextResponse.json({ conversation: serializeConversation(conversation) }, { status: 201 });
     }
@@ -146,14 +138,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "You already have your own notes app for that" }, { status: 400 });
     }
 
-    const existingConversation = await findDirectConversation({
-      currentUserId: session.user.id,
-      otherUserId: otherUserId || undefined,
-      agentId: agentId || undefined,
-    });
+    if (!forceNew) {
+      const existingConversation = await findDirectConversation({
+        currentUserId: session.user.id,
+        otherUserId: otherUserId || undefined,
+        agentId: agentId || undefined,
+      });
 
-    if (existingConversation) {
-      return NextResponse.json({ conversation: serializeConversation(existingConversation) });
+      if (existingConversation) {
+        return NextResponse.json({ conversation: serializeConversation(existingConversation) });
+      }
     }
 
     if (otherUserId) {
@@ -178,68 +172,23 @@ export async function POST(request: Request) {
       }
     }
 
-    const conversation = await prisma.conversation.create({
+    const createdConversation = await prisma.conversation.create({
       data: {
         type: "direct",
         createdById: session.user.id,
+        ...(resolvedProject.project ? { chatProjectId: resolvedProject.project.id } : {}),
         members: {
           create: otherUserId
             ? [{ userId: session.user.id }, { userId: otherUserId }]
             : [{ userId: session.user.id }, { agentId }],
         },
       },
-      include: {
-        members: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                displayName: true,
-                email: true,
-                image: true,
-                role: true,
-                lastSeen: true,
-              },
-            },
-            agent: {
-              select: {
-                id: true,
-                name: true,
-                role: true,
-                avatar: true,
-                status: true,
-                llmThinkingMode: true,
-                llmStatus: true,
-                llmLastCheckedAt: true,
-              },
-            },
-          },
-          orderBy: { joinedAt: "asc" },
-        },
-        messages: {
-          take: 1,
-          orderBy: { createdAt: "desc" },
-          include: {
-            senderUser: {
-              select: {
-                id: true,
-                name: true,
-                displayName: true,
-                image: true,
-              },
-            },
-            senderAgent: {
-              select: {
-                id: true,
-                name: true,
-                avatar: true,
-              },
-            },
-          },
-        },
-      },
     });
+
+    const conversation = await getConversationForUser(createdConversation.id, session.user.id);
+    if (!conversation) {
+      return NextResponse.json({ error: "Unable to load the new thread" }, { status: 500 });
+    }
 
     return NextResponse.json({ conversation: serializeConversation(conversation) }, { status: 201 });
   } catch (error) {

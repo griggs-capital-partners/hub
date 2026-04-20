@@ -40,10 +40,11 @@ model User {
   createdAgents     AIAgent[]       @relation("AgentCreatedBy")
   agentMessages     AgentMessage[]  @relation("UserAgentMessages")
   calendarEvents    CalendarEvent[] @relation("CalendarEventCreator")
-  createdConversations Conversation[]      @relation("ConversationCreatedBy")
-  conversationMembers ConversationMember[] @relation("ConversationUserMembers")
-  chatMessages       ChatMessage[]         @relation("ChatMessageSenderUser")
-  triggeredExecutions AgentTaskExecution[] @relation("ExecutionTriggeredBy")
+    createdConversations Conversation[]      @relation("ConversationCreatedBy")
+    conversationMembers ConversationMember[] @relation("ConversationUserMembers")
+    chatMessages       ChatMessage[]         @relation("ChatMessageSenderUser")
+    conversationDocuments ConversationDocument[]
+    triggeredExecutions AgentTaskExecution[] @relation("ExecutionTriggeredBy")
   notificationSettings UserNotificationSettings?
   pushSubscriptions    PushSubscription[]
 
@@ -155,6 +156,7 @@ model Repo {
   awsLinks     RepoAwsLink[]
   customPages  CustomPage[]
   linkedCards  KanbanCardRepo[]
+  conversations Conversation[]
 
   @@map("repos")
 }
@@ -568,21 +570,58 @@ model AgentMessage {
   @@map("agent_messages")
 }
 
+model ChatProject {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  conversations Conversation[]
+
+  @@map("chat_projects")
+}
+
 model Conversation {
-  id          String   @id @default(cuid())
-  type        String   @default("direct") // "direct" | "group"
-  name        String?
-  llmThreadState String @default("")      // JSON: selected thread model + audit trail
+    id          String   @id @default(cuid())
+    type        String   @default("direct") // "direct" | "group"
+    name        String?
+    llmThreadState String @default("")      // JSON: selected thread model + audit trail
   createdById String?
+  chatProjectId String?
+  repoId      String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   createdBy User?                @relation("ConversationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
-  members   ConversationMember[]
-  messages  ChatMessage[]
+    chatProject ChatProject?       @relation(fields: [chatProjectId], references: [id], onDelete: SetNull)
+    repo      Repo?                @relation(fields: [repoId], references: [id], onDelete: SetNull)
+    members   ConversationMember[]
+    messages  ChatMessage[]
+    documents ConversationDocument[]
 
   @@index([type, updatedAt])
+  @@index([chatProjectId, updatedAt])
+  @@index([repoId, updatedAt])
   @@map("conversations")
+}
+
+model ConversationDocument {
+  id             String   @id @default(cuid())
+  conversationId String
+  uploadedBy     String
+  filename       String
+  mimeType       String?
+  fileType       String
+  fileSize       Int
+  storagePath    String
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  uploader     User         @relation(fields: [uploadedBy], references: [id])
+
+  @@index([conversationId, createdAt])
+  @@index([uploadedBy, createdAt])
+  @@map("conversation_documents")
 }
 
 model ConversationMember {
