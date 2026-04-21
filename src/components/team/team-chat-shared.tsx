@@ -397,8 +397,19 @@ export function formatDocumentBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function getConversationDocumentDownloadHref(conversationId: string, documentId: string) {
+export function isConversationDocumentPreviewable(document: ConversationDocumentSummary) {
+  const mimeType = document.mimeType?.toLowerCase() ?? "";
+  return mimeType.startsWith("image/")
+    || mimeType.startsWith("text/")
+    || mimeType === "application/pdf";
+}
+
+export function getConversationDocumentViewHref(conversationId: string, documentId: string) {
   return `/api/chat/conversations/${conversationId}/documents/${documentId}/file`;
+}
+
+export function getConversationDocumentDownloadHref(conversationId: string, documentId: string) {
+  return `/api/chat/conversations/${conversationId}/documents/${documentId}/file?download=1`;
 }
 
 export function RadialContextBar({
