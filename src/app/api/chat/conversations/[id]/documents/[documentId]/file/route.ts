@@ -13,14 +13,14 @@ function isUploadPath(storagePath: string) {
   return resolvedStoragePath === uploadsRoot || resolvedStoragePath.startsWith(uploadsPrefix);
 }
 
-function buildContentDisposition(filename: string, download: boolean) {
+function buildContentDisposition(filename: string) {
   const fallbackName = filename.replace(/["\\]/g, "_");
   const encodedName = encodeURIComponent(filename);
-  return `${download ? "attachment" : "inline"}; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`;
+  return `attachment; filename="${fallbackName}"; filename*=UTF-8''${encodedName}`;
 }
 
 export async function GET(
-  request: Request,
+  _request: Request,
   { params }: { params: Promise<{ id: string; documentId: string }> }
 ) {
   const session = await auth();
@@ -70,14 +70,12 @@ export async function GET(
       throw error;
     }
 
-    const searchParams = new URL(request.url).searchParams;
-    const download = searchParams.get("download") === "1";
     const body = new Uint8Array(buffer);
 
     return new NextResponse(body, {
       headers: {
         "Content-Type": document.mimeType || "application/octet-stream",
-        "Content-Disposition": buildContentDisposition(document.filename, download),
+        "Content-Disposition": buildContentDisposition(document.filename),
         "Content-Length": String(buffer.byteLength),
         "Cache-Control": "private, max-age=60",
         "X-Content-Type-Options": "nosniff",

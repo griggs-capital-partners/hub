@@ -284,7 +284,7 @@ function ThreadDetailsPanel({
           compact
           canRemove
           removingDocumentId={removingDocumentId}
-          description="Files attached to this thread stay available here for quick review, opening, and cleanup."
+          description="Files attached to this thread stay available here for download and cleanup."
           onRemoveDocument={(document) => void onRemoveThreadDocument(document)}
           onDismissUpload={onDismissThreadUpload}
         />

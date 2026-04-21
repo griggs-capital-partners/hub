@@ -4,7 +4,6 @@ import { useRef } from "react";
 import {
   AlertTriangle,
   Download,
-  ExternalLink,
   File,
   FileAudio,
   FileImage,
@@ -19,8 +18,6 @@ import {
   type ConversationDocumentSummary,
   formatDocumentBytes,
   getConversationDocumentDownloadHref,
-  getConversationDocumentViewHref,
-  isConversationDocumentPreviewable,
 } from "@/components/team/team-chat-shared";
 import { CONVERSATION_DOCUMENT_ACCEPT } from "@/lib/conversation-documents";
 import { cn } from "@/lib/utils";
@@ -175,8 +172,6 @@ export function ThreadDocumentsPanel({
 
           {documents.map((document) => {
             const Icon = getDocumentIcon(document.fileType);
-            const previewable = isConversationDocumentPreviewable(document);
-            const viewHref = getConversationDocumentViewHref(conversationId, document.id);
             const downloadHref = getConversationDocumentDownloadHref(conversationId, document.id);
 
             return (
@@ -197,15 +192,6 @@ export function ThreadDocumentsPanel({
                     {new Date(document.createdAt).toLocaleDateString()}
                   </p>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <a
-                      href={viewHref}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-2.5 py-1 text-[11px] font-medium text-[#CFC9C2] transition-colors hover:text-[#F6F3EE]"
-                    >
-                      <ExternalLink size={12} />
-                      {previewable ? "Preview" : "Open"}
-                    </a>
                     <a
                       href={downloadHref}
                       className="inline-flex items-center gap-1 rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-2.5 py-1 text-[11px] font-medium text-[#CFC9C2] transition-colors hover:text-[#F6F3EE]"
