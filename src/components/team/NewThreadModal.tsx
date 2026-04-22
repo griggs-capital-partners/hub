@@ -341,7 +341,7 @@ export function NewThreadModal({
                       ) : null}
                     </div>
                     <p className="mt-3 text-xs text-[#6F6A64]">
-                      Fresh 1:1 chats still use the direct-thread path. Any broader selection creates a new shared workspace thread.
+                      Fresh 1:1 chats still open as direct threads, and each new start stays visible as its own thread in the workspace list. Any broader selection creates a new shared workspace thread.
                     </p>
                   </>
                 ) : (

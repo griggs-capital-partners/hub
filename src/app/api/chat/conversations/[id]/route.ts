@@ -3,7 +3,9 @@ import { auth } from "@/lib/auth";
 import {
   getConversationForUser,
   isMissingChatTablesError,
+  planConversationMembershipMutation,
   serializeConversation,
+  toConversationMembershipRecord,
 } from "@/lib/chat";
 import {
   normalizeConversationLlmThreadState,
@@ -23,14 +25,14 @@ export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await auth();
-  if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   try {
+    const session = await auth();
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const { id } = await params;
-    const conversation = await getConversationForUser(id, session.user.id);
+    const conversation = await getConversationForUser(id, session.user.id, { memberScope: "all" });
 
     if (!conversation) {
       return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
@@ -69,60 +71,37 @@ export async function PATCH(
       return NextResponse.json({ error: "No thread updates were requested" }, { status: 400 });
     }
 
-    const existingUserIds = new Set(conversation.members.flatMap((member) => (member.userId ? [member.userId] : [])));
-    const existingAgentIds = new Set(conversation.members.flatMap((member) => (member.agentId ? [member.agentId] : [])));
-    const nextUserIds = addUserIds.filter((userId) => userId !== session.user.id && !existingUserIds.has(userId));
-    const nextAgentIds = addAgentIds.filter((agentId) => !existingAgentIds.has(agentId));
-    const nextRemoveUserIds = removeUserIds.filter((userId) => userId !== session.user.id && existingUserIds.has(userId));
-    const nextRemoveAgentIds = removeAgentIds.filter((agentId) => existingAgentIds.has(agentId));
-    const nextName = requestedName === undefined ? conversation.name : requestedName;
-    const projectAssignmentChanged = projectId !== undefined && conversation.chatProjectId !== projectId;
-    const nameChanged = requestedName !== undefined && (conversation.name ?? null) !== nextName;
-
     if (removeUserIds.includes(session.user.id)) {
       return NextResponse.json({ error: "You cannot remove yourself from a thread yet" }, { status: 400 });
     }
 
-    const hasParticipantChanges =
-      nextUserIds.length + nextAgentIds.length + nextRemoveUserIds.length + nextRemoveAgentIds.length > 0;
-
-    const orderedExistingAgentIds = conversation.members.flatMap((member) => (member.agentId ? [member.agentId] : []));
-    const remainingOrderedAgentIds = orderedExistingAgentIds.filter((agentId) => !nextRemoveAgentIds.includes(agentId));
-    const nextOrderedAgentIds = [...remainingOrderedAgentIds, ...nextAgentIds];
     const currentThreadState = normalizeConversationLlmThreadState(conversation.llmThreadState);
-    let nextActiveAgentId = currentThreadState.activeAgentId;
+    const membershipPlan = planConversationMembershipMutation({
+      members: conversation.members.map(toConversationMembershipRecord),
+      currentUserId: session.user.id,
+      addUserIds,
+      addAgentIds,
+      removeUserIds,
+      removeAgentIds,
+      requestedActiveAgentId: activeAgentId,
+      currentPinnedActiveAgentId: currentThreadState.activeAgentId,
+    });
+    const nextName = requestedName === undefined ? conversation.name : requestedName;
+    const projectAssignmentChanged = projectId !== undefined && conversation.chatProjectId !== projectId;
+    const nameChanged = requestedName !== undefined && (conversation.name ?? null) !== nextName;
 
-    if (nextOrderedAgentIds.length === 0) {
-      nextActiveAgentId = null;
+    if (membershipPlan.invalidRequestedActiveAgentId) {
+      return NextResponse.json({ error: "Choose an agent who is already on this thread" }, { status: 400 });
     }
 
-    if (activeAgentId !== undefined) {
-      if (activeAgentId === null) {
-        nextActiveAgentId = null;
-      } else if (!nextOrderedAgentIds.includes(activeAgentId)) {
-        return NextResponse.json({ error: "Choose an agent who is already on this thread" }, { status: 400 });
-      } else {
-        nextActiveAgentId = activeAgentId;
-      }
-    } else if (nextActiveAgentId && !nextOrderedAgentIds.includes(nextActiveAgentId)) {
-      nextActiveAgentId = null;
-    }
-
-    const nextParticipantCount =
-      conversation.members.length
-      + nextUserIds.length
-      + nextAgentIds.length
-      - nextRemoveUserIds.length
-      - nextRemoveAgentIds.length;
-
-    if (hasParticipantChanges && nextParticipantCount < 2) {
+    if (membershipPlan.hasParticipantChanges && membershipPlan.nextParticipantCount < 2) {
       return NextResponse.json(
         { error: "A thread needs at least one other participant to stay active" },
         { status: 400 }
       );
     }
 
-    if (!hasParticipantChanges && activeAgentId === undefined && !projectAssignmentChanged && !nameChanged) {
+    if (!membershipPlan.hasParticipantChanges && activeAgentId === undefined && !projectAssignmentChanged && !nameChanged) {
       return NextResponse.json({ conversation: serializeConversation(conversation) });
     }
 
@@ -138,63 +117,111 @@ export async function PATCH(
     }
 
     const [users, agents] = await Promise.all([
-      prisma.user.findMany({
-        where: { id: { in: nextUserIds } },
-        select: { id: true },
-      }),
-      nextAgentIds.length > 0
+      membershipPlan.createUserIds.length > 0
+        ? prisma.user.findMany({
+            where: { id: { in: membershipPlan.createUserIds } },
+            select: { id: true },
+          })
+        : Promise.resolve([]),
+      membershipPlan.createAgentIds.length > 0
         ? prisma.aIAgent.findMany({
-            where: { id: { in: nextAgentIds } },
+            where: { id: { in: membershipPlan.createAgentIds } },
             select: { id: true },
           })
         : Promise.resolve([]),
     ]);
 
-    if (users.length !== nextUserIds.length) {
+    if (users.length !== membershipPlan.createUserIds.length) {
       return NextResponse.json({ error: "One or more selected teammates were not found" }, { status: 400 });
     }
 
-    if (agents.length !== nextAgentIds.length) {
+    if (agents.length !== membershipPlan.createAgentIds.length) {
       return NextResponse.json({ error: "One or more selected agents were not found" }, { status: 400 });
     }
 
     const shouldUpdateLlmThreadState =
       activeAgentId !== undefined
-      || currentThreadState.activeAgentId !== nextActiveAgentId;
+      || currentThreadState.activeAgentId !== membershipPlan.nextPinnedActiveAgentId;
+    const now = new Date();
 
-    await prisma.conversation.update({
-      where: { id: conversation.id },
-      data: {
-        type:
-          conversation.type === "direct" && (nextUserIds.length + nextAgentIds.length > 0)
-            ? "group"
-            : conversation.type,
-        ...(requestedName !== undefined ? { name: nextName } : {}),
-        updatedAt: new Date(),
-        ...(projectId !== undefined ? { chatProjectId: projectId } : {}),
-        ...(shouldUpdateLlmThreadState
-          ? {
-              llmThreadState: serializeConversationLlmThreadState({
-                ...currentThreadState,
-                activeAgentId: nextActiveAgentId,
-              }),
-            }
-          : {}),
-        members: {
-          ...(nextRemoveUserIds.length + nextRemoveAgentIds.length > 0
+    await prisma.$transaction(async (tx) => {
+      await tx.conversation.update({
+        where: { id: conversation.id },
+        data: {
+          type:
+            conversation.type === "direct" && membershipPlan.nextParticipantCount > 2
+              ? "group"
+              : conversation.type,
+          ...(requestedName !== undefined ? { name: nextName } : {}),
+          updatedAt: now,
+          ...(projectId !== undefined ? { chatProjectId: projectId } : {}),
+          ...(shouldUpdateLlmThreadState
             ? {
-                deleteMany: [
-                  ...nextRemoveUserIds.map((userId) => ({ userId })),
-                  ...nextRemoveAgentIds.map((agentId) => ({ agentId })),
-                ],
+                llmThreadState: serializeConversationLlmThreadState({
+                  ...currentThreadState,
+                  activeAgentId: membershipPlan.nextPinnedActiveAgentId,
+                }),
               }
             : {}),
-          create: [
-            ...nextUserIds.map((userId) => ({ userId })),
-            ...nextAgentIds.map((agentId) => ({ agentId })),
-          ],
         },
-      },
+      });
+
+      if (membershipPlan.removeUserMemberIds.length > 0) {
+        await tx.conversationMember.updateMany({
+          where: {
+            conversationId: conversation.id,
+            id: { in: membershipPlan.removeUserMemberIds },
+          },
+          data: { removedAt: now },
+        });
+      }
+
+      if (membershipPlan.removeAgentMemberIds.length > 0) {
+        await tx.conversationMember.updateMany({
+          where: {
+            conversationId: conversation.id,
+            id: { in: membershipPlan.removeAgentMemberIds },
+          },
+          data: { removedAt: now },
+        });
+      }
+
+      if (membershipPlan.reactivateUserMemberIds.length > 0) {
+        await tx.conversationMember.updateMany({
+          where: {
+            conversationId: conversation.id,
+            id: { in: membershipPlan.reactivateUserMemberIds },
+          },
+          data: { removedAt: null },
+        });
+      }
+
+      if (membershipPlan.reactivateAgentMemberIds.length > 0) {
+        await tx.conversationMember.updateMany({
+          where: {
+            conversationId: conversation.id,
+            id: { in: membershipPlan.reactivateAgentMemberIds },
+          },
+          data: { removedAt: null },
+        });
+      }
+
+      const createMembers = [
+        ...membershipPlan.createUserIds.map((userId) => ({
+          conversationId: conversation.id,
+          userId,
+        })),
+        ...membershipPlan.createAgentIds.map((agentId) => ({
+          conversationId: conversation.id,
+          agentId,
+        })),
+      ];
+
+      if (createMembers.length > 0) {
+        await tx.conversationMember.createMany({
+          data: createMembers,
+        });
+      }
     });
 
     const updatedConversation = await getConversationForUser(conversation.id, session.user.id);

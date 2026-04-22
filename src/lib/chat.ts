@@ -7,51 +7,53 @@ import {
   reconcileConversationLlmThreadState,
 } from "@/lib/agent-llm-config";
 
-const conversationInclude = {
+const activeConversationMemberWhere = Prisma.validator<Prisma.ConversationMemberWhereInput>()({
+  removedAt: null,
+});
+
+const conversationMemberInclude = {
+  user: {
+    select: {
+      id: true,
+      name: true,
+      displayName: true,
+      email: true,
+      image: true,
+      role: true,
+      lastSeen: true,
+    },
+  },
+  agent: {
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      role: true,
+      persona: true,
+      duties: true,
+      avatar: true,
+      status: true,
+      llmConfig: true,
+      llmEndpointUrl: true,
+      llmUsername: true,
+      llmPassword: true,
+      llmModel: true,
+      llmThinkingMode: true,
+      disabledTools: true,
+      abilities: true,
+      llmStatus: true,
+      llmLastCheckedAt: true,
+      llmLastError: true,
+    },
+  },
+} as const;
+
+const conversationBaseInclude = {
   chatProject: {
     select: {
       id: true,
       name: true,
     },
-  },
-  members: {
-    include: {
-      user: {
-        select: {
-          id: true,
-          name: true,
-          displayName: true,
-          email: true,
-          image: true,
-          role: true,
-          lastSeen: true,
-        },
-      },
-      agent: {
-        select: {
-          id: true,
-          name: true,
-          description: true,
-          role: true,
-          persona: true,
-          duties: true,
-          avatar: true,
-          status: true,
-          llmConfig: true,
-          llmEndpointUrl: true,
-          llmUsername: true,
-          llmPassword: true,
-          llmModel: true,
-          llmThinkingMode: true,
-          disabledTools: true,
-          abilities: true,
-          llmStatus: true,
-          llmLastCheckedAt: true,
-          llmLastError: true,
-        },
-      },
-    },
-    orderBy: { joinedAt: "asc" as const },
   },
   messages: {
     take: 1,
@@ -90,6 +92,23 @@ const conversationInclude = {
   },
 } as const;
 
+const activeConversationInclude = Prisma.validator<Prisma.ConversationInclude>()({
+  ...conversationBaseInclude,
+  members: {
+    where: activeConversationMemberWhere,
+    include: conversationMemberInclude,
+    orderBy: { joinedAt: "asc" },
+  },
+});
+
+const allConversationInclude = Prisma.validator<Prisma.ConversationInclude>()({
+  ...conversationBaseInclude,
+  members: {
+    include: conversationMemberInclude,
+    orderBy: { joinedAt: "asc" },
+  },
+});
+
 const messageInclude = {
   senderUser: {
     select: {
@@ -111,31 +130,308 @@ const messageInclude = {
 const SEARCH_RESULT_LIMIT = 50;
 
 type ConversationWithRelations = Prisma.ConversationGetPayload<{
-  include: typeof conversationInclude;
+  include: typeof allConversationInclude;
 }>;
+
+type ConversationMemberWithRelations = ConversationWithRelations["members"][number];
+
+export type ConversationMemberScope = "active" | "all";
+
+export type ConversationMembershipRecord = {
+  id: string;
+  conversationId: string;
+  userId: string | null;
+  agentId: string | null;
+  joinedAt: Date;
+  removedAt: Date | null;
+};
+
+export type ConversationMembershipMutationPlan = {
+  createUserIds: string[];
+  reactivateUserMemberIds: string[];
+  removeUserMemberIds: string[];
+  createAgentIds: string[];
+  reactivateAgentMemberIds: string[];
+  removeAgentMemberIds: string[];
+  nextActiveUserIds: string[];
+  nextActiveAgentIds: string[];
+  nextParticipantCount: number;
+  nextPinnedActiveAgentId: string | null;
+  invalidRequestedActiveAgentId: boolean;
+  hasParticipantChanges: boolean;
+};
 
 type ChatProjectSummary = {
   id: string;
   name: string;
 };
 
-function resolveConversationAgentMemberInternal(
-  conversation: ConversationWithRelations
-) {
-  const storedThreadLlmState = normalizeConversationLlmThreadState(conversation.llmThreadState);
-  const agentMembers = conversation.members.filter(
-    (member): member is ConversationWithRelations["members"][number] & { agent: NonNullable<ConversationWithRelations["members"][number]["agent"]> } =>
-      Boolean(member.agent)
-  );
+function sortConversationMemberships<T extends Pick<ConversationMembershipRecord, "joinedAt">>(members: readonly T[]) {
+  return [...members].sort((left, right) => left.joinedAt.getTime() - right.joinedAt.getTime());
+}
 
-  if (storedThreadLlmState.activeAgentId) {
-    const explicitAgentMember = agentMembers.find((member) => member.agent.id === storedThreadLlmState.activeAgentId);
-    if (explicitAgentMember) {
-      return explicitAgentMember;
+export function isConversationMembershipActive(
+  member: Pick<ConversationMembershipRecord, "removedAt">
+) {
+  return member.removedAt === null;
+}
+
+export function filterActiveConversationMemberships<T extends { removedAt: Date | null }>(
+  members: readonly T[]
+) {
+  return members.filter((member): member is T & { removedAt: null } => member.removedAt === null);
+}
+
+export function toConversationMembershipRecord(
+  member: Pick<ConversationMemberWithRelations, "id" | "conversationId" | "userId" | "agentId" | "joinedAt" | "removedAt">
+): ConversationMembershipRecord {
+  return {
+    id: member.id,
+    conversationId: member.conversationId,
+    userId: member.userId,
+    agentId: member.agentId,
+    joinedAt: member.joinedAt,
+    removedAt: member.removedAt,
+  };
+}
+
+export function planConversationMembershipMutation(params: {
+  members: ConversationMembershipRecord[];
+  currentUserId: string;
+  addUserIds: string[];
+  addAgentIds: string[];
+  removeUserIds: string[];
+  removeAgentIds: string[];
+  requestedActiveAgentId?: string | null;
+  currentPinnedActiveAgentId: string | null;
+}): ConversationMembershipMutationPlan {
+  const members = sortConversationMemberships(params.members);
+  const activeUserMembershipById = new Map<string, ConversationMembershipRecord>();
+  const removedUserMembershipById = new Map<string, ConversationMembershipRecord>();
+  const activeAgentMembershipById = new Map<string, ConversationMembershipRecord>();
+  const removedAgentMembershipById = new Map<string, ConversationMembershipRecord>();
+
+  for (const member of members) {
+    if (member.userId) {
+      if (isConversationMembershipActive(member)) {
+        activeUserMembershipById.set(member.userId, member);
+      } else {
+        removedUserMembershipById.set(member.userId, member);
+      }
+    }
+
+    if (member.agentId) {
+      if (isConversationMembershipActive(member)) {
+        activeAgentMembershipById.set(member.agentId, member);
+      } else {
+        removedAgentMembershipById.set(member.agentId, member);
+      }
     }
   }
 
-  return agentMembers[0] ?? null;
+  const createUserIds: string[] = [];
+  const reactivateUserMemberIds: string[] = [];
+  const reactivateUserIds = new Set<string>();
+  const removeUserMemberIds: string[] = [];
+  const removeUserIds = new Set<string>();
+  const createAgentIds: string[] = [];
+  const reactivateAgentMemberIds: string[] = [];
+  const reactivateAgentIds = new Set<string>();
+  const removeAgentMemberIds: string[] = [];
+  const removeAgentIds = new Set<string>();
+
+  for (const userId of Array.from(new Set(params.addUserIds))) {
+    if (!userId || userId === params.currentUserId || activeUserMembershipById.has(userId)) {
+      continue;
+    }
+
+    const removedMembership = removedUserMembershipById.get(userId);
+    if (removedMembership) {
+      reactivateUserMemberIds.push(removedMembership.id);
+      reactivateUserIds.add(userId);
+      continue;
+    }
+
+    createUserIds.push(userId);
+  }
+
+  for (const agentId of Array.from(new Set(params.addAgentIds))) {
+    if (!agentId || activeAgentMembershipById.has(agentId)) {
+      continue;
+    }
+
+    const removedMembership = removedAgentMembershipById.get(agentId);
+    if (removedMembership) {
+      reactivateAgentMemberIds.push(removedMembership.id);
+      reactivateAgentIds.add(agentId);
+      continue;
+    }
+
+    createAgentIds.push(agentId);
+  }
+
+  for (const userId of Array.from(new Set(params.removeUserIds))) {
+    if (!userId || userId === params.currentUserId) {
+      continue;
+    }
+
+    const activeMembership = activeUserMembershipById.get(userId);
+    if (!activeMembership) {
+      continue;
+    }
+
+    removeUserMemberIds.push(activeMembership.id);
+    removeUserIds.add(userId);
+  }
+
+  for (const agentId of Array.from(new Set(params.removeAgentIds))) {
+    if (!agentId) {
+      continue;
+    }
+
+    const activeMembership = activeAgentMembershipById.get(agentId);
+    if (!activeMembership) {
+      continue;
+    }
+
+    removeAgentMemberIds.push(activeMembership.id);
+    removeAgentIds.add(agentId);
+  }
+
+  const nextActiveUserIds = [
+    ...members.flatMap((member) => {
+      if (!member.userId) return [];
+
+      const willBeActive = isConversationMembershipActive(member)
+        ? !removeUserIds.has(member.userId)
+        : reactivateUserIds.has(member.userId);
+
+      return willBeActive ? [member.userId] : [];
+    }),
+    ...createUserIds,
+  ];
+
+  const nextActiveAgentIds = [
+    ...members.flatMap((member) => {
+      if (!member.agentId) return [];
+
+      const willBeActive = isConversationMembershipActive(member)
+        ? !removeAgentIds.has(member.agentId)
+        : reactivateAgentIds.has(member.agentId);
+
+      return willBeActive ? [member.agentId] : [];
+    }),
+    ...createAgentIds,
+  ];
+
+  const invalidRequestedActiveAgentId = params.requestedActiveAgentId !== undefined
+    && params.requestedActiveAgentId !== null
+    && !nextActiveAgentIds.includes(params.requestedActiveAgentId);
+
+  let nextPinnedActiveAgentId = params.currentPinnedActiveAgentId;
+  if (nextActiveAgentIds.length === 0) {
+    nextPinnedActiveAgentId = null;
+  }
+
+  if (!invalidRequestedActiveAgentId && params.requestedActiveAgentId !== undefined) {
+    nextPinnedActiveAgentId = params.requestedActiveAgentId;
+  } else if (nextPinnedActiveAgentId && !nextActiveAgentIds.includes(nextPinnedActiveAgentId)) {
+    nextPinnedActiveAgentId = null;
+  }
+
+  return {
+    createUserIds,
+    reactivateUserMemberIds,
+    removeUserMemberIds,
+    createAgentIds,
+    reactivateAgentMemberIds,
+    removeAgentMemberIds,
+    nextActiveUserIds,
+    nextActiveAgentIds,
+    nextParticipantCount: nextActiveUserIds.length + nextActiveAgentIds.length,
+    nextPinnedActiveAgentId,
+    invalidRequestedActiveAgentId,
+    hasParticipantChanges:
+      createUserIds.length
+      + reactivateUserMemberIds.length
+      + removeUserMemberIds.length
+      + createAgentIds.length
+      + reactivateAgentMemberIds.length
+      + removeAgentMemberIds.length
+      > 0,
+  };
+}
+
+function resolveConversationAgentMemberInternal(
+  conversation: ConversationWithRelations
+) {
+  return resolveConversationRuntimeState(conversation).activeAgentMember;
+}
+
+function normalizeConversationRuntimeThreadLlmState(params: {
+  activeAgentMember: (ConversationMemberWithRelations & {
+    removedAt: null;
+    agent: NonNullable<ConversationMemberWithRelations["agent"]>;
+  }) | null;
+  storedThreadLlmState: ReturnType<typeof normalizeConversationLlmThreadState>;
+}) {
+  const threadLlmState = params.activeAgentMember
+    ? reconcileConversationLlmThreadState(
+        normalizeAgentLlmConfig(params.activeAgentMember.agent.llmConfig, {
+          llmEndpointUrl: params.activeAgentMember.agent.llmEndpointUrl,
+          llmUsername: params.activeAgentMember.agent.llmUsername,
+          llmPassword: params.activeAgentMember.agent.llmPassword,
+          llmModel: params.activeAgentMember.agent.llmModel,
+          llmThinkingMode: params.activeAgentMember.agent.llmThinkingMode,
+        }),
+        params.storedThreadLlmState
+      )
+    : params.storedThreadLlmState;
+
+  return {
+    ...threadLlmState,
+    activeAgentId:
+      threadLlmState.activeAgentId && params.activeAgentMember?.agent.id === threadLlmState.activeAgentId
+        ? threadLlmState.activeAgentId
+        : null,
+  };
+}
+
+export function resolveConversationRuntimeState(
+  conversation: ConversationWithRelations
+) {
+  const activeMembers = filterActiveConversationMemberships(conversation.members);
+  const activeUserIds = activeMembers.flatMap((member) => (member.userId ? [member.userId] : []));
+  const activeAgentMembers = activeMembers.filter(
+    (
+      member
+    ): member is ConversationMemberWithRelations & {
+      removedAt: null;
+      agent: NonNullable<ConversationMemberWithRelations["agent"]>;
+    } => member.agent !== null
+  );
+  const activeAgentIds = activeAgentMembers.map((member) => member.agent.id);
+  const storedThreadLlmState = normalizeConversationLlmThreadState(conversation.llmThreadState);
+  const pinnedActiveAgentId = storedThreadLlmState.activeAgentId;
+  const activeAgentMember = pinnedActiveAgentId
+    ? activeAgentMembers.find((member) => member.agent.id === pinnedActiveAgentId) ?? activeAgentMembers[0] ?? null
+    : activeAgentMembers[0] ?? null;
+  const threadLlmState = normalizeConversationRuntimeThreadLlmState({
+    activeAgentMember,
+    storedThreadLlmState,
+  });
+
+  return {
+    activeMembers,
+    activeUserIds,
+    activeAgentIds,
+    activeAgentMember,
+    storedThreadLlmState,
+    threadLlmState,
+    hadInactivePinnedActiveAgent: Boolean(
+      pinnedActiveAgentId && !activeAgentIds.includes(pinnedActiveAgentId)
+    ),
+  };
 }
 
 function displayUserName(user: {
@@ -147,8 +443,15 @@ function displayUserName(user: {
 }
 
 function serializeConversationMember(
-  member: ConversationWithRelations["members"][number]
+  member: ConversationMemberWithRelations
 ) {
+  const membership = {
+    id: member.id,
+    joinedAt: member.joinedAt.toISOString(),
+    removedAt: member.removedAt?.toISOString() ?? null,
+    isActive: isConversationMembershipActive(member),
+  };
+
   if (member.user) {
     return {
       kind: "user" as const,
@@ -158,6 +461,7 @@ function serializeConversationMember(
       image: member.user.image,
       role: member.user.role,
       lastSeen: member.user.lastSeen?.toISOString() ?? null,
+      membership,
     };
   }
 
@@ -177,6 +481,7 @@ function serializeConversationMember(
     llmStatus: member.agent.llmStatus,
     llmLastCheckedAt: member.agent.llmLastCheckedAt?.toISOString() ?? null,
     llmLastError: member.agent.llmLastError,
+    membership,
   };
 }
 
@@ -232,27 +537,7 @@ function serializeConversationDocument(
 export function serializeConversation(
   conversation: ConversationWithRelations
 ) {
-  const activeAgentMember = resolveConversationAgentMemberInternal(conversation)?.agent ?? null;
-  const storedThreadLlmState = normalizeConversationLlmThreadState(conversation.llmThreadState);
-  const threadLlmState = activeAgentMember
-    ? reconcileConversationLlmThreadState(
-        normalizeAgentLlmConfig(activeAgentMember.llmConfig, {
-          llmEndpointUrl: activeAgentMember.llmEndpointUrl,
-          llmUsername: activeAgentMember.llmUsername,
-          llmPassword: activeAgentMember.llmPassword,
-          llmModel: activeAgentMember.llmModel,
-          llmThinkingMode: activeAgentMember.llmThinkingMode,
-        }),
-        storedThreadLlmState
-      )
-    : storedThreadLlmState;
-  const publicThreadLlmState = {
-    ...threadLlmState,
-    activeAgentId:
-      threadLlmState.activeAgentId && activeAgentMember?.id === threadLlmState.activeAgentId
-        ? threadLlmState.activeAgentId
-        : null,
-  };
+  const runtimeState = resolveConversationRuntimeState(conversation);
 
   return {
     id: conversation.id,
@@ -264,14 +549,31 @@ export function serializeConversation(
           name: conversation.chatProject.name,
         }
       : null,
-    llmThread: getPublicConversationLlmState(publicThreadLlmState),
+    llmThread: getPublicConversationLlmState(runtimeState.threadLlmState),
     createdAt: conversation.createdAt.toISOString(),
     updatedAt: conversation.updatedAt.toISOString(),
-    members: conversation.members
+    members: runtimeState.activeMembers
       .map(serializeConversationMember)
       .filter((member): member is NonNullable<typeof member> => member !== null),
     latestMessage: serializeLatestMessage(conversation.messages[0]),
     documents: conversation.documents.map(serializeConversationDocument),
+  };
+}
+
+export function serializeConversationActiveMembership(
+  conversation: ConversationWithRelations
+) {
+  const runtimeState = resolveConversationRuntimeState(conversation);
+
+  return {
+    activeCount: runtimeState.activeMembers.length,
+    activeUserCount: runtimeState.activeUserIds.length,
+    activeAgentCount: runtimeState.activeAgentIds.length,
+    activeAgentId: runtimeState.activeAgentMember?.agent.id ?? null,
+    hadInactivePinnedActiveAgent: runtimeState.hadInactivePinnedActiveAgent,
+    participants: runtimeState.activeMembers
+      .map(serializeConversationMember)
+      .filter((member): member is NonNullable<typeof member> => member !== null),
   };
 }
 
@@ -399,10 +701,10 @@ export async function listConversationsForUser(userId: string) {
     const conversations = await prisma.conversation.findMany({
       where: {
         members: {
-          some: { userId },
+          some: { userId, removedAt: null },
         },
       },
-      include: conversationInclude,
+      include: activeConversationInclude,
       orderBy: [{ updatedAt: "desc" }],
     });
 
@@ -416,16 +718,20 @@ export async function listConversationsForUser(userId: string) {
   }
 }
 
-export async function getConversationForUser(conversationId: string, userId: string) {
+export async function getConversationForUser(
+  conversationId: string,
+  userId: string,
+  options: { memberScope?: ConversationMemberScope } = {}
+) {
   try {
     return await prisma.conversation.findFirst({
       where: {
         id: conversationId,
         members: {
-          some: { userId },
+          some: { userId, removedAt: null },
         },
       },
-      include: conversationInclude,
+      include: options.memberScope === "all" ? allConversationInclude : activeConversationInclude,
     });
   } catch (error) {
     if (isMissingChatTablesError(error)) {
@@ -483,10 +789,10 @@ export async function findDirectConversation(params: {
       where: {
         type: "direct",
         members: {
-          some: { userId: params.currentUserId },
+          some: { userId: params.currentUserId, removedAt: null },
         },
       },
-      include: conversationInclude,
+      include: activeConversationInclude,
     });
 
     return conversations.find((conversation) => {
@@ -541,14 +847,31 @@ export function isMissingChatTablesError(error: unknown) {
       "public.conversation_documents",
     ].includes(prismaError.meta.table);
 
+  const missingColumnName =
+    typeof prismaError.meta?.column === "string"
+      ? prismaError.meta.column
+      : null;
+  const normalizedMissingColumn =
+    missingColumnName && missingColumnName.includes(".")
+      ? missingColumnName.slice(missingColumnName.lastIndexOf(".") + 1)
+      : missingColumnName;
   const missingChatColumn = prismaError.code === "P2022"
-    && typeof prismaError.meta?.column === "string"
-    && [
-      "conversations.chatProjectId",
-      "public.conversations.chatProjectId",
-      "conversations.repoId",
-      "public.conversations.repoId",
-    ].includes(prismaError.meta.column);
+    && (
+      [
+        "conversations.chatProjectId",
+        "public.conversations.chatProjectId",
+        "conversations.repoId",
+        "public.conversations.repoId",
+        "conversation_members.removedAt",
+        "public.conversation_members.removedAt",
+        "ConversationMember.removedAt",
+      ].includes(missingColumnName ?? "")
+      || [
+        "chatProjectId",
+        "repoId",
+        "removedAt",
+      ].includes(normalizedMissingColumn ?? "")
+    );
 
   return missingChatTable || missingChatColumn;
 }
@@ -564,7 +887,7 @@ export async function searchConversationsForUser(userId: string, rawQuery: strin
     const conversations = await prisma.conversation.findMany({
       where: {
         members: {
-          some: { userId },
+          some: { userId, removedAt: null },
         },
         OR: [
           {
@@ -586,6 +909,7 @@ export async function searchConversationsForUser(userId: string, rawQuery: strin
           {
             members: {
               some: {
+                removedAt: null,
                 OR: [
                   {
                     user: {
@@ -653,7 +977,7 @@ export async function searchConversationsForUser(userId: string, rawQuery: strin
           },
         ],
       },
-      include: conversationInclude,
+      include: activeConversationInclude,
       orderBy: [{ updatedAt: "desc" }],
       take: SEARCH_RESULT_LIMIT,
     });

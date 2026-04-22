@@ -13,9 +13,7 @@ import {
   applyResolvedThreadModel,
   buildExecutionTargetRuntimeConfig,
   normalizeAgentLlmConfig,
-  normalizeConversationLlmThreadState,
   planConversationLlmSelection,
-  reconcileConversationLlmThreadState,
   serializeConversationLlmThreadState,
 } from "@/lib/agent-llm-config";
 import { agentChatTools, executeAgentTool } from "@/lib/agent-tools";
@@ -24,7 +22,7 @@ import {
   getConversationForUser,
   isMissingChatTablesError,
   listMessagesForConversation,
-  resolveConversationAgentMember,
+  resolveConversationRuntimeState,
   serializeConversation,
 } from "@/lib/chat";
 import type { LlmMessage } from "@/lib/agent-llm";
@@ -237,8 +235,8 @@ export async function POST(
       },
     });
 
-    const agentMember = resolveConversationAgentMember(conversation);
-
+    const runtimeState = resolveConversationRuntimeState(conversation);
+    const agentMember = runtimeState.activeAgentMember;
     const agent = agentMember?.agent ?? null;
 
     if (stream && agent) {
@@ -286,10 +284,7 @@ export async function POST(
               }),
             ]);
             const agentConfig = normalizeAgentExecutionConfig(agent);
-            const currentThreadLlmState = reconcileConversationLlmThreadState(
-              agentConfig,
-              normalizeConversationLlmThreadState(conversation.llmThreadState)
-            );
+            const currentThreadLlmState = runtimeState.threadLlmState;
             const threadLlmPlan = planConversationLlmSelection({
               config: agentConfig,
               currentState: currentThreadLlmState,
@@ -585,10 +580,7 @@ export async function POST(
 
       let agentReply: string;
       const agentConfig = normalizeAgentExecutionConfig(agent);
-      const currentThreadLlmState = reconcileConversationLlmThreadState(
-        agentConfig,
-        normalizeConversationLlmThreadState(conversation.llmThreadState)
-      );
+      const currentThreadLlmState = runtimeState.threadLlmState;
       const threadLlmPlan = planConversationLlmSelection({
         config: agentConfig,
         currentState: currentThreadLlmState,
@@ -731,7 +723,11 @@ export async function POST(
     await prisma.conversation.update({
       where: { id: conversation.id },
       data: {
-        llmThreadState: serializeConversationLlmThreadState(normalizeConversationLlmThreadState("")),
+        ...(agent
+          ? {}
+          : {
+              llmThreadState: serializeConversationLlmThreadState(runtimeState.threadLlmState),
+            }),
         updatedAt: new Date(),
       },
     });

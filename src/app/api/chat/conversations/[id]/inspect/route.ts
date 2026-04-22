@@ -7,13 +7,16 @@ import {
   getPublicConversationLlmState,
   hasAgentLlmConnection,
   normalizeAgentLlmConfig,
-  normalizeConversationLlmThreadState,
-  reconcileConversationLlmThreadState,
   resolveThreadExecutionTarget,
   serializeConversationLlmThreadState,
 } from "@/lib/agent-llm-config";
 import { buildOrgContext } from "@/lib/agent-context";
-import { getConversationForUser, isMissingChatTablesError, resolveConversationAgentMember } from "@/lib/chat";
+import {
+  getConversationForUser,
+  isMissingChatTablesError,
+  resolveConversationRuntimeState,
+  serializeConversationActiveMembership,
+} from "@/lib/chat";
 import { resolveConversationContextBundle } from "@/lib/conversation-context";
 import { prisma } from "@/lib/prisma";
 
@@ -61,8 +64,9 @@ export async function GET(
       return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
     }
 
-    const agentMember = resolveConversationAgentMember(conversation);
-
+    const runtimeState = resolveConversationRuntimeState(conversation);
+    const membership = serializeConversationActiveMembership(conversation);
+    const agentMember = runtimeState.activeAgentMember;
     const agent = agentMember?.agent ?? null;
 
     if (!agent) {
@@ -96,8 +100,8 @@ export async function GET(
       llmModel: agent.llmModel,
       llmThinkingMode: agent.llmThinkingMode,
     });
-    const storedThreadLlmState = normalizeConversationLlmThreadState(conversation.llmThreadState);
-    const threadLlmState = reconcileConversationLlmThreadState(llmConfig, storedThreadLlmState);
+    const storedThreadLlmState = runtimeState.storedThreadLlmState;
+    const threadLlmState = runtimeState.threadLlmState;
     const threadExecutionTarget = resolveThreadExecutionTarget(llmConfig, threadLlmState);
     const shouldPersistThreadLlmState =
       serializeConversationLlmThreadState(threadLlmState) !== serializeConversationLlmThreadState(storedThreadLlmState);
@@ -169,6 +173,7 @@ export async function GET(
         allowUserOverride: llmConfig.routing.allowUserOverride,
         allowEscalation: llmConfig.routing.allowEscalation,
       },
+      membership,
       context: {
         estimatedTokens: runtimePreview.estimatedTokens,
         estimatedSystemPromptTokens: runtimePreview.estimatedSystemPromptTokens,

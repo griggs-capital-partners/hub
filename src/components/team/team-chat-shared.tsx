@@ -58,6 +58,12 @@ export interface ConversationMemberSummary {
   llmStatus?: string;
   llmLastCheckedAt?: string | null;
   llmLastError?: string | null;
+  membership?: {
+    id: string;
+    joinedAt: string;
+    removedAt: string | null;
+    isActive: boolean;
+  };
 }
 
 export interface ChatProjectOption {
@@ -217,6 +223,14 @@ export interface AgentInspectorData {
     autoRoute: boolean;
     allowUserOverride: boolean;
     allowEscalation: boolean;
+  };
+  membership?: {
+    activeCount: number;
+    activeUserCount: number;
+    activeAgentCount: number;
+    activeAgentId: string | null;
+    hadInactivePinnedActiveAgent: boolean;
+    participants: ConversationMemberSummary[];
   };
   context: {
     estimatedTokens: number;

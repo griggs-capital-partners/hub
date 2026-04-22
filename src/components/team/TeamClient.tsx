@@ -1,7 +1,7 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
@@ -51,6 +51,7 @@ import {
   getMemberDisplayName,
   getOnlineStatus,
 } from "@/components/team/team-chat-shared";
+import { buildDirectConversationShortcutMaps } from "@/components/team/team-chat-thread-shortcuts";
 import { validateConversationDocument } from "@/lib/conversation-documents";
 
 type Props = {
@@ -598,6 +599,7 @@ export function TeamClient({
   const [agentInspector, setAgentInspector] = useState<AgentInspectorData | null>(null);
   const [agentInspectorLoading, setAgentInspectorLoading] = useState(false);
   const [agentInspectorError, setAgentInspectorError] = useState<string | null>(null);
+  const [agentInspectorErrorConversationId, setAgentInspectorErrorConversationId] = useState<string | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [copiedInspectorView, setCopiedInspectorView] = useState<"pretty" | "json" | null>(null);
   const [showInvite, setShowInvite] = useState(false);
@@ -619,6 +621,7 @@ export function TeamClient({
   const isAtBottomRef = useRef(true);
   const userScrolledUpRef = useRef(false);
   const conversationsRef = useRef(conversations);
+  const selectedConversationIdRef = useRef<string | null>(selectedConversationId);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showThreadStarter, setShowThreadStarter] = useState(initialConversations.length === 0);
   const [threadDrawerOpen, setThreadDrawerOpen] = useState(false);
@@ -632,6 +635,136 @@ export function TeamClient({
   const routeAgentId = searchParams.get("agent");
 
   conversationsRef.current = conversations;
+  selectedConversationIdRef.current = selectedConversationId;
+
+  const isConversationStillSelected = useCallback((conversationId: string | null) => {
+    return selectedConversationIdRef.current === conversationId;
+  }, []);
+
+  const replaceMessagesForConversation = useCallback((
+    conversationId: string | null,
+    nextMessages: ChatMessage[]
+  ) => {
+    if (!isConversationStillSelected(conversationId)) {
+      return;
+    }
+
+    setMessages((current) => (
+      isConversationStillSelected(conversationId)
+        ? nextMessages
+        : current
+    ));
+  }, [isConversationStillSelected]);
+
+  const updateMessagesForConversation = useCallback((
+    conversationId: string | null,
+    updater: (current: ChatMessage[]) => ChatMessage[] 
+  ) => {
+    if (!isConversationStillSelected(conversationId)) {
+      return;
+    }
+
+    setMessages((current) => (
+      isConversationStillSelected(conversationId)
+        ? updater(current)
+        : current
+    ));
+  }, [isConversationStillSelected]);
+
+  const clearConversationInspectorState = useCallback(() => {
+    setAgentInspector(null);
+    setAgentInspectorError(null);
+    setAgentInspectorErrorConversationId(null);
+    setAgentInspectorLoading(false);
+  }, []);
+
+  const startInspectorRequestForConversation = useCallback((conversationId: string) => {
+    if (!isConversationStillSelected(conversationId)) {
+      return false;
+    }
+
+    setAgentInspectorLoading((current) => (
+      isConversationStillSelected(conversationId)
+        ? true
+        : current
+    ));
+    setAgentInspectorError((current) => (
+      isConversationStillSelected(conversationId)
+        ? null
+        : current
+    ));
+    setAgentInspectorErrorConversationId((current) => (
+      isConversationStillSelected(conversationId)
+        ? null
+        : current
+    ));
+
+    return true;
+  }, [isConversationStillSelected]);
+
+  const applyInspectorForConversation = useCallback((
+    conversationId: string,
+    inspectorData: AgentInspectorData
+  ) => {
+    if (!isConversationStillSelected(conversationId) || inspectorData.conversationId !== conversationId) {
+      return false;
+    }
+
+    setAgentInspector((current) => (
+      isConversationStillSelected(conversationId)
+        ? inspectorData
+        : current
+    ));
+    setAgentInspectorError((current) => (
+      isConversationStillSelected(conversationId)
+        ? null
+        : current
+    ));
+    setAgentInspectorErrorConversationId((current) => (
+      isConversationStillSelected(conversationId)
+        ? null
+        : current
+    ));
+
+    return true;
+  }, [isConversationStillSelected]);
+
+  const setInspectorErrorForConversation = useCallback((
+    conversationId: string,
+    errorMessage: string
+  ) => {
+    if (!isConversationStillSelected(conversationId)) {
+      return;
+    }
+
+    setAgentInspector((current) => (
+      isConversationStillSelected(conversationId)
+        ? null
+        : current
+    ));
+    setAgentInspectorError((current) => (
+      isConversationStillSelected(conversationId)
+        ? errorMessage
+        : current
+    ));
+    setAgentInspectorErrorConversationId((current) => (
+      isConversationStillSelected(conversationId)
+        ? conversationId
+        : current
+    ));
+  }, [isConversationStillSelected]);
+
+  const finishInspectorRequestForConversation = useCallback((conversationId: string) => {
+    if (!isConversationStillSelected(conversationId)) {
+      return;
+    }
+
+    setAgentInspectorLoading((current) => (
+      isConversationStillSelected(conversationId)
+        ? false
+        : current
+    ));
+  }, [isConversationStillSelected]);
 
   function handleChatScroll() {
     const el = chatScrollRef.current;
@@ -1037,20 +1170,21 @@ export function TeamClient({
   const renderedMessages = useMemo(() => dedupeChatMessages(messages), [messages]);
 
   useEffect(() => {
+    const conversationId = selectedConversationId;
+
     async function loadMessages() {
-      if (!selectedConversationId) {
-        setMessages([]);
+      if (!conversationId) {
         return;
       }
 
       setLoadingMessages(true);
       try {
-        const response = await fetch(`/api/chat/conversations/${selectedConversationId}/messages`);
+        const response = await fetch(`/api/chat/conversations/${conversationId}/messages`);
         const data = await response.json();
         if (data.messages) {
-          setMessages(data.messages);
+          replaceMessagesForConversation(conversationId, data.messages);
         }
-        if (data.conversation) {
+        if (data.conversation && isConversationStillSelected(conversationId)) {
           setConversations((current) => {
             const others = current.filter((conversation) => conversation.id !== data.conversation.id);
             return [data.conversation, ...others].sort(
@@ -1060,22 +1194,30 @@ export function TeamClient({
         }
       } catch {
       } finally {
-        setLoadingMessages(false);
+        if (isConversationStillSelected(conversationId)) {
+          setLoadingMessages(false);
+        }
       }
     }
 
+    if (!conversationId) {
+      setLoadingMessages(false);
+      return;
+    }
+
     loadMessages();
-  }, [selectedConversationId]);
+  }, [isConversationStillSelected, replaceMessagesForConversation, selectedConversationId]);
 
   useEffect(() => {
-    if (!selectedConversationId || hasStreamingAgentMessage) return;
+    const conversationId = selectedConversationId;
+    if (!conversationId || hasStreamingAgentMessage) return;
 
     async function pollMessages() {
       try {
-        const response = await fetch(`/api/chat/conversations/${selectedConversationId}/messages`);
+        const response = await fetch(`/api/chat/conversations/${conversationId}/messages`);
         const data = await response.json();
         if (data.messages) {
-          setMessages(data.messages);
+          replaceMessagesForConversation(conversationId, data.messages);
         }
       } catch {
       }
@@ -1083,7 +1225,7 @@ export function TeamClient({
 
     const interval = setInterval(pollMessages, 3_000);
     return () => clearInterval(interval);
-  }, [selectedConversationId, hasStreamingAgentMessage]);
+  }, [hasStreamingAgentMessage, replaceMessagesForConversation, selectedConversationId]);
 
   useEffect(() => {
     if (!userScrolledUpRef.current && isAtBottomRef.current) {
@@ -1097,7 +1239,12 @@ export function TeamClient({
     }
   }, [selectedConversationId]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    setMessages([]);
+  }, [selectedConversationId]);
+
+  useLayoutEffect(() => {
+    clearConversationInspectorState();
     isAtBottomRef.current = true;
     userScrolledUpRef.current = false;
     bottomRef.current?.scrollIntoView({ behavior: "instant" });
@@ -1111,74 +1258,123 @@ export function TeamClient({
     setClearingActiveAgentPin(false);
     setRemovingDocumentId(null);
     setMovingProject(false);
-  }, [selectedConversationId]);
+  }, [clearConversationInspectorState, selectedConversationId]);
+
+  const refreshConversationInspector = useCallback(async (conversationId: string) => {
+    if (!isConversationStillSelected(conversationId)) {
+      return;
+    }
+
+    const convo = conversationsRef.current.find((conversation) => conversation.id === conversationId);
+    const isAgentConversation = convo?.members.some((member) => member.kind === "agent");
+
+    if (!isAgentConversation) {
+      if (isConversationStillSelected(conversationId)) {
+        clearConversationInspectorState();
+      }
+      return;
+    }
+
+    if (!startInspectorRequestForConversation(conversationId)) {
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/chat/conversations/${conversationId}/inspect`, {
+        headers: { Accept: "application/json" },
+      });
+      const data = await parseApiResponse(response);
+
+      if (!response.ok) {
+        setInspectorErrorForConversation(
+          conversationId,
+          getApiErrorMessage(data.error) ?? "Failed to initialize the agent"
+        );
+        return;
+      }
+
+      if (!("readiness" in data) || !("agent" in data) || !("threadLlm" in data)) {
+        setInspectorErrorForConversation(conversationId, "Failed to initialize the agent");
+        return;
+      }
+
+      const inspectorData = data as unknown as AgentInspectorData;
+      const appliedInspector = applyInspectorForConversation(conversationId, inspectorData);
+      if (!appliedInspector) {
+        return;
+      }
+
+      setConversations((current) =>
+        current.map((conversation) => {
+          if (conversation.id !== conversationId) return conversation;
+
+          return {
+            ...conversation,
+            llmThread: inspectorData.threadLlm,
+            members: conversation.members.map((member) =>
+              member.kind === "agent" && member.id === inspectorData.agent.id
+                ? {
+                    ...member,
+                    llmStatus: inspectorData.agent.llmStatus,
+                    llmModel: inspectorData.agent.llmModel,
+                    llmThinkingMode: inspectorData.agent.llmThinkingMode,
+                    llmLastCheckedAt: inspectorData.agent.llmLastCheckedAt,
+                    llmLastError: inspectorData.agent.llmLastError,
+                  }
+                : member
+            ),
+          };
+        })
+      );
+    } catch {
+      setInspectorErrorForConversation(conversationId, "Unable to initialize the agent right now");
+    } finally {
+      finishInspectorRequestForConversation(conversationId);
+      setBootstrappingConversationId((current) => (current === conversationId ? null : current));
+    }
+  }, [
+    applyInspectorForConversation,
+    clearConversationInspectorState,
+    finishInspectorRequestForConversation,
+    isConversationStillSelected,
+    setInspectorErrorForConversation,
+    startInspectorRequestForConversation,
+  ]);
 
   useEffect(() => {
-    async function inspectActiveAgentConversation() {
-      if (!selectedConversationId) {
-        setAgentInspector(null);
-        setAgentInspectorError(null);
-        setAgentInspectorLoading(false);
-        return;
-      }
+    if (!selectedConversationId) {
+      clearConversationInspectorState();
+      return;
+    }
 
-      const convo = conversationsRef.current.find((conversation) => conversation.id === selectedConversationId);
-      const isAgentConversation = convo?.members.some((member) => member.kind === "agent");
+    void refreshConversationInspector(selectedConversationId);
+  }, [clearConversationInspectorState, refreshConversationInspector, selectedConversationId, activeConversationPrimaryAgent?.id]);
 
-      if (!isAgentConversation) {
-        setAgentInspector(null);
-        setAgentInspectorError(null);
-        setAgentInspectorLoading(false);
-        return;
-      }
+  useEffect(() => {
+    if (!selectedConversationId) {
+      return;
+    }
 
-      setAgentInspectorLoading(true);
-      setAgentInspectorError(null);
+    const conversationId = selectedConversationId;
 
-      try {
-        const response = await fetch(`/api/chat/conversations/${selectedConversationId}/inspect`);
-        const data = await response.json();
+    function handleRefresh() {
+      void refreshConversationInspector(conversationId);
+    }
 
-        if (!response.ok) {
-          setAgentInspector(null);
-          setAgentInspectorError(data.error ?? "Failed to initialize the agent");
-          return;
-        }
-
-        setAgentInspector(data);
-        setConversations((current) =>
-          current.map((conversation) => {
-            if (conversation.id !== selectedConversationId) return conversation;
-
-            return {
-              ...conversation,
-              llmThread: data.threadLlm,
-              members: conversation.members.map((member) =>
-                member.kind === "agent" && member.id === data.agent.id
-                  ? {
-                      ...member,
-                      llmStatus: data.agent.llmStatus,
-                      llmModel: data.agent.llmModel,
-                      llmThinkingMode: data.agent.llmThinkingMode,
-                      llmLastCheckedAt: data.agent.llmLastCheckedAt,
-                      llmLastError: data.agent.llmLastError,
-                    }
-                  : member
-              ),
-            };
-          })
-        );
-      } catch {
-        setAgentInspector(null);
-        setAgentInspectorError("Unable to initialize the agent right now");
-      } finally {
-        setAgentInspectorLoading(false);
-        setBootstrappingConversationId((current) => (current === selectedConversationId ? null : current));
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        handleRefresh();
       }
     }
 
-    void inspectActiveAgentConversation();
-  }, [selectedConversationId, activeConversationPrimaryAgent?.id]);
+    window.addEventListener("focus", handleRefresh);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", handleRefresh);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [refreshConversationInspector, selectedConversationId]);
 
   const threadSections = useMemo(
     () => getConversationProjectSections(conversations, chatProjects),
@@ -1211,29 +1407,12 @@ export function TeamClient({
     [conversations]
   );
 
-  const directConversationByUserId = useMemo(() => {
-    const map = new Map<string, ConversationSummary>();
-    for (const conversation of conversations) {
-      if (conversation.type !== "direct") continue;
-      const partner = getDirectConversationPartner(conversation, currentUserId);
-      if (partner?.kind === "user" && !map.has(partner.id)) {
-        map.set(partner.id, conversation);
-      }
-    }
-    return map;
-  }, [conversations, currentUserId]);
-
-  const directConversationByAgentId = useMemo(() => {
-    const map = new Map<string, ConversationSummary>();
-    for (const conversation of conversations) {
-      if (conversation.type !== "direct") continue;
-      const partner = getDirectConversationPartner(conversation, currentUserId);
-      if (partner?.kind === "agent" && !map.has(partner.id)) {
-        map.set(partner.id, conversation);
-      }
-    }
-    return map;
-  }, [conversations, currentUserId]);
+  const directConversationShortcuts = useMemo(
+    () => buildDirectConversationShortcutMaps(conversations, currentUserId),
+    [conversations, currentUserId]
+  );
+  const directConversationShortcutsByUserId = directConversationShortcuts.userShortcuts;
+  const directConversationShortcutsByAgentId = directConversationShortcuts.agentShortcuts;
 
   const onlineCount = members.filter((member) => member.id === currentUserId || getOnlineStatus(member.lastSeen) === "online").length;
 
@@ -1257,26 +1436,31 @@ export function TeamClient({
   ) {
     const response = await fetch(`/api/chat/conversations/${conversationId}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify(body),
     });
-    const data = await response.json();
+    const data = await parseApiResponse(response);
 
-    if (!response.ok || !data.conversation) {
-      throw new Error(data.error ?? fallbackError);
+    if (!response.ok || !data.conversation || typeof data.conversation !== "object") {
+      throw new Error(getApiErrorMessage(data.error) ?? fallbackError);
     }
 
-    upsertConversation(data.conversation);
+    const conversation = data.conversation as ConversationSummary;
+
+    upsertConversation(conversation);
     if (selectedConversationId === conversationId) {
-      setSelectedConversationId(data.conversation.id);
+      setSelectedConversationId(conversation.id);
     }
-    if (data.conversation.members.some((member: ConversationMemberSummary) => member.kind === "agent")) {
-      setBootstrappingConversationId(data.conversation.id);
+    if (conversation.members.some((member: ConversationMemberSummary) => member.kind === "agent")) {
+      setBootstrappingConversationId(conversation.id);
     } else {
-      setBootstrappingConversationId((current) => (current === data.conversation.id ? null : current));
+      setBootstrappingConversationId((current) => (current === conversation.id ? null : current));
     }
 
-    return data.conversation as ConversationSummary;
+    return conversation;
   }
 
   async function patchConversationThread(
@@ -1454,9 +1638,9 @@ export function TeamClient({
     const existingConversation = shouldForceNew
       ? undefined
       : target.userId
-        ? directConversationByUserId.get(target.userId)
+        ? directConversationShortcutsByUserId.get(target.userId)?.recentConversation
         : target.agentId
-          ? directConversationByAgentId.get(target.agentId)
+          ? directConversationShortcutsByAgentId.get(target.agentId)?.recentConversation
           : undefined;
 
     if (existingConversation) {
@@ -1496,6 +1680,13 @@ export function TeamClient({
     }
 
     return null;
+  }
+
+  function openDirectShortcut(target: { userId?: string; agentId?: string }) {
+    setSelectedProjectId(null);
+    setDiscoveryQuery("");
+    setShowDiscoveryView(false);
+    void openDirectConversation(target);
   }
 
   useEffect(() => {
@@ -1963,7 +2154,11 @@ export function TeamClient({
 
     setMessageInput("");
     setSending(true);
-    setMessages((current) => [...current, optimisticMessage, ...(optimisticAgentMessage ? [optimisticAgentMessage] : [])]);
+    updateMessagesForConversation(conversationId, (current) => [
+      ...current,
+      optimisticMessage,
+      ...(optimisticAgentMessage ? [optimisticAgentMessage] : []),
+    ]);
 
     try {
       const response = await fetch(`/api/chat/conversations/${conversationId}/messages`, {
@@ -2006,7 +2201,7 @@ export function TeamClient({
                 };
 
             if (event.type === "thinking_delta") {
-              setMessages((current) =>
+              updateMessagesForConversation(conversationId, (current) =>
                 current.map((message) =>
                   message.id === optimisticAgentMessage.id
                     ? {
@@ -2021,7 +2216,7 @@ export function TeamClient({
             }
 
             if (event.type === "meta") {
-              setMessages((current) =>
+              updateMessagesForConversation(conversationId, (current) =>
                 current.map((message) =>
                   message.id === optimisticAgentMessage.id
                     ? {
@@ -2034,7 +2229,7 @@ export function TeamClient({
             }
 
             if (event.type === "content_delta") {
-              setMessages((current) =>
+              updateMessagesForConversation(conversationId, (current) =>
                 current.map((message) =>
                   message.id === optimisticAgentMessage.id
                     ? {
@@ -2049,7 +2244,7 @@ export function TeamClient({
             }
 
             if (event.type === "retrieval") {
-              setMessages((current) =>
+              updateMessagesForConversation(conversationId, (current) =>
                 current.map((message) =>
                   message.id === optimisticAgentMessage.id
                     ? {
@@ -2062,7 +2257,7 @@ export function TeamClient({
             }
 
             if (event.type === "tool_call") {
-              setMessages((current) =>
+              updateMessagesForConversation(conversationId, (current) =>
                 current.map((message) =>
                   message.id === optimisticAgentMessage.id
                     ? {
@@ -2079,7 +2274,7 @@ export function TeamClient({
             }
 
             if (event.type === "tool_result") {
-              setMessages((current) =>
+              updateMessagesForConversation(conversationId, (current) =>
                 current.map((message) =>
                   message.id === optimisticAgentMessage.id
                     ? {
@@ -2114,7 +2309,7 @@ export function TeamClient({
                   );
                 }
               }
-              setMessages((current) => {
+              updateMessagesForConversation(conversationId, (current) => {
                 const optimisticAgent = current.find((message) => message.id === optimisticAgentMessage.id);
                 return [
                   ...current.filter((message) => message.id !== optimisticMessage.id && message.id !== optimisticAgentMessage.id),
@@ -2154,7 +2349,7 @@ export function TeamClient({
         }
 
         if (data.messages) {
-          setMessages((current) => [
+          updateMessagesForConversation(conversationId, (current) => [
             ...current.filter((message) => message.id !== optimisticMessage.id && message.id !== optimisticAgentMessage?.id),
             ...data.messages.map((message: ChatMessage) =>
               message.sender?.kind === "agent"
@@ -2175,17 +2370,27 @@ export function TeamClient({
       }
 
       if (isAgentConversation && (!receivedRuntimeSnapshot || !appliedRuntimeSnapshot)) {
-        fetch(`/api/chat/conversations/${conversationId}/inspect`)
-          .then((res) => res.json())
+        fetch(`/api/chat/conversations/${conversationId}/inspect`, {
+          headers: { Accept: "application/json" },
+        })
+          .then(async (res) => ({
+            ok: res.ok,
+            data: await parseApiResponse(res),
+          }))
           .then((data) => {
-            if (data?.conversationId === conversationId) {
-              setAgentInspector(data);
+            if (!data.ok || !("conversationId" in data.data)) {
+              return;
             }
+
+            void applyInspectorForConversation(
+              conversationId,
+              data.data as unknown as AgentInspectorData
+            );
           })
           .catch(() => { });
       }
     } catch {
-      setMessages((current) =>
+      updateMessagesForConversation(conversationId, (current) =>
         current.map((message) =>
           message.id === optimisticMessage.id
             ? { ...message, body: `${message.body}\n\n(Delivery pending)` }
@@ -2203,11 +2408,12 @@ export function TeamClient({
   }
 
   async function refreshConversationData() {
-    if (!selectedConversationId) return;
+    const conversationId = selectedConversationId;
+    if (!conversationId) return;
 
     try {
       const [messagesResponse, conversationsResponse] = await Promise.all([
-        fetch(`/api/chat/conversations/${selectedConversationId}/messages`),
+        fetch(`/api/chat/conversations/${conversationId}/messages`),
         fetch("/api/chat/conversations"),
       ]);
       const [messagesData, conversationsData] = await Promise.all([
@@ -2216,7 +2422,7 @@ export function TeamClient({
       ]);
 
       if (messagesData.messages) {
-        setMessages(messagesData.messages);
+        replaceMessagesForConversation(conversationId, messagesData.messages);
       }
       if (conversationsData.conversations) {
         setConversations(conversationsData.conversations);
@@ -2353,11 +2559,18 @@ export function TeamClient({
   const activePartner = activeConversationDirectPartner;
   const activeAgentParticipant = activeConversationPrimaryAgent;
   const activeAgentInspector =
-    activeAgentParticipant && agentInspector?.agent.id === activeAgentParticipant.id
+    activeConversation
+      && activeAgentParticipant
+      && agentInspector?.conversationId === activeConversation.id
+      && agentInspector.agent.id === activeAgentParticipant.id
       ? agentInspector
       : null;
   const activeAgentInspectorError =
-    activeAgentParticipant ? agentInspectorError : null;
+    activeConversation
+      && activeAgentParticipant
+      && agentInspectorErrorConversationId === activeConversation.id
+      ? agentInspectorError
+      : null;
   const activeAgentBootstrapPending =
     Boolean(activeAgentParticipant)
       && (agentInspectorLoading || bootstrappingConversationId === selectedConversationId);
@@ -2510,8 +2723,8 @@ export function TeamClient({
               projects={chatProjects}
               threadSections={threadSections}
               groupConversations={groupConversations}
-              directConversationByUserId={directConversationByUserId}
-              directConversationByAgentId={directConversationByAgentId}
+              directConversationShortcutsByUserId={directConversationShortcutsByUserId}
+              directConversationShortcutsByAgentId={directConversationShortcutsByAgentId}
               selectedConversationId={selectedConversationId}
               selectedProjectId={selectedProjectId}
               sidebarCollapsed={sidebarCollapsed}
@@ -2526,18 +2739,8 @@ export function TeamClient({
               onOpenNewThreadModal={() => openNewThreadComposer(null)}
               onSelectConversation={openConversationFromRail}
               onSelectProject={openProjectSummary}
-              onOpenFreshUserThread={(userId) => {
-                setSelectedProjectId(null);
-                setDiscoveryQuery("");
-                setShowDiscoveryView(false);
-                void openDirectConversation({ userId }, { forceNew: true });
-              }}
-              onOpenFreshAgentThread={(agentId) => {
-                setSelectedProjectId(null);
-                setDiscoveryQuery("");
-                setShowDiscoveryView(false);
-                void openDirectConversation({ agentId }, { forceNew: true });
-              }}
+              onOpenUserShortcut={(userId) => openDirectShortcut({ userId })}
+              onOpenAgentShortcut={(agentId) => openDirectShortcut({ agentId })}
               onCreateProject={(name) => createChatProject(name)}
               onRenameProject={(projectId, name) => renameChatProject(projectId, name)}
               onDeleteProject={(projectId) => deleteChatProject(projectId)}

@@ -18,6 +18,10 @@ import { useRouter } from "next/navigation";
 import { Avatar } from "@/components/ui/Avatar";
 import { Button } from "@/components/ui/Button";
 import { ThreadRowMenu } from "@/components/team/ThreadRowMenu";
+import {
+  type DirectConversationShortcut,
+  directConversationShortcutContainsConversation,
+} from "@/components/team/team-chat-thread-shortcuts";
 import { deriveInviteName } from "@/lib/team-invites";
 import { cn } from "@/lib/utils";
 import {
@@ -64,8 +68,8 @@ export function ThreadRail({
   projects,
   threadSections,
   groupConversations,
-  directConversationByUserId,
-  directConversationByAgentId,
+  directConversationShortcutsByUserId,
+  directConversationShortcutsByAgentId,
   selectedConversationId,
   selectedProjectId,
   sidebarCollapsed,
@@ -80,8 +84,8 @@ export function ThreadRail({
   onOpenNewThreadModal,
   onSelectConversation,
   onSelectProject,
-  onOpenFreshUserThread,
-  onOpenFreshAgentThread,
+  onOpenUserShortcut,
+  onOpenAgentShortcut,
   onCreateProject,
   onRenameProject,
   onDeleteProject,
@@ -95,8 +99,8 @@ export function ThreadRail({
   projects: ChatProjectOption[];
   threadSections: ThreadSection[];
   groupConversations: ConversationSummary[];
-  directConversationByUserId: Map<string, ConversationSummary>;
-  directConversationByAgentId: Map<string, ConversationSummary>;
+  directConversationShortcutsByUserId: Map<string, DirectConversationShortcut>;
+  directConversationShortcutsByAgentId: Map<string, DirectConversationShortcut>;
   selectedConversationId: string | null;
   selectedProjectId: string | null;
   sidebarCollapsed: boolean;
@@ -111,8 +115,8 @@ export function ThreadRail({
   onOpenNewThreadModal: () => void;
   onSelectConversation: (conversationId: string) => void;
   onSelectProject: (projectId: string) => void;
-  onOpenFreshUserThread: (userId: string) => void;
-  onOpenFreshAgentThread: (agentId: string) => void;
+  onOpenUserShortcut: (userId: string) => void;
+  onOpenAgentShortcut: (agentId: string) => void;
   onCreateProject: (name: string) => Promise<ChatProjectOption>;
   onRenameProject: (projectId: string, name: string) => Promise<ChatProjectOption>;
   onDeleteProject: (projectId: string) => Promise<{ deletedProjectId: string; movedThreadCount: number }>;
@@ -576,24 +580,25 @@ export function ThreadRail({
               {otherMembers.length > 0 || agents.length > 0 ? (
                 <div className="flex w-full flex-col items-center gap-1.5">
                   {otherMembers.map((member) => {
-                    const conversation = directConversationByUserId.get(member.id);
+                    const shortcut = directConversationShortcutsByUserId.get(member.id);
+                    const conversation = shortcut?.recentConversation;
                     const status = getOnlineStatus(member.lastSeen);
                     const label = getMemberDisplayName(member);
+                    const isActive = directConversationShortcutContainsConversation(shortcut, selectedConversationId);
 
                     return (
                       <button
                         key={member.id}
-                        onClick={() => onSelectConversation(conversation?.id ?? "")}
+                        onClick={() => onOpenUserShortcut(member.id)}
                         title={label}
-                        aria-label={conversation ? `Open direct chat with ${label}` : `${label} has no thread yet`}
+                        aria-label={conversation ? `Open recent direct thread with ${label}` : `Start direct thread with ${label}`}
                         className={cn(
                           "relative flex h-8 w-8 items-center justify-center rounded-full outline-none transition-all",
-                          conversation?.id === selectedConversationId
+                          isActive
                             ? "bg-[rgba(255,255,255,0.04)] ring-2 ring-[rgba(247,148,29,0.45)] ring-offset-1 ring-offset-[#121212]"
                             : "opacity-75 hover:bg-[rgba(255,255,255,0.03)] hover:opacity-100"
                         )}
                         type="button"
-                        disabled={!conversation}
                       >
                         <Avatar src={member.image} name={label} size="xs" />
                         <span className="absolute -bottom-0.5 -right-0.5">
@@ -608,23 +613,24 @@ export function ThreadRail({
                   ) : null}
 
                   {agents.map((agent) => {
-                    const conversation = directConversationByAgentId.get(agent.id);
+                    const shortcut = directConversationShortcutsByAgentId.get(agent.id);
+                    const conversation = shortcut?.recentConversation;
                     const agentStatus = getAgentSidebarStatus(agent.llmStatus);
+                    const isActive = directConversationShortcutContainsConversation(shortcut, selectedConversationId);
 
                     return (
                       <button
                         key={agent.id}
-                        onClick={() => onSelectConversation(conversation?.id ?? "")}
+                        onClick={() => onOpenAgentShortcut(agent.id)}
                         title={agent.name}
-                        aria-label={conversation ? `Open agent thread ${agent.name}` : `${agent.name} has no thread yet`}
+                        aria-label={conversation ? `Open recent agent thread ${agent.name}` : `Start agent thread ${agent.name}`}
                         className={cn(
                           "relative flex h-8 w-8 shrink-0 items-center justify-center rounded-[14px] transition-all",
-                          conversation?.id === selectedConversationId
+                          isActive
                             ? "bg-[rgba(75,156,211,0.18)] ring-1 ring-[rgba(75,156,211,0.45)] ring-offset-1 ring-offset-[#121212]"
                             : "opacity-75 hover:bg-[rgba(75,156,211,0.08)] hover:opacity-100"
                         )}
                         type="button"
-                        disabled={!conversation}
                       >
                         <MemberAvatar
                           member={{
@@ -1024,17 +1030,24 @@ export function ThreadRail({
                 label: "Humans",
                 count: otherMembers.length,
                 containsSelectedThread: otherMembers.some(
-                  (member) => directConversationByUserId.get(member.id)?.id === selectedConversationId
+                  (member) => directConversationShortcutContainsConversation(
+                    directConversationShortcutsByUserId.get(member.id),
+                    selectedConversationId
+                  )
                 ),
                 children: otherMembers.length > 0 ? (
                   <>
                     {otherMembers.map((member) => {
-                      const conversation = directConversationByUserId.get(member.id);
+                      const shortcut = directConversationShortcutsByUserId.get(member.id);
+                      const conversation = shortcut?.recentConversation;
                       const status = getOnlineStatus(member.lastSeen);
                       const label = getMemberDisplayName(member);
+                      const threadCount = shortcut?.conversationIds.length ?? 0;
+                      const isActive = directConversationShortcutContainsConversation(shortcut, selectedConversationId);
+                      const threadLabel = threadCount > 1 ? `${threadCount} threads` : threadCount === 1 ? "1 thread" : null;
                       const previewText =
                         conversation?.latestMessage
-                          ? getPreviewText(conversation)
+                          ? [threadLabel, getPreviewText(conversation)].filter(Boolean).join(" · ")
                           : status === "online"
                             ? "Online now"
                             : status === "away"
@@ -1045,7 +1058,7 @@ export function ThreadRail({
                         <SidebarRow
                           key={member.id}
                           variant="secondary"
-                          active={conversation?.id === selectedConversationId}
+                          active={isActive}
                           icon={
                             <div className="relative">
                               <Avatar src={member.image} name={label} size="xs" />
@@ -1057,7 +1070,7 @@ export function ThreadRail({
                           title={label}
                           preview={previewText}
                           meta={conversation?.latestMessage ? formatPreviewTime(conversation.latestMessage.createdAt) : null}
-                          onClick={() => onOpenFreshUserThread(member.id)}
+                          onClick={() => onOpenUserShortcut(member.id)}
                           trailing={
                             openingDirectId === member.id ? (
                               <div className="h-3.5 w-3.5 rounded-full border-2 border-[rgba(247,148,29,0.2)] border-t-[#F7941D] animate-spin" />
@@ -1079,19 +1092,26 @@ export function ThreadRail({
                 label: "AI Agents",
                 count: agents.length,
                 containsSelectedThread: agents.some(
-                  (agent) => directConversationByAgentId.get(agent.id)?.id === selectedConversationId
+                  (agent) => directConversationShortcutContainsConversation(
+                    directConversationShortcutsByAgentId.get(agent.id),
+                    selectedConversationId
+                  )
                 ),
                 children: agents.length > 0 ? (
                   <>
                     {agents.map((agent) => {
-                      const conversation = directConversationByAgentId.get(agent.id);
+                      const shortcut = directConversationShortcutsByAgentId.get(agent.id);
+                      const conversation = shortcut?.recentConversation;
                       const agentStatus = getAgentSidebarStatus(agent.llmStatus);
+                      const threadCount = shortcut?.conversationIds.length ?? 0;
+                      const isActive = directConversationShortcutContainsConversation(shortcut, selectedConversationId);
+                      const threadLabel = threadCount > 1 ? `${threadCount} threads` : threadCount === 1 ? "1 thread" : null;
 
                       return (
                         <SidebarRow
                           key={agent.id}
                           variant="secondary"
-                          active={conversation?.id === selectedConversationId}
+                          active={isActive}
                           icon={
                             <div className="relative">
                               <MemberAvatar
@@ -1112,9 +1132,13 @@ export function ThreadRail({
                             </div>
                           }
                           title={agent.name}
-                          preview={conversation?.latestMessage ? getPreviewText(conversation) : agent.role || agentStatus.description}
+                          preview={
+                            conversation?.latestMessage
+                              ? [threadLabel, getPreviewText(conversation)].filter(Boolean).join(" · ")
+                              : [threadLabel, agent.role || agentStatus.description].filter(Boolean).join(" | ")
+                          }
                           meta={conversation?.latestMessage ? formatPreviewTime(conversation.latestMessage.createdAt) : null}
-                          onClick={() => onOpenFreshAgentThread(agent.id)}
+                          onClick={() => onOpenAgentShortcut(agent.id)}
                           trailing={
                             openingDirectId === agent.id ? (
                               <div className="h-3.5 w-3.5 rounded-full border-2 border-[rgba(75,156,211,0.2)] border-t-[#4B9CD3] animate-spin" />
