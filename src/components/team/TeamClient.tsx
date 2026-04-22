@@ -70,6 +70,44 @@ type Props = {
 };
 
 type ThreadDocumentUploadMap = Record<string, ThreadDocumentUploadState[]>;
+type AgentRuntimeSnapshot = Pick<AgentInspectorData, "context" | "payload">;
+
+function getApiErrorMessage(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeApiFallbackMessage(text: string) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+
+  if (!normalized || normalized.startsWith("<")) {
+    return null;
+  }
+
+  return normalized.length > 180 ? `${normalized.slice(0, 177)}...` : normalized;
+}
+
+async function parseApiResponse(response: Response) {
+  const bodyText = await response.text().catch(() => "");
+
+  if (!bodyText) {
+    return {} as Record<string, unknown>;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.toLowerCase().includes("application/json")) {
+    try {
+      const data = JSON.parse(bodyText);
+      if (data && typeof data === "object") {
+        return data as Record<string, unknown>;
+      }
+    } catch {
+      return {} as Record<string, unknown>;
+    }
+  }
+
+  const fallbackMessage = normalizeApiFallbackMessage(bodyText);
+  return fallbackMessage ? { error: fallbackMessage } : ({} as Record<string, unknown>);
+}
 
 function mergeChatProjects(
   current: ChatProjectOption[],
@@ -413,8 +451,8 @@ function ContextInspectorDialog({
           <div className="min-h-0 overflow-y-auto p-5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#8D877F]">Knowledge Sources</p>
-                <p className="mt-1 text-sm text-[#8D877F]">This is the RAG and prompt information currently bundled into the chat.</p>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-[#8D877F]">Context Sources</p>
+                <p className="mt-1 text-sm text-[#8D877F]">This is the prompt and thread-context information currently bundled into the chat.</p>
               </div>
               <div className="flex gap-2">
                 <Button variant="secondary" size="sm" icon={<Copy size={14} />} onClick={onCopyPretty}>
@@ -435,7 +473,53 @@ function ContextInspectorDialog({
               ))}
             </div>
 
+            {data.context.resolvedSources.length > 0 ? (
+              <div className="mt-5 rounded-2xl border border-[rgba(255,255,255,0.06)] bg-[#101010] p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-[#F6F3EE]">Resolved Thread Sources</p>
+                  <span className="text-xs text-[#6F6A64]">{data.context.resolvedSources.length} files checked</span>
+                </div>
+                <div className="mt-3 grid gap-2">
+                  {data.context.resolvedSources.map((source, index) => {
+                    const statusLabel =
+                      source.status === "unsupported"
+                        ? "Unsupported"
+                        : source.status === "failed"
+                          ? "Failed"
+                          : source.status === "unavailable"
+                            ? "Unavailable"
+                          : "Used";
+
+                    return (
+                      <div
+                        key={`${source.kind}-${source.target}-${index}`}
+                        className="rounded-2xl border border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.03)] px-3 py-3"
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-semibold text-[#F6F3EE]">{source.label}</p>
+                          <span className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]">
+                            {statusLabel}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-sm leading-6 text-[#8D877F]">{source.detail}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+
             <div className="mt-5 grid gap-4">
+              {data.payload.resolvedContextText ? (
+                <div className="rounded-2xl border border-[rgba(255,255,255,0.06)] bg-[#101010] p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-[#F6F3EE]">Resolved Thread Context</p>
+                    <span className="text-xs text-[#6F6A64]">Current conversation only</span>
+                  </div>
+                  <pre className="mt-3 max-h-[18rem] overflow-auto whitespace-pre-wrap rounded-2xl bg-[#0B0B0B] p-4 text-xs leading-6 text-[#D7D2CC]">{data.payload.resolvedContextText}</pre>
+                </div>
+              ) : null}
+
               <div className="rounded-2xl border border-[rgba(255,255,255,0.06)] bg-[#101010] p-4">
                 <div className="flex items-center justify-between gap-3">
                   <p className="text-sm font-semibold text-[#F6F3EE]">System Prompt</p>
@@ -1285,12 +1369,15 @@ export function TeamClient({
 
         const response = await fetch(`/api/chat/conversations/${conversationId}/documents`, {
           method: "POST",
+          headers: { Accept: "application/json" },
           body: formData,
         });
-        const data = await response.json();
+        const data = await parseApiResponse(response);
 
         if (!response.ok || !data.conversation) {
-          throw new Error(data.error ?? `Unable to upload ${file.name} right now.`);
+          throw new Error(
+            getApiErrorMessage(data.error) ?? `Unable to upload ${file.name} right now.`
+          );
         }
 
         upsertConversation(data.conversation as ConversationSummary);
@@ -1329,9 +1416,12 @@ export function TeamClient({
     try {
       const response = await fetch(
         `/api/chat/conversations/${selectedConversationId}/documents/${document.id}`,
-        { method: "DELETE" }
+        {
+          method: "DELETE",
+          headers: { Accept: "application/json" },
+        }
       );
-      const data = await response.json();
+      const data = await parseApiResponse(response);
 
       if (!response.ok || !data.conversation) {
         if (response.status === 404) {
@@ -1339,7 +1429,9 @@ export function TeamClient({
           throw new Error("That document is no longer attached to this thread.");
         }
 
-        throw new Error(data.error ?? "Unable to remove that document right now.");
+        throw new Error(
+          getApiErrorMessage(data.error) ?? "Unable to remove that document right now."
+        );
       }
 
       upsertConversation(data.conversation as ConversationSummary);
@@ -1835,6 +1927,7 @@ export function TeamClient({
     if (!selectedConversationId || !messageInput.trim() || sending) return;
     if (activeAgentSendBlocked) return;
 
+    const conversationId = selectedConversationId;
     const text = messageInput.trim();
     const isAgentConversation = Boolean(activeConversationPrimaryAgent);
     const optimisticMessage: ChatMessage = {
@@ -1865,13 +1958,15 @@ export function TeamClient({
         },
       }
       : null;
+    let receivedRuntimeSnapshot = false;
+    let appliedRuntimeSnapshot = false;
 
     setMessageInput("");
     setSending(true);
     setMessages((current) => [...current, optimisticMessage, ...(optimisticAgentMessage ? [optimisticAgentMessage] : [])]);
 
     try {
-      const response = await fetch(`/api/chat/conversations/${selectedConversationId}/messages`, {
+      const response = await fetch(`/api/chat/conversations/${conversationId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: text, stream: isAgentConversation }),
@@ -1903,7 +1998,12 @@ export function TeamClient({
               | { type: "retrieval"; sources: NonNullable<ChatMessage["retrievalSources"]> }
               | { type: "tool_call"; id: string; name: string; args: Record<string, unknown> }
               | { type: "tool_result"; id: string; name: string; result: string }
-              | { type: "final_messages"; messages: ChatMessage[]; retrievalSources?: NonNullable<ChatMessage["retrievalSources"]> };
+              | {
+                  type: "final_messages";
+                  messages: ChatMessage[];
+                  retrievalSources?: NonNullable<ChatMessage["retrievalSources"]>;
+                  runtimeSnapshot?: AgentRuntimeSnapshot | null;
+                };
 
             if (event.type === "thinking_delta") {
               setMessages((current) =>
@@ -1996,6 +2096,24 @@ export function TeamClient({
             }
 
             if (event.type === "final_messages") {
+              const runtimeSnapshot = event.runtimeSnapshot;
+              if (runtimeSnapshot) {
+                receivedRuntimeSnapshot = true;
+                const canApplyRuntimeSnapshot =
+                  Boolean(agentInspector?.conversationId === conversationId);
+                appliedRuntimeSnapshot = canApplyRuntimeSnapshot;
+                if (canApplyRuntimeSnapshot) {
+                  setAgentInspector((current) =>
+                    current && current.conversationId === conversationId
+                      ? {
+                          ...current,
+                          context: runtimeSnapshot.context,
+                          payload: runtimeSnapshot.payload,
+                        }
+                      : current
+                  );
+                }
+              }
               setMessages((current) => {
                 const optimisticAgent = current.find((message) => message.id === optimisticAgentMessage.id);
                 return [
@@ -2016,6 +2134,24 @@ export function TeamClient({
         }
       } else {
         const data = await response.json();
+
+        if (data.runtimeSnapshot) {
+          receivedRuntimeSnapshot = true;
+          const canApplyRuntimeSnapshot =
+            Boolean(agentInspector?.conversationId === conversationId);
+          appliedRuntimeSnapshot = canApplyRuntimeSnapshot;
+          if (canApplyRuntimeSnapshot) {
+            setAgentInspector((current) =>
+              current && current.conversationId === conversationId
+                ? {
+                    ...current,
+                    context: data.runtimeSnapshot.context,
+                    payload: data.runtimeSnapshot.payload,
+                  }
+                : current
+            );
+          }
+        }
 
         if (data.messages) {
           setMessages((current) => [
@@ -2038,11 +2174,11 @@ export function TeamClient({
         setConversations(conversationData.conversations);
       }
 
-      if (isAgentConversation) {
-        fetch(`/api/chat/conversations/${selectedConversationId}/inspect`)
+      if (isAgentConversation && (!receivedRuntimeSnapshot || !appliedRuntimeSnapshot)) {
+        fetch(`/api/chat/conversations/${conversationId}/inspect`)
           .then((res) => res.json())
           .then((data) => {
-            if (data?.conversationId) {
+            if (data?.conversationId === conversationId) {
               setAgentInspector(data);
             }
           })
@@ -2310,11 +2446,35 @@ export function TeamClient({
         `Context: ${formatTokensK(activeAgentInspector.context.estimatedTokens)} / 128K (${formatContextMeter(activeAgentInspector.context.estimatedTokens)})`,
         `History: ${activeAgentInspector.context.recentHistoryCount}/${activeAgentInspector.context.historyWindowSize} turns loaded`,
         "",
-        "Knowledge sources:",
+        "Context sources:",
         ...activeAgentInspector.context.knowledgeSources.map((source) => `- ${source.label}: ${source.description}`),
+        ...(activeAgentInspector.context.resolvedSources.length > 0
+          ? [
+              "",
+              "Resolved thread sources:",
+              ...activeAgentInspector.context.resolvedSources.map((source) => {
+                const statusLabel =
+                  source.status === "unsupported"
+                    ? "unsupported"
+                    : source.status === "failed"
+                      ? "failed"
+                      : source.status === "unavailable"
+                        ? "unavailable"
+                      : "used";
+                return `- ${source.label} [${statusLabel}]: ${source.detail}`;
+              }),
+            ]
+          : []),
         "",
         "Org context:",
         activeAgentInspector.payload.orgContext,
+        ...(activeAgentInspector.payload.resolvedContextText
+          ? [
+              "",
+              "Resolved thread context:",
+              activeAgentInspector.payload.resolvedContextText,
+            ]
+          : []),
         "",
         "System prompt:",
         activeAgentInspector.payload.systemPrompt,

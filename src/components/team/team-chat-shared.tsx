@@ -154,6 +154,9 @@ export interface ChatMessage {
     label: string;
     target: string;
     detail: string;
+    status?: "used" | "unsupported" | "failed" | "unavailable";
+    domain?: string;
+    scope?: string;
   }>;
   createdAt: string;
   sender: {
@@ -226,15 +229,25 @@ export interface AgentInspectorData {
       label: string;
       description: string;
     }>;
+    resolvedSources: Array<{
+      kind: string;
+      label: string;
+      target: string;
+      detail: string;
+      status?: "used" | "unsupported" | "failed" | "unavailable";
+      domain?: string;
+      scope?: string;
+    }>;
   };
   payload: {
     currentUserName: string | null;
     systemPrompt: string;
     history: Array<{
-      role: "user" | "assistant";
-      content: string;
+      role: "system" | "user" | "assistant" | "tool";
+      content: string | null;
     }>;
     orgContext: string;
+    resolvedContextText: string;
   };
 }
 

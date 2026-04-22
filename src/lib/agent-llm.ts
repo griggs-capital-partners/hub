@@ -23,6 +23,17 @@ type AgentLlmConfig = {
   role?: string;
   orgContext?: string | null;
   currentUserName?: string | null;
+  contextSources?: Array<{
+    id: string;
+    label: string;
+    description: string;
+  }>;
+  resolvedSources?: Array<{
+    label: string;
+    target: string;
+    detail: string;
+    status?: "used" | "unsupported" | "failed" | "unavailable";
+  }>;
 };
 
 type ChatMessageInput = {
@@ -398,6 +409,14 @@ export function buildSystemPrompt(config: AgentLlmConfig) {
     `You are ${config.name || "an AI agent"} serving as ${config.role || "a specialist"} inside Summit Griggs Hub.`,
     "Stay in character as this specific agent. Do not describe yourself as a generic AI assistant unless the persona explicitly says to.",
   ];
+  const contextSources = config.contextSources?.filter(
+    (source): source is NonNullable<AgentLlmConfig["contextSources"]>[number] =>
+      Boolean(source.label?.trim() && source.description?.trim())
+  ) ?? [];
+  const resolvedSources = config.resolvedSources?.filter(
+    (source): source is NonNullable<AgentLlmConfig["resolvedSources"]>[number] =>
+      Boolean(source.label?.trim() && source.detail?.trim())
+  ) ?? [];
 
   if (config.description?.trim()) {
     sections.push(`Agent summary: ${config.description.trim()}`);
@@ -420,8 +439,43 @@ export function buildSystemPrompt(config: AgentLlmConfig) {
     sections.push(`You are currently speaking with: ${config.currentUserName.trim()}`);
   }
 
+  if (contextSources.length > 0) {
+    sections.push(
+      "Runtime context status:\n" +
+      contextSources
+        .map((source) => `- ${source.label.trim()}: ${source.description.trim()}`)
+        .join("\n")
+    );
+  }
+
+  if (resolvedSources.length > 0) {
+    sections.push(
+      "Thread attachment resolution:\n" +
+      resolvedSources
+        .map((source) => {
+          const statusLabel =
+            source.status === "unsupported"
+              ? "Unsupported"
+              : source.status === "failed"
+                ? "Failed"
+                : source.status === "unavailable"
+                  ? "Unavailable"
+                  : "Used";
+          return `- ${statusLabel} - ${source.label.trim()}: ${source.detail.trim()}`;
+        })
+        .join("\n")
+    );
+  }
+
   sections.push("You are replying inside a direct team chat in the hub.");
   sections.push("Use the persona, role, and duties above as the highest-priority behavioral guidance for your reply.");
+  sections.push(
+    "Context grounding rules:\n" +
+    "- If this prompt includes a `## Thread Document:` section, that attachment was successfully read into the active runtime context and is available to use.\n" +
+    "- Treat the `Thread attachment resolution` lines as authoritative status for each attached file.\n" +
+    "- Only say a thread attachment could not be read, did not load, or was unavailable when the prompt explicitly says so in a status or availability note.\n" +
+    "- When a thread attachment was read and is relevant, use its contents directly instead of claiming you do not have access to it."
+  );
   sections.push(
     "Task and tool routing rules:\n" +
     "- When the user asks about tasks, planner items, kanban cards, board status, backlog, priorities, assignees, or recent work, treat that as a request about the internal planner/kanban system.\n" +
@@ -489,6 +543,7 @@ export function buildAgentRuntimePreview(
   const systemPrompt = buildSystemPrompt(config);
   const history = config.history;
   const historyText = history.map((entry) => `${entry.role}: ${entry.content}`).join("\n");
+  const contextSources = config.contextSources ?? [];
 
   return {
     systemPrompt,
@@ -513,11 +568,7 @@ export function buildAgentRuntimePreview(
         label: "Recent chat history",
         description: "The latest conversation turns are included so the agent keeps continuity.",
       },
-      {
-        id: "safe-retrieval",
-        label: "Read-only repo retrieval",
-        description: "When a prompt mentions connected repos, file paths, commits, PRs, branches, or docs, the hub can fetch matching artifacts server-side in read-only mode.",
-      },
+      ...contextSources,
       {
         id: "current-user",
         label: "Current user",

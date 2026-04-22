@@ -2,7 +2,13 @@ import { NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { generateAgentReply, probeAgentLlm, resolveThinkingMode, streamAgentReply } from "@/lib/agent-llm";
+import {
+  buildAgentRuntimePreview,
+  generateAgentReply,
+  probeAgentLlm,
+  resolveThinkingMode,
+  streamAgentReply,
+} from "@/lib/agent-llm";
 import {
   applyResolvedThreadModel,
   buildExecutionTargetRuntimeConfig,
@@ -14,7 +20,6 @@ import {
 } from "@/lib/agent-llm-config";
 import { agentChatTools, executeAgentTool } from "@/lib/agent-tools";
 import { buildOrgContext } from "@/lib/agent-context";
-import { buildMessageRetrievalContext } from "@/lib/agent-retrieval";
 import {
   getConversationForUser,
   isMissingChatTablesError,
@@ -24,6 +29,7 @@ import {
 } from "@/lib/chat";
 import type { LlmMessage } from "@/lib/agent-llm";
 import { resolveAgentLlmRoutingPolicy } from "@/lib/agent-task-context";
+import { resolveConversationContextBundle } from "@/lib/conversation-context";
 
 type CreatedChatMessage = Prisma.ChatMessageGetPayload<{
   include: {
@@ -89,6 +95,63 @@ function normalizeAgentExecutionConfig(agent: {
     llmModel: agent.llmModel,
     llmThinkingMode: agent.llmThinkingMode,
   });
+}
+
+type RuntimeSnapshot = {
+  context: {
+    estimatedTokens: number;
+    estimatedSystemPromptTokens: number;
+    estimatedHistoryTokens: number;
+    recentHistoryCount: number;
+    historyWindowSize: number;
+    knowledgeSources: ReturnType<typeof buildAgentRuntimePreview>["knowledgeSources"];
+    resolvedSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"];
+  };
+  payload: {
+    currentUserName: string | null;
+    systemPrompt: string;
+    history: Array<{
+      role: LlmMessage["role"];
+      content: string | null;
+    }>;
+    orgContext: string;
+    resolvedContextText: string;
+  };
+};
+
+function serializeRuntimeHistory(history: LlmMessage[]) {
+  return history.map((entry) => ({
+    role: entry.role,
+    content: entry.content,
+  }));
+}
+
+function buildRuntimeSnapshot(params: {
+  runtimePreview: ReturnType<typeof buildAgentRuntimePreview>;
+  resolvedSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"];
+  currentUserName: string | null;
+  history: LlmMessage[];
+  orgContext: string;
+  resolvedContextText: string;
+}): RuntimeSnapshot {
+  return {
+    context: {
+      estimatedTokens: params.runtimePreview.estimatedTokens,
+      estimatedSystemPromptTokens: params.runtimePreview.estimatedSystemPromptTokens,
+      estimatedHistoryTokens: params.runtimePreview.estimatedHistoryTokens,
+      recentHistoryCount: params.runtimePreview.recentHistoryCount,
+      historyWindowSize: 12,
+      knowledgeSources: params.runtimePreview.knowledgeSources,
+      resolvedSources: params.resolvedSources,
+    },
+    payload: {
+      currentUserName: params.currentUserName,
+      systemPrompt: params.runtimePreview.systemPrompt,
+      history: serializeRuntimeHistory(params.history),
+      orgContext: params.orgContext,
+      resolvedContextText: params.resolvedContextText,
+    },
+  };
 }
 
 export async function GET(
@@ -186,10 +249,10 @@ export async function POST(
           const writeEvent = (payload: unknown) => {
             controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
           };
-          let retrievalSources: Awaited<ReturnType<typeof buildMessageRetrievalContext>>["sources"] = [];
+          let retrievalSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"] = [];
 
           try {
-            const [recentMessages, orgContext, retrievedContext, senderUser] = await Promise.all([
+            const [recentMessages, orgContext, contextBundle, senderUser] = await Promise.all([
               prisma.chatMessage.findMany({
                 where: { conversationId: conversation.id },
                 select: {
@@ -216,7 +279,7 @@ export async function POST(
                 take: 12,
               }),
               buildOrgContext(),
-              buildMessageRetrievalContext(message),
+              resolveConversationContextBundle({ conversationId: conversation.id }),
               prisma.user.findUnique({
                 where: { id: session.user.id },
                 select: { displayName: true, name: true },
@@ -240,7 +303,7 @@ export async function POST(
             const enableThinking = resolveThinkingMode({ ...agent, llmThinkingMode: selectedThinkingMode }, message);
             writeEvent({ type: "meta", thinking: enableThinking });
             const llmHealth = await probeAgentLlm(selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : agent);
-            retrievalSources = retrievedContext.sources;
+            retrievalSources = contextBundle.sources;
             const currentUserName = senderUser?.displayName || senderUser?.name || null;
             await prisma.conversation.update({
               where: { id: conversation.id },
@@ -262,14 +325,15 @@ export async function POST(
             if (llmHealth.llmStatus !== "online") {
               throw new Error(llmHealth.llmLastError || "LLM brain is offline");
             }
-            if (retrievedContext.sources.length > 0) {
-              writeEvent({ type: "retrieval", sources: retrievedContext.sources });
+            if (contextBundle.sources.length > 0) {
+              writeEvent({ type: "retrieval", sources: contextBundle.sources });
             }
 
             let finalThinking = "";
             let finalContent = "";
             let resolvedModel = llmHealth.llmModel ?? selectedTarget?.model ?? agent.llmModel ?? null;
             let capturedToolContext: LlmMessage[] | null = null;
+            let runtimeSnapshot: RuntimeSnapshot | null = null;
 
             // Filter the tool catalog to only tools this agent has enabled.
             let disabledToolNames: string[] = [];
@@ -292,12 +356,38 @@ export async function POST(
               return [{ role: (entry.senderAgentId ? "assistant" : "user") as "assistant" | "user", content: entry.body }];
             });
 
-            for await (const event of streamAgentReply({
+            const runtimeOrgContext = [orgContext, contextBundle.text].filter(Boolean).join("\n\n");
+            const runtimeConfig = {
               ...agent,
               ...(selectedRuntimeConfig ?? {}),
               llmThinkingMode: selectedThinkingMode,
-              orgContext: [orgContext, retrievedContext.text].filter(Boolean).join("\n\n"),
+              orgContext: runtimeOrgContext,
+              contextSources: contextBundle.summarySources,
+              resolvedSources: contextBundle.sources,
               currentUserName,
+            };
+            const runtimePreview = buildAgentRuntimePreview({
+              ...runtimeConfig,
+              history: history.flatMap((entry) =>
+                (entry.role === "user" || entry.role === "assistant") && typeof entry.content === "string"
+                  ? [{
+                      role: entry.role,
+                      content: entry.content,
+                    }]
+                  : []
+              ),
+            });
+            runtimeSnapshot = buildRuntimeSnapshot({
+              runtimePreview,
+              resolvedSources: contextBundle.sources,
+              currentUserName,
+              history,
+              orgContext,
+              resolvedContextText: contextBundle.text,
+            });
+
+            for await (const event of streamAgentReply({
+              ...runtimeConfig,
               enableThinking,
               tools: enabledTools,
               executeTool: executeAgentTool,
@@ -375,6 +465,7 @@ export async function POST(
                 messages: [serializeCreatedMessage(userMessage), serializeCreatedMessage(agentMessage)],
                 thinking: finalThinking,
                 retrievalSources,
+                runtimeSnapshot,
               });
             } catch {
               // Stream was cancelled (client disconnected) — nothing to do.
@@ -448,6 +539,7 @@ export async function POST(
                   : [serializeCreatedMessage(userMessage)],
                 error: details,
                 retrievalSources,
+                runtimeSnapshot,
               });
             } catch {
               // Stream was cancelled (client disconnected) — nothing to do.
@@ -467,7 +559,8 @@ export async function POST(
     }
 
     let agentMessage = null;
-    let retrievalSources: Awaited<ReturnType<typeof buildMessageRetrievalContext>>["sources"] = [];
+    let retrievalSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"] = [];
+    let runtimeSnapshot: RuntimeSnapshot | null = null;
     if (agent) {
       const recentMessages = await prisma.chatMessage.findMany({
         where: { conversationId: conversation.id },
@@ -505,9 +598,9 @@ export async function POST(
       });
       const selectedTarget = threadLlmPlan.target;
       try {
-        const [orgContext, retrievedContext, senderUser] = await Promise.all([
+        const [orgContext, contextBundle, senderUser] = await Promise.all([
           buildOrgContext(),
-          buildMessageRetrievalContext(message),
+          resolveConversationContextBundle({ conversationId: conversation.id }),
           prisma.user.findUnique({
             where: { id: session.user.id },
             select: { displayName: true, name: true },
@@ -517,7 +610,36 @@ export async function POST(
         const selectedThinkingMode = selectedTarget?.thinkingMode ?? agent.llmThinkingMode;
         const llmHealth = await probeAgentLlm(selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : agent);
         const currentUserName = senderUser?.displayName || senderUser?.name || null;
-        retrievalSources = retrievedContext.sources;
+        retrievalSources = contextBundle.sources;
+        const history: Array<{ role: "user" | "assistant"; content: string }> = recentMessages.reverse().map((entry) => ({
+          role: (entry.senderAgentId ? "assistant" : "user") as "assistant" | "user",
+          content: entry.body,
+        }));
+        const runtimeOrgContext = [orgContext, contextBundle.text].filter(Boolean).join("\n\n");
+        const runtimeConfig = {
+          ...agent,
+          ...(selectedRuntimeConfig ?? {}),
+          llmThinkingMode: selectedThinkingMode,
+          orgContext: runtimeOrgContext,
+          contextSources: contextBundle.summarySources,
+          resolvedSources: contextBundle.sources,
+          currentUserName,
+        };
+        const runtimePreview = buildAgentRuntimePreview({
+          ...runtimeConfig,
+          history: history.map((entry) => ({
+            role: entry.role,
+            content: entry.content ?? "",
+          })),
+        });
+        runtimeSnapshot = buildRuntimeSnapshot({
+          runtimePreview,
+          resolvedSources: contextBundle.sources,
+          currentUserName,
+          history,
+          orgContext,
+          resolvedContextText: contextBundle.text,
+        });
         await prisma.conversation.update({
           where: { id: conversation.id },
           data: {
@@ -540,16 +662,9 @@ export async function POST(
         }
 
         const response = await generateAgentReply({
-          ...agent,
-          ...(selectedRuntimeConfig ?? {}),
-          llmThinkingMode: selectedThinkingMode,
-          orgContext: [orgContext, retrievedContext.text].filter(Boolean).join("\n\n"),
-          currentUserName,
+          ...runtimeConfig,
           enableThinking: resolveThinkingMode({ ...agent, llmThinkingMode: selectedThinkingMode }, message),
-          history: recentMessages.reverse().map((entry) => ({
-            role: entry.senderAgentId ? "assistant" : "user",
-            content: entry.body,
-          })),
+          history,
         });
 
         agentReply = response.content;
@@ -625,7 +740,7 @@ export async function POST(
       .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
       .map(serializeCreatedMessage);
 
-    return NextResponse.json({ messages, retrievalSources }, { status: 201 });
+    return NextResponse.json({ messages, retrievalSources, runtimeSnapshot }, { status: 201 });
   } catch (error) {
     if (isMissingChatTablesError(error)) {
       return NextResponse.json(

@@ -4,6 +4,10 @@ const SUPPORTED_CONVERSATION_DOCUMENT_EXTENSIONS = [
   "md",
   "doc",
   "docx",
+  "pptx",
+  "xlsx",
+  "csv",
+  "tsv",
   "jpg",
   "jpeg",
   "png",
@@ -15,7 +19,7 @@ const SUPPORTED_CONVERSATION_DOCUMENT_EXTENSIONS = [
 
 export const MAX_CONVERSATION_DOCUMENT_SIZE = 50 * 1024 * 1024;
 export const CONVERSATION_DOCUMENT_UNSUPPORTED_ERROR =
-  "Unsupported file type. Use PDF, text, Word, image, or audio files.";
+  "Unsupported file type. Use PDF, text, Word, PowerPoint, spreadsheet, image, or audio files.";
 
 export const CONVERSATION_DOCUMENT_ACCEPT = SUPPORTED_CONVERSATION_DOCUMENT_EXTENSIONS
   .map((extension) => `.${extension}`)
@@ -34,6 +38,10 @@ const FILE_TYPE_BY_EXTENSION: Record<string, string> = {
   webp: "image",
   doc: "document",
   docx: "document",
+  pptx: "document",
+  xlsx: "spreadsheet",
+  csv: "spreadsheet",
+  tsv: "spreadsheet",
 };
 
 const MIME_TYPE_BY_EXTENSION: Record<string, string> = {
@@ -49,6 +57,10 @@ const MIME_TYPE_BY_EXTENSION: Record<string, string> = {
   webp: "image/webp",
   doc: "application/msword",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  csv: "text/csv",
+  tsv: "text/tab-separated-values",
 };
 
 function normalizeExtension(filename: string) {

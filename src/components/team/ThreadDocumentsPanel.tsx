@@ -7,6 +7,7 @@ import {
   File,
   FileAudio,
   FileImage,
+  FileSpreadsheet,
   FileText,
   Loader2,
   Trash2,
@@ -34,6 +35,7 @@ export type ThreadDocumentUploadState = {
 function getDocumentIcon(fileType: string) {
   if (fileType === "image") return FileImage;
   if (fileType === "audio") return FileAudio;
+  if (fileType === "spreadsheet") return FileSpreadsheet;
   if (fileType === "pdf" || fileType === "text" || fileType === "document") return FileText;
   return File;
 }

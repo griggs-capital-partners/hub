@@ -627,7 +627,7 @@ export function ConversationPane({
                             {message.retrievalSources && message.retrievalSources.length > 0 ? (
                               <div className="mt-3 rounded-xl border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-3 py-2">
                                 <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8D877F]">
-                                  Read-Only Context Retrieved
+                                  Resolved Context Sources
                                 </p>
                                 <div className="flex flex-wrap gap-1.5">
                                   {message.retrievalSources.map((source, index) => (
@@ -636,7 +636,13 @@ export function ConversationPane({
                                       className="rounded-full border border-[rgba(75,156,211,0.18)] bg-[rgba(75,156,211,0.08)] px-2 py-1 text-[10px] text-[#A9DCF3]"
                                       title={`${source.target} - ${source.detail}`}
                                     >
-                                      {source.label}
+                                      {source.status === "unsupported"
+                                        ? `Unsupported - ${source.label}`
+                                        : source.status === "failed"
+                                          ? `Failed - ${source.label}`
+                                          : source.status === "unavailable"
+                                            ? `Unavailable - ${source.label}`
+                                            : `Used - ${source.label}`}
                                     </span>
                                   ))}
                                 </div>

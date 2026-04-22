@@ -14,6 +14,7 @@ import {
 } from "@/lib/agent-llm-config";
 import { buildOrgContext } from "@/lib/agent-context";
 import { getConversationForUser, isMissingChatTablesError, resolveConversationAgentMember } from "@/lib/chat";
+import { resolveConversationContextBundle } from "@/lib/conversation-context";
 import { prisma } from "@/lib/prisma";
 
 function buildReadiness(llmStatus: string, llmLastError: string | null) {
@@ -101,9 +102,10 @@ export async function GET(
     const shouldPersistThreadLlmState =
       serializeConversationLlmThreadState(threadLlmState) !== serializeConversationLlmThreadState(storedThreadLlmState);
 
-    const [llmHealth, orgContext, senderUser] = await Promise.all([
+    const [llmHealth, orgContext, contextBundle, senderUser] = await Promise.all([
       probeAgentLlm(threadExecutionTarget ? buildExecutionTargetRuntimeConfig(threadExecutionTarget) : agent),
       buildOrgContext(),
+      resolveConversationContextBundle({ conversationId: conversation.id }),
       prisma.user.findUnique({
         where: { id: session.user.id },
         select: { displayName: true, name: true },
@@ -138,7 +140,9 @@ export async function GET(
     }));
     const runtimePreview = buildAgentRuntimePreview({
       ...agent,
-      orgContext,
+      orgContext: [orgContext, contextBundle.text].filter(Boolean).join("\n\n"),
+      contextSources: contextBundle.summarySources,
+      resolvedSources: contextBundle.sources,
       currentUserName,
       history,
     });
@@ -172,12 +176,14 @@ export async function GET(
         recentHistoryCount: runtimePreview.recentHistoryCount,
         historyWindowSize: 12,
         knowledgeSources: runtimePreview.knowledgeSources,
+        resolvedSources: contextBundle.sources,
       },
       payload: {
         currentUserName,
         systemPrompt: runtimePreview.systemPrompt,
         history: runtimePreview.history,
         orgContext,
+        resolvedContextText: contextBundle.text,
       },
     });
   } catch (error) {
