@@ -32,12 +32,6 @@ export async function PATCH(
     }
 
     const { id } = await params;
-    const conversation = await getConversationForUser(id, session.user.id, { memberScope: "all" });
-
-    if (!conversation) {
-      return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
-    }
-
     const body = (await request.json()) as Record<string, unknown>;
     const addUserIds = parseIdList(body?.addUserIds);
     const addAgentIds = parseIdList(body?.addAgentIds);
@@ -61,14 +55,79 @@ export async function PATCH(
         : body?.activeAgentId === null
           ? null
           : undefined;
+    const lifecycleAction =
+      typeof body?.lifecycleAction === "string" && body.lifecycleAction.trim().length > 0
+        ? body.lifecycleAction.trim()
+        : undefined;
+
+    if (lifecycleAction !== undefined && lifecycleAction !== "archive" && lifecycleAction !== "restore") {
+      return NextResponse.json({ error: "Unsupported thread lifecycle action" }, { status: 400 });
+    }
+
+    if (
+      (lifecycleAction === "archive" || lifecycleAction === "restore")
+      && (
+        addUserIds.length + addAgentIds.length + removeUserIds.length + removeAgentIds.length > 0
+        || activeAgentId !== undefined
+        || projectId !== undefined
+        || requestedName !== undefined
+      )
+    ) {
+      return NextResponse.json(
+        { error: lifecycleAction === "restore" ? "Restore this thread on its own" : "Archive this thread on its own" },
+        { status: 400 }
+      );
+    }
+
+    const conversation = await getConversationForUser(id, session.user.id, {
+      memberScope: "all",
+      archived: lifecycleAction === "restore" ? "include" : "exclude",
+    });
+
+    if (!conversation) {
+      return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+    }
 
     if (
       addUserIds.length + addAgentIds.length + removeUserIds.length + removeAgentIds.length === 0
       && activeAgentId === undefined
       && projectId === undefined
       && requestedName === undefined
+      && lifecycleAction === undefined
     ) {
       return NextResponse.json({ error: "No thread updates were requested" }, { status: 400 });
+    }
+
+    if (lifecycleAction === "archive") {
+      if (conversation.archivedAt) {
+        return NextResponse.json({ archivedConversationId: conversation.id });
+      }
+
+      await prisma.conversation.update({
+        where: { id: conversation.id },
+        data: { archivedAt: new Date() },
+      });
+
+      return NextResponse.json({ archivedConversationId: conversation.id });
+    }
+
+    if (lifecycleAction === "restore") {
+      if (!conversation.archivedAt) {
+        return NextResponse.json({ conversation: serializeConversation(conversation) });
+      }
+
+      await prisma.conversation.update({
+        where: { id: conversation.id },
+        data: { archivedAt: null },
+      });
+
+      const restoredConversation = await getConversationForUser(conversation.id, session.user.id);
+
+      if (!restoredConversation) {
+        return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+      }
+
+      return NextResponse.json({ conversation: serializeConversation(restoredConversation) });
     }
 
     if (removeUserIds.includes(session.user.id)) {
@@ -241,5 +300,40 @@ export async function PATCH(
 
     console.error("[chat/conversations/:id][PATCH]", error);
     return NextResponse.json({ error: "Failed to update conversation" }, { status: 500 });
+  }
+}
+
+export async function DELETE(
+  _request: Request,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const session = await auth();
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const { id } = await params;
+    const conversation = await getConversationForUser(id, session.user.id, { archived: "include" });
+
+    if (!conversation) {
+      return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+    }
+
+    await prisma.conversation.delete({
+      where: { id: conversation.id },
+    });
+
+    return NextResponse.json({ deletedConversationId: conversation.id });
+  } catch (error) {
+    if (isMissingChatTablesError(error)) {
+      return NextResponse.json(
+        { error: "Team chat is not ready yet. The new chat tables still need to be migrated." },
+        { status: 503 }
+      );
+    }
+
+    console.error("[chat/conversations/:id][DELETE]", error);
+    return NextResponse.json({ error: "Failed to delete conversation" }, { status: 500 });
   }
 }

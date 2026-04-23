@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { MobileTopBar, Sidebar } from "@/components/layout/Sidebar";
 import { MobileNavProvider } from "@/components/layout/MobileNav";
+import { DesktopSidebarProvider } from "@/components/layout/DesktopSidebarContext";
 import { GitHubSync } from "@/components/layout/GitHubSync";
 
 export default async function HubLayout({ children }: { children: React.ReactNode }) {
@@ -71,16 +72,18 @@ export default async function HubLayout({ children }: { children: React.ReactNod
 
   return (
     <MobileNavProvider>
-      <div className="flex h-screen overflow-hidden bg-[#0D0D0D]">
-        <GitHubSync />
-        <Sidebar />
-        <main className="flex-1 overflow-y-auto">
-          <MobileTopBar />
-          <div className="p-4 md:p-6">
-            {children}
-          </div>
-        </main>
-      </div>
+      <DesktopSidebarProvider>
+        <div className="flex h-screen overflow-hidden bg-[#0D0D0D]">
+          <GitHubSync />
+          <Sidebar />
+          <main className="min-w-0 flex-1 overflow-y-auto">
+            <MobileTopBar />
+            <div className="p-4 md:p-6">
+              {children}
+            </div>
+          </main>
+        </div>
+      </DesktopSidebarProvider>
     </MobileNavProvider>
   );
 }

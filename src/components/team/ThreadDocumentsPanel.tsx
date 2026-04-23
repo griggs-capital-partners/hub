@@ -3,6 +3,7 @@
 import { useRef } from "react";
 import {
   AlertTriangle,
+  Check,
   Download,
   File,
   FileAudio,
@@ -28,7 +29,7 @@ export type ThreadDocumentUploadState = {
   conversationId: string;
   filename: string;
   fileSize: number;
-  status: "uploading" | "failed";
+  status: "uploading" | "uploaded" | "failed";
   error: string | null;
 };
 
@@ -138,7 +139,9 @@ export function ThreadDocumentsPanel({
                 "flex items-start gap-3 rounded-2xl border px-3 py-3",
                 upload.status === "failed"
                   ? "border-[rgba(239,68,68,0.18)] bg-[rgba(239,68,68,0.06)]"
-                  : "border-[rgba(255,255,255,0.06)] bg-[#111111]"
+                  : upload.status === "uploaded"
+                    ? "border-[rgba(74,222,128,0.18)] bg-[rgba(74,222,128,0.06)]"
+                    : "border-[rgba(255,255,255,0.06)] bg-[#111111]"
               )}
             >
               <div
@@ -146,17 +149,27 @@ export function ThreadDocumentsPanel({
                   "flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl",
                   upload.status === "failed"
                     ? "bg-[rgba(239,68,68,0.14)] text-[#EF4444]"
-                    : "bg-[rgba(247,148,29,0.12)] text-[#F7941D]"
+                    : upload.status === "uploaded"
+                      ? "bg-[rgba(74,222,128,0.12)] text-[#4ADE80]"
+                      : "bg-[rgba(247,148,29,0.12)] text-[#F7941D]"
                 )}
               >
-                {upload.status === "failed" ? <AlertTriangle size={16} /> : <Loader2 size={16} className="animate-spin" />}
+                {upload.status === "failed"
+                  ? <AlertTriangle size={16} />
+                  : upload.status === "uploaded"
+                    ? <Check size={16} />
+                    : <Loader2 size={16} className="animate-spin" />}
               </div>
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium text-[#F6F3EE]">{upload.filename}</p>
                 <p className="mt-1 text-xs text-[#8D877F]">
                   {formatDocumentBytes(upload.fileSize)}
                   {" · "}
-                  {upload.status === "failed" ? upload.error ?? "Upload failed" : "Uploading..."}
+                  {upload.status === "failed"
+                    ? upload.error ?? "Upload failed"
+                    : upload.status === "uploaded"
+                      ? "Attached to this thread"
+                      : "Uploading..."}
                 </p>
               </div>
               {upload.status === "failed" && onDismissUpload ? (

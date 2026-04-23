@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { cn } from "@/lib/utils";
 import { deriveInviteName } from "@/lib/team-invites";
+import { useDesktopSidebar } from "@/components/layout/DesktopSidebarContext";
 import { ConversationPane } from "@/components/team/ConversationPane";
 import { NewThreadModal } from "@/components/team/NewThreadModal";
 import { TeamDiscoveryPane } from "@/components/team/TeamDiscoveryPane";
@@ -40,7 +41,6 @@ import {
   formatThinkingMode,
   formatTokensK,
   getAgentSidebarStatus,
-  getConversationAvatar,
   getConversationLabel,
   getConversationProjectSections,
   getConversationParticipantSummary,
@@ -257,15 +257,20 @@ function mergeChatProjects(
   return Array.from(mergedProjects.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function sortConversationsByUpdatedAt(conversations: ConversationSummary[]) {
+  return [...conversations].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+}
+
 type TeamChatRouteState =
   | { kind: "rail" }
   | { kind: "discovery" }
+  | { kind: "archived"; query?: string }
   | { kind: "project"; projectId: string }
   | { kind: "search"; query: string; projectId?: string | null }
   | {
       kind: "thread";
       conversationId: string;
-      context?: "discover" | "project" | "search";
+      context?: "discover" | "project" | "search" | "archived";
       projectId?: string | null;
       query?: string;
     };
@@ -291,6 +296,14 @@ function buildTeamChatHref(pathname: string, routeState: TeamChatRouteState) {
       params.set("view", "project");
       params.set("projectId", routeState.projectId);
       break;
+    case "archived": {
+      params.set("view", "archived");
+      const query = routeState.query?.trim();
+      if (query) {
+        params.set("q", query);
+      }
+      break;
+    }
     case "search": {
       const query = routeState.query.trim();
       if (!query) {
@@ -816,6 +829,7 @@ export function TeamClient({
   projects,
   initialConversations,
 }: Props) {
+  const { collapseForChatFocus: collapseDesktopSidebarForChatFocus, releaseChatFocus: releaseDesktopSidebarChatFocus } = useDesktopSidebar();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -861,6 +875,15 @@ export function TeamClient({
   const [showInvite, setShowInvite] = useState(false);
   const [showNewThreadModal, setShowNewThreadModal] = useState(false);
   const [showDiscoveryView, setShowDiscoveryView] = useState(initialConversations.length === 0);
+  const [showArchivedView, setShowArchivedView] = useState(false);
+  const [archivedConversations, setArchivedConversations] = useState<ConversationSummary[]>([]);
+  const [archivedConversationsLoaded, setArchivedConversationsLoaded] = useState(false);
+  const [archivedConversationsLoading, setArchivedConversationsLoading] = useState(false);
+  const [archivedConversationsError, setArchivedConversationsError] = useState<string | null>(null);
+  const [archivedActionError, setArchivedActionError] = useState<string | null>(null);
+  const [archivedActionConversationId, setArchivedActionConversationId] = useState<string | null>(null);
+  const [restoringConversationId, setRestoringConversationId] = useState<string | null>(null);
+  const [deletingArchivedConversationId, setDeletingArchivedConversationId] = useState<string | null>(null);
   const [newThreadInitialProjectId, setNewThreadInitialProjectId] = useState<string | null>(null);
   const [showAddParticipantsModal, setShowAddParticipantsModal] = useState(false);
   const [participantActionError, setParticipantActionError] = useState<string | null>(null);
@@ -878,6 +901,7 @@ export function TeamClient({
   const userScrolledUpRef = useRef(false);
   const conversationsRef = useRef(conversations);
   const selectedConversationIdRef = useRef<string | null>(selectedConversationId);
+  const threadUploadDismissTimersRef = useRef<Record<string, number>>({});
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showThreadStarter, setShowThreadStarter] = useState(initialConversations.length === 0);
   const [threadDrawerOpen, setThreadDrawerOpen] = useState(false);
@@ -890,12 +914,37 @@ export function TeamClient({
   const routeQuery = searchParams.get("q") ?? "";
   const routeAgentId = searchParams.get("agent");
 
-  conversationsRef.current = conversations;
-  selectedConversationIdRef.current = selectedConversationId;
-
   const isConversationStillSelected = useCallback((conversationId: string | null) => {
     return selectedConversationIdRef.current === conversationId;
   }, []);
+
+  useEffect(() => {
+    return () => {
+      Object.values(threadUploadDismissTimersRef.current).forEach((timerId) => {
+        window.clearTimeout(timerId);
+      });
+      threadUploadDismissTimersRef.current = {};
+    };
+  }, []);
+
+  function clearThreadUploadDismiss(uploadId: string) {
+    const timeoutId = threadUploadDismissTimersRef.current[uploadId];
+    if (timeoutId) {
+      window.clearTimeout(timeoutId);
+      delete threadUploadDismissTimersRef.current[uploadId];
+    }
+  }
+
+  function scheduleThreadUploadDismiss(conversationId: string, uploadId: string, delayMs = 2400) {
+    clearThreadUploadDismiss(uploadId);
+    threadUploadDismissTimersRef.current[uploadId] = window.setTimeout(() => {
+      updateThreadDocumentUploads(
+        conversationId,
+        (current) => current.filter((upload) => upload.id !== uploadId)
+      );
+      delete threadUploadDismissTimersRef.current[uploadId];
+    }, delayMs);
+  }
 
   const replaceMessagesForConversation = useCallback((
     conversationId: string | null,
@@ -1058,6 +1107,10 @@ export function TeamClient({
   const getThreadOriginState = useCallback((): Exclude<TeamChatRouteState, { kind: "rail" } | { kind: "thread" }> | null => {
     const trimmedQuery = discoveryQuery.trim();
 
+    if (showArchivedView) {
+      return trimmedQuery ? { kind: "archived", query: trimmedQuery } : { kind: "archived" };
+    }
+
     if (trimmedQuery) {
       return {
         kind: "search",
@@ -1078,7 +1131,7 @@ export function TeamClient({
     }
 
     return null;
-  }, [discoveryQuery, selectedProjectId, showDiscoveryView]);
+  }, [discoveryQuery, selectedProjectId, showArchivedView, showDiscoveryView]);
 
   const getThreadRouteState = useCallback((conversationId: string): Extract<TeamChatRouteState, { kind: "thread" }> => {
     const origin = getThreadOriginState();
@@ -1106,6 +1159,15 @@ export function TeamClient({
       };
     }
 
+    if (origin.kind === "archived") {
+      return {
+        kind: "thread",
+        conversationId,
+        context: "archived",
+        query: origin.query,
+      };
+    }
+
     return {
       kind: "thread",
       conversationId,
@@ -1122,6 +1184,7 @@ export function TeamClient({
     setSelectedProjectId(null);
     setDiscoveryQuery("");
     setShowDiscoveryView(true);
+    setShowArchivedView(false);
     syncTeamChatRoute({ kind: "discovery" });
   }
 
@@ -1130,7 +1193,19 @@ export function TeamClient({
     setSelectedProjectId(projectId);
     setDiscoveryQuery("");
     setShowDiscoveryView(true);
+    setShowArchivedView(false);
     syncTeamChatRoute({ kind: "project", projectId });
+  }
+
+  function openArchivedThreads() {
+    setSelectedConversationId(null);
+    setSelectedProjectId(null);
+    setDiscoveryQuery("");
+    setShowDiscoveryView(true);
+    setShowArchivedView(true);
+    setArchivedActionError(null);
+    setArchivedActionConversationId(null);
+    syncTeamChatRoute({ kind: "archived" });
   }
 
   function openConversationFromRail(conversationId: string) {
@@ -1140,6 +1215,7 @@ export function TeamClient({
       setSelectedProjectId(null);
       setDiscoveryQuery("");
       setShowDiscoveryView(false);
+      setShowArchivedView(false);
     }
     syncTeamChatRoute(nextRouteState);
   }
@@ -1151,25 +1227,39 @@ export function TeamClient({
 
   function handleDiscoveryQueryChange(value: string) {
     const trimmedValue = value.trim();
-    const nextRouteState = trimmedValue
-      ? {
-          kind: "search" as const,
-          query: value,
-          projectId: selectedProjectId,
-        }
-      : selectedProjectId
+    const nextRouteState = showArchivedView
+      ? (
+          trimmedValue
+            ? {
+                kind: "archived" as const,
+                query: value,
+              }
+            : {
+                kind: "archived" as const,
+              }
+        )
+      : trimmedValue
         ? {
-            kind: "project" as const,
+            kind: "search" as const,
+            query: value,
             projectId: selectedProjectId,
           }
-        : {
-            kind: "discovery" as const,
-          };
+        : selectedProjectId
+          ? {
+              kind: "project" as const,
+              projectId: selectedProjectId,
+            }
+          : {
+              kind: "discovery" as const,
+            };
 
     setSelectedConversationId(null);
     setDiscoveryQuery(value);
     setShowDiscoveryView(true);
-    syncTeamChatRoute(nextRouteState, searchParams.get("view") === "search" ? "replace" : "push");
+    syncTeamChatRoute(
+      nextRouteState,
+      searchParams.get("view") === "search" || searchParams.get("view") === "archived" ? "replace" : "push"
+    );
   }
 
   function openNewThreadComposer(projectId?: string | null) {
@@ -1187,12 +1277,45 @@ export function TeamClient({
     setSelectedProjectId(null);
     setDiscoveryQuery("");
     setShowDiscoveryView(false);
+    setShowArchivedView(false);
+    setArchivedActionError(null);
+    setArchivedActionConversationId(null);
     syncTeamChatRoute({ kind: "rail" }, "replace");
   }
 
   function closeActiveConversation() {
     setSelectedConversationId(null);
     syncTeamChatRoute(getFallbackRouteState(), "replace");
+  }
+
+  async function loadArchivedConversations(options?: { silent?: boolean }) {
+    const silent = options?.silent === true;
+
+    if (!silent) {
+      setArchivedConversationsLoading(true);
+    }
+    setArchivedConversationsError(null);
+
+    try {
+      const response = await fetch("/api/chat/conversations?archived=only");
+      const data = await parseApiResponse(response);
+
+      if (!response.ok || !Array.isArray(data.conversations)) {
+        throw new Error(getApiErrorMessage(data.error) ?? "Unable to load archived threads right now.");
+      }
+
+      setArchivedConversations(sortConversationsByUpdatedAt(data.conversations as ConversationSummary[]));
+      setArchivedConversationsLoaded(true);
+    } catch (error) {
+      setArchivedConversations((current) => (archivedConversationsLoaded ? current : []));
+      setArchivedConversationsError(
+        error instanceof Error ? error.message : "Unable to load archived threads right now."
+      );
+    } finally {
+      if (!silent) {
+        setArchivedConversationsLoading(false);
+      }
+    }
   }
 
   async function loadChatProjects(options?: { silent?: boolean }) {
@@ -1411,9 +1534,20 @@ export function TeamClient({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadDrawerOpen]);
 
+  useEffect(() => {
+    if (!showArchivedView) return;
+    void loadArchivedConversations({ silent: archivedConversationsLoaded });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchivedView]);
+
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.id === selectedConversationId) ?? null,
     [conversations, selectedConversationId]
+  );
+  const activeConversationId = activeConversation?.id ?? null;
+  const routeConversationVisible = useMemo(
+    () => (routeConversationId ? conversations.some((conversation) => conversation.id === routeConversationId) : false),
+    [conversations, routeConversationId]
   );
   const activeConversationDirectPartner = useMemo(
     () => (activeConversation?.type === "direct" ? getDirectConversationPartner(activeConversation, currentUserId) : null),
@@ -1424,56 +1558,90 @@ export function TeamClient({
     [activeConversation]
   );
   const renderedMessages = useMemo(() => dedupeChatMessages(messages), [messages]);
+  const invalidateConversationAccessRef = useRef<(conversationId: string) => void>(() => {});
+
+  conversationsRef.current = conversations;
+  selectedConversationIdRef.current = activeConversationId;
+  invalidateConversationAccessRef.current = (conversationId: string) => {
+    clearConversationInspectorState();
+    removeConversationFromVisibleState(conversationId);
+  };
 
   useEffect(() => {
-    const conversationId = selectedConversationId;
-
-    async function loadMessages() {
-      if (!conversationId) {
-        return;
-      }
-
-      setLoadingMessages(true);
-      try {
-        const response = await fetch(`/api/chat/conversations/${conversationId}/messages`);
-        const data = await response.json();
-        if (data.messages) {
-          replaceMessagesForConversation(conversationId, data.messages);
-        }
-        if (data.conversation && isConversationStillSelected(conversationId)) {
-          setConversations((current) => {
-            const others = current.filter((conversation) => conversation.id !== data.conversation.id);
-            return [data.conversation, ...others].sort(
-              (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
-            );
-          });
-        }
-      } catch {
-      } finally {
-        if (isConversationStillSelected(conversationId)) {
-          setLoadingMessages(false);
-        }
-      }
-    }
+    const conversationId = activeConversationId;
 
     if (!conversationId) {
       setLoadingMessages(false);
       return;
     }
 
+    const resolvedConversationId = conversationId;
+
+    async function loadMessages() {
+
+      setLoadingMessages(true);
+      try {
+        const response = await fetch(`/api/chat/conversations/${resolvedConversationId}/messages`);
+        const data = await parseApiResponse(response);
+
+        if (response.status === 404) {
+          invalidateConversationAccessRef.current(resolvedConversationId);
+          return;
+        }
+
+        if (!response.ok) {
+          return;
+        }
+
+        if (Array.isArray(data.messages)) {
+          replaceMessagesForConversation(resolvedConversationId, data.messages as ChatMessage[]);
+        }
+        if (
+          data.conversation
+          && typeof data.conversation === "object"
+          && isConversationStillSelected(resolvedConversationId)
+        ) {
+          const nextConversation = data.conversation as ConversationSummary;
+          setConversations((current) => {
+            const others = current.filter((conversation) => conversation.id !== nextConversation.id);
+            return [nextConversation, ...others].sort(
+              (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+            );
+          });
+        }
+      } catch {
+      } finally {
+        if (isConversationStillSelected(resolvedConversationId)) {
+          setLoadingMessages(false);
+        }
+      }
+    }
+
     loadMessages();
-  }, [isConversationStillSelected, replaceMessagesForConversation, selectedConversationId]);
+  }, [activeConversationId, isConversationStillSelected, replaceMessagesForConversation]);
 
   useEffect(() => {
-    const conversationId = selectedConversationId;
+    const conversationId = activeConversationId;
     if (!conversationId || hasStreamingAgentMessage) return;
+
+    const resolvedConversationId = conversationId;
 
     async function pollMessages() {
       try {
-        const response = await fetch(`/api/chat/conversations/${conversationId}/messages`);
-        const data = await response.json();
-        if (data.messages) {
-          replaceMessagesForConversation(conversationId, data.messages);
+        const response = await fetch(`/api/chat/conversations/${resolvedConversationId}/messages`);
+        const data = await parseApiResponse(response);
+
+        if (response.status === 404) {
+          invalidateConversationAccessRef.current(resolvedConversationId);
+          return;
+        }
+
+        if (!response.ok) {
+          return;
+        }
+
+        if (Array.isArray(data.messages)) {
+          replaceMessagesForConversation(resolvedConversationId, data.messages as ChatMessage[]);
         }
       } catch {
       }
@@ -1481,7 +1649,7 @@ export function TeamClient({
 
     const interval = setInterval(pollMessages, 3_000);
     return () => clearInterval(interval);
-  }, [hasStreamingAgentMessage, replaceMessagesForConversation, selectedConversationId]);
+  }, [activeConversationId, hasStreamingAgentMessage, replaceMessagesForConversation]);
 
   useEffect(() => {
     if (!userScrolledUpRef.current && isAtBottomRef.current) {
@@ -1541,6 +1709,11 @@ export function TeamClient({
       });
       const data = await parseApiResponse(response);
 
+      if (response.status === 404) {
+        invalidateConversationAccessRef.current(conversationId);
+        return;
+      }
+
       if (!response.ok) {
         setInspectorErrorForConversation(
           conversationId,
@@ -1598,20 +1771,20 @@ export function TeamClient({
   ]);
 
   useEffect(() => {
-    if (!selectedConversationId) {
+    if (!activeConversationId) {
       clearConversationInspectorState();
       return;
     }
 
-    void refreshConversationInspector(selectedConversationId);
-  }, [clearConversationInspectorState, refreshConversationInspector, selectedConversationId, activeConversationPrimaryAgent?.id]);
+    void refreshConversationInspector(activeConversationId);
+  }, [activeConversationId, activeConversationPrimaryAgent?.id, clearConversationInspectorState, refreshConversationInspector]);
 
   useEffect(() => {
-    if (!selectedConversationId) {
+    if (!activeConversationId) {
       return;
     }
 
-    const conversationId = selectedConversationId;
+    const conversationId = activeConversationId;
 
     function handleRefresh() {
       void refreshConversationInspector(conversationId);
@@ -1630,7 +1803,7 @@ export function TeamClient({
       window.removeEventListener("focus", handleRefresh);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [refreshConversationInspector, selectedConversationId]);
+  }, [activeConversationId, refreshConversationInspector]);
 
   const threadSections = useMemo(
     () => getConversationProjectSections(conversations, chatProjects),
@@ -1758,6 +1931,7 @@ export function TeamClient({
       return;
     }
 
+    clearThreadUploadDismiss(uploadId);
     updateThreadDocumentUploads(
       selectedConversationId,
       (current) => current.filter((upload) => upload.id !== uploadId)
@@ -1823,9 +1997,20 @@ export function TeamClient({
         upsertConversation(data.conversation as ConversationSummary);
         updateThreadDocumentUploads(
           conversationId,
-          (current) => current.filter((upload) => upload.id !== uploadId)
+          (current) =>
+            current.map((upload) =>
+              upload.id === uploadId
+                ? {
+                    ...upload,
+                    status: "uploaded",
+                    error: null,
+                  }
+                : upload
+            )
         );
+        scheduleThreadUploadDismiss(conversationId, uploadId);
       } catch (error) {
+        clearThreadUploadDismiss(uploadId);
         updateThreadDocumentUploads(conversationId, (current) =>
           current.map((upload) =>
             upload.id === uploadId
@@ -1886,7 +2071,12 @@ export function TeamClient({
 
   async function openDirectConversation(
     target: { userId?: string; agentId?: string },
-    options?: { forceNew?: boolean; projectId?: string | null; history?: "push" | "replace" }
+    options?: {
+      forceNew?: boolean;
+      projectId?: string | null;
+      name?: string | null;
+      history?: "push" | "replace";
+    }
   ): Promise<ConversationSummary | null> {
     const targetId = target.userId ?? target.agentId ?? "";
     const shouldForceNew = options?.forceNew === true;
@@ -1917,6 +2107,7 @@ export function TeamClient({
           type: "direct",
           ...(shouldForceNew ? { forceNew: true } : {}),
           ...(shouldForceNew && options?.projectId ? { projectId: options.projectId } : {}),
+          ...(shouldForceNew && options?.name?.trim() ? { name: options.name.trim() } : {}),
           ...(target.userId ? { userId: target.userId } : {}),
           ...(target.agentId ? { agentId: target.agentId } : {}),
         }),
@@ -1942,6 +2133,7 @@ export function TeamClient({
     setSelectedProjectId(null);
     setDiscoveryQuery("");
     setShowDiscoveryView(false);
+    setShowArchivedView(false);
     void openDirectConversation(target);
   }
 
@@ -1967,6 +2159,64 @@ export function TeamClient({
     }
 
     if (routeView === "thread" && routeConversationId) {
+      if (!routeConversationVisible) {
+        setSelectedConversationId(null);
+
+        if (routeContext === "search") {
+          const trimmedRouteQuery = routeQuery.trim();
+          if (trimmedRouteQuery) {
+            setSelectedProjectId(routeProjectId || null);
+            setDiscoveryQuery(routeQuery);
+            setShowDiscoveryView(true);
+            setShowArchivedView(false);
+            syncTeamChatRoute(
+              {
+                kind: "search",
+                query: routeQuery,
+                projectId: routeProjectId || null,
+              },
+              "replace"
+            );
+            return;
+          }
+        }
+
+        if (routeContext === "project" && routeProjectId) {
+          setSelectedProjectId(routeProjectId);
+          setDiscoveryQuery("");
+          setShowDiscoveryView(true);
+          setShowArchivedView(false);
+          syncTeamChatRoute({ kind: "project", projectId: routeProjectId }, "replace");
+          return;
+        }
+
+        if (routeContext === "archived") {
+          const trimmedRouteQuery = routeQuery.trim();
+          setSelectedProjectId(null);
+          setDiscoveryQuery(trimmedRouteQuery ? routeQuery : "");
+          setShowDiscoveryView(true);
+          setShowArchivedView(true);
+          syncTeamChatRoute(trimmedRouteQuery ? { kind: "archived", query: routeQuery } : { kind: "archived" }, "replace");
+          return;
+        }
+
+        if (routeContext === "discover") {
+          setSelectedProjectId(null);
+          setDiscoveryQuery("");
+          setShowDiscoveryView(true);
+          setShowArchivedView(false);
+          syncTeamChatRoute({ kind: "discovery" }, "replace");
+          return;
+        }
+
+        setSelectedProjectId(null);
+        setDiscoveryQuery("");
+        setShowDiscoveryView(initialConversations.length === 0);
+        setShowArchivedView(false);
+        syncTeamChatRoute(initialConversations.length === 0 ? { kind: "discovery" } : { kind: "rail" }, "replace");
+        return;
+      }
+
       setSelectedConversationId(routeConversationId);
       if (routeContext === "search") {
         const trimmedRouteQuery = routeQuery.trim();
@@ -1974,6 +2224,7 @@ export function TeamClient({
           setSelectedProjectId(routeProjectId || null);
           setDiscoveryQuery(routeQuery);
           setShowDiscoveryView(true);
+          setShowArchivedView(false);
           return;
         }
       }
@@ -1982,6 +2233,15 @@ export function TeamClient({
         setSelectedProjectId(routeProjectId);
         setDiscoveryQuery("");
         setShowDiscoveryView(true);
+        setShowArchivedView(false);
+        return;
+      }
+
+      if (routeContext === "archived") {
+        setSelectedProjectId(null);
+        setDiscoveryQuery(routeQuery.trim() ? routeQuery : "");
+        setShowDiscoveryView(true);
+        setShowArchivedView(true);
         return;
       }
 
@@ -1989,12 +2249,23 @@ export function TeamClient({
         setSelectedProjectId(null);
         setDiscoveryQuery("");
         setShowDiscoveryView(true);
+        setShowArchivedView(false);
         return;
       }
 
       setSelectedProjectId(null);
       setDiscoveryQuery("");
       setShowDiscoveryView(false);
+      setShowArchivedView(false);
+      return;
+    }
+
+    if (routeView === "archived") {
+      setSelectedConversationId(null);
+      setSelectedProjectId(null);
+      setDiscoveryQuery(routeQuery.trim() ? routeQuery : "");
+      setShowDiscoveryView(true);
+      setShowArchivedView(true);
       return;
     }
 
@@ -2003,6 +2274,7 @@ export function TeamClient({
       setSelectedProjectId(routeProjectId);
       setDiscoveryQuery("");
       setShowDiscoveryView(true);
+      setShowArchivedView(false);
       return;
     }
 
@@ -2014,6 +2286,7 @@ export function TeamClient({
         setSelectedProjectId(routeProjectId || null);
         setDiscoveryQuery("");
         setShowDiscoveryView(true);
+        setShowArchivedView(false);
         syncTeamChatRoute(
           routeProjectId
             ? { kind: "project", projectId: routeProjectId }
@@ -2027,6 +2300,7 @@ export function TeamClient({
       setSelectedProjectId(routeProjectId || null);
       setDiscoveryQuery(routeQuery);
       setShowDiscoveryView(true);
+      setShowArchivedView(false);
       return;
     }
 
@@ -2035,6 +2309,7 @@ export function TeamClient({
       setSelectedProjectId(null);
       setDiscoveryQuery("");
       setShowDiscoveryView(true);
+      setShowArchivedView(false);
       return;
     }
 
@@ -2042,11 +2317,13 @@ export function TeamClient({
     setSelectedProjectId(null);
     setDiscoveryQuery("");
     setShowDiscoveryView(initialConversations.length === 0);
+    setShowArchivedView(false);
   }, [
     initialConversations.length,
     routeAgentId,
     routeContext,
     routeConversationId,
+    routeConversationVisible,
     routeProjectId,
     routeQuery,
     syncTeamChatRoute,
@@ -2054,6 +2331,13 @@ export function TeamClient({
   ]);
 
   useEffect(() => {
+    if (showArchivedView) {
+      setSearchResults([]);
+      setSearchLoading(false);
+      setSearchError(null);
+      return;
+    }
+
     const trimmedQuery = discoveryQuery.trim();
 
     if (!trimmedQuery) {
@@ -2099,7 +2383,7 @@ export function TeamClient({
       controller.abort();
       window.clearTimeout(timeoutId);
     };
-  }, [discoveryQuery]);
+  }, [discoveryQuery, showArchivedView]);
 
   async function createFreshThread(selection: NewThreadSelection) {
     const userIds = Array.from(
@@ -2118,11 +2402,16 @@ export function TeamClient({
     }
 
     setThreadDrawerOpen(false);
+    const explicitThreadName = selection.name.trim();
 
     if (totalSelected === 1) {
       const conversation = await openDirectConversation(
         userIds.length === 1 ? { userId: userIds[0] } : { agentId: agentIds[0] },
-        { forceNew: true, projectId }
+        {
+          forceNew: true,
+          projectId,
+          ...(explicitThreadName ? { name: explicitThreadName } : {}),
+        }
       );
 
       if (!conversation) {
@@ -2282,6 +2571,132 @@ export function TeamClient({
     );
   }
 
+  function removeConversationFromVisibleState(conversationId: string) {
+    setConversations((current) => current.filter((conversation) => conversation.id !== conversationId));
+    setThreadDocumentUploads((current) => {
+      if (!(conversationId in current)) {
+        return current;
+      }
+
+      const next = { ...current };
+      const removedUploads = next[conversationId] ?? [];
+      removedUploads.forEach((upload) => clearThreadUploadDismiss(upload.id));
+      delete next[conversationId];
+      return next;
+    });
+    setBootstrappingConversationId((current) => (current === conversationId ? null : current));
+
+    if (selectedConversationIdRef.current === conversationId || routeConversationId === conversationId) {
+      setSelectedConversationId(null);
+      syncTeamChatRoute(getFallbackRouteState(), "replace");
+    }
+  }
+
+  function removeArchivedConversationById(conversationId: string) {
+    setArchivedConversations((current) => current.filter((conversation) => conversation.id !== conversationId));
+  }
+
+  async function archiveConversationById(conversationId: string) {
+    const conversation = conversationsRef.current.find((entry) => entry.id === conversationId);
+    if (!conversation) {
+      throw new Error("Thread not found.");
+    }
+
+    const response = await fetch(`/api/chat/conversations/${conversationId}`, {
+      method: "PATCH",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ lifecycleAction: "archive" }),
+    });
+    const data = await parseApiResponse(response);
+
+    if (!response.ok || data.archivedConversationId !== conversationId) {
+      throw new Error(getApiErrorMessage(data.error) ?? "Unable to archive this thread right now.");
+    }
+
+    setArchivedConversations((current) => sortConversationsByUpdatedAt([
+      {
+        ...conversation,
+        updatedAt: new Date().toISOString(),
+      },
+      ...current.filter((entry) => entry.id !== conversationId),
+    ]));
+    removeConversationFromVisibleState(conversationId);
+    return conversationId;
+  }
+
+  async function restoreConversationById(conversationId: string) {
+    const archivedConversation = archivedConversations.find((entry) => entry.id === conversationId);
+
+    setArchivedActionError(null);
+    setArchivedActionConversationId(null);
+    setRestoringConversationId(conversationId);
+
+    try {
+      const conversation = await patchConversationById(
+        conversationId,
+        { lifecycleAction: "restore" },
+        "Unable to restore this thread right now."
+      );
+
+      removeArchivedConversationById(conversationId);
+
+      if (archivedConversation || showArchivedView) {
+        openConversationFromDiscovery(conversation.id);
+      }
+
+      return conversation;
+    } catch (error) {
+      setArchivedActionConversationId(conversationId);
+      setArchivedActionError(error instanceof Error ? error.message : "Unable to restore this thread right now.");
+      throw error;
+    } finally {
+      setRestoringConversationId((current) => (current === conversationId ? null : current));
+    }
+  }
+
+  async function deleteArchivedConversationById(conversationId: string) {
+    setArchivedActionError(null);
+    setArchivedActionConversationId(null);
+    setDeletingArchivedConversationId(conversationId);
+
+    try {
+      await deleteConversationById(conversationId);
+      return conversationId;
+    } catch (error) {
+      setArchivedActionConversationId(conversationId);
+      setArchivedActionError(error instanceof Error ? error.message : "Unable to delete this thread right now.");
+      throw error;
+    } finally {
+      setDeletingArchivedConversationId((current) => (current === conversationId ? null : current));
+    }
+  }
+
+  async function deleteConversationById(conversationId: string) {
+    const conversation =
+      conversationsRef.current.find((entry) => entry.id === conversationId)
+      ?? archivedConversations.find((entry) => entry.id === conversationId);
+    if (!conversation) {
+      throw new Error("Thread not found.");
+    }
+
+    const response = await fetch(`/api/chat/conversations/${conversationId}`, {
+      method: "DELETE",
+      headers: { Accept: "application/json" },
+    });
+    const data = await parseApiResponse(response);
+
+    if (!response.ok || data.deletedConversationId !== conversationId) {
+      throw new Error(getApiErrorMessage(data.error) ?? "Unable to delete this thread right now.");
+    }
+
+    removeArchivedConversationById(conversationId);
+    removeConversationFromVisibleState(conversationId);
+    return conversationId;
+  }
+
   async function setActiveAgentForThread(agentId: string) {
     if (!selectedConversationId || !activeConversation) {
       return;
@@ -2371,10 +2786,10 @@ export function TeamClient({
   }
 
   async function sendCurrentMessage() {
-    if (!selectedConversationId || !messageInput.trim() || sending) return;
+    if (!activeConversationId || !messageInput.trim() || sending) return;
     if (activeAgentSendBlocked) return;
 
-    const conversationId = selectedConversationId;
+    const conversationId = activeConversationId;
     const text = messageInput.trim();
     const isAgentConversation = Boolean(activeConversationPrimaryAgent);
     const optimisticMessage: ChatMessage = {
@@ -2630,10 +3045,16 @@ export function TeamClient({
           headers: { Accept: "application/json" },
         })
           .then(async (res) => ({
+            status: res.status,
             ok: res.ok,
             data: await parseApiResponse(res),
           }))
           .then((data) => {
+            if (data.status === 404) {
+              invalidateConversationAccessRef.current(conversationId);
+              return;
+            }
+
             if (!data.ok || !("conversationId" in data.data)) {
               return;
             }
@@ -2664,7 +3085,7 @@ export function TeamClient({
   }
 
   async function refreshConversationData() {
-    const conversationId = selectedConversationId;
+    const conversationId = activeConversationId;
     if (!conversationId) return;
 
     try {
@@ -2673,15 +3094,25 @@ export function TeamClient({
         fetch("/api/chat/conversations"),
       ]);
       const [messagesData, conversationsData] = await Promise.all([
-        messagesResponse.json(),
-        conversationsResponse.json(),
+        parseApiResponse(messagesResponse),
+        parseApiResponse(conversationsResponse),
       ]);
 
-      if (messagesData.messages) {
-        replaceMessagesForConversation(conversationId, messagesData.messages);
+      if (conversationsResponse.ok && Array.isArray(conversationsData.conversations)) {
+        setConversations(conversationsData.conversations as ConversationSummary[]);
       }
-      if (conversationsData.conversations) {
-        setConversations(conversationsData.conversations);
+
+      if (messagesResponse.status === 404) {
+        invalidateConversationAccessRef.current(conversationId);
+        return;
+      }
+
+      if (!messagesResponse.ok) {
+        return;
+      }
+
+      if (Array.isArray(messagesData.messages)) {
+        replaceMessagesForConversation(conversationId, messagesData.messages as ChatMessage[]);
       }
     } catch {
     }
@@ -2809,9 +3240,6 @@ export function TeamClient({
     }
   }
 
-  const activeConversationAvatar = activeConversation
-    ? getConversationAvatar(activeConversation, currentUserId)
-    : null;
   const activePartner = activeConversationDirectPartner;
   const activeAgentParticipant = activeConversationPrimaryAgent;
   const activeAgentInspector =
@@ -2836,14 +3264,16 @@ export function TeamClient({
     ?? activeConversation?.llmThread?.selectedModel
     ?? activeAgentInspector?.agent.llmModel
     ?? null;
-  const activeAgentReady =
+  const activeAgentConfigured =
     activeAgentParticipant
       ? activeAgentInspector
-        ? Boolean(activeAgentInspector.readiness.canSend)
-        : activeAgentParticipant.llmStatus === "online"
+        ? activeAgentInspector.agent.endpointConfigured
+        : Boolean(activeThreadModelLabel || activeAgentParticipant.llmModel)
+          || activeAgentParticipant.llmStatus !== "disconnected"
       : true;
+  const activeAgentReady = activeAgentParticipant ? activeAgentConfigured : true;
   const activeAgentSendBlocked =
-    Boolean(activeAgentParticipant) && (!activeAgentReady || activeAgentBootstrapPending);
+    Boolean(activeAgentParticipant) && (activeAgentBootstrapPending || !activeAgentConfigured);
   const activeAgentStatusLabel =
     activeAgentParticipant
       ? activeAgentBootstrapPending
@@ -2851,7 +3281,6 @@ export function TeamClient({
         : activeAgentInspector?.readiness.label || getAgentSidebarStatus(activeAgentParticipant.llmStatus).label
       : null;
   const clearThreadAvailable = Boolean(activeConversation?.type === "direct" && activeAgentParticipant);
-  const activeConversationMembers = activeConversation?.members ?? [];
   const activeConversationParticipantSummary = activeConversation
     ? getConversationParticipantSummary(activeConversation)
     : null;
@@ -2875,6 +3304,10 @@ export function TeamClient({
 
     if (routeContext === "discover") {
       return "Back to Discover";
+    }
+
+    if (routeContext === "archived") {
+      return "Back to Archived";
     }
 
     if (routeContext === "project") {
@@ -2965,9 +3398,37 @@ export function TeamClient({
     : "";
   const showDiscoveryPane = !activeConversation && (isDesktop || showDiscoveryView || selectedProjectId !== null);
   const hasMainPaneSelection = Boolean(activeConversation || showDiscoveryView || selectedProjectId !== null);
+  const handleEngageConversationArea = useCallback(() => {
+    if (!isDesktop || !activeConversation) {
+      return;
+    }
+
+    collapseDesktopSidebarForChatFocus();
+
+    if (!sidebarCollapsed) {
+      setSidebarCollapsed(true);
+    }
+  }, [activeConversation, collapseDesktopSidebarForChatFocus, isDesktop, sidebarCollapsed]);
+
+  useEffect(() => {
+    if (!isDesktop) {
+      return;
+    }
+
+    const inActiveThreadWorkflow = routeView === "thread" && Boolean(selectedConversationId);
+    if (!inActiveThreadWorkflow) {
+      releaseDesktopSidebarChatFocus();
+    }
+  }, [isDesktop, releaseDesktopSidebarChatFocus, routeView, selectedConversationId]);
+
+  useEffect(() => {
+    return () => {
+      releaseDesktopSidebarChatFocus();
+    };
+  }, [releaseDesktopSidebarChatFocus]);
 
   return (
-    <div className="-mx-4 -mt-4 flex flex-col overflow-hidden h-[calc(100dvh-5rem)] md:mx-auto md:mt-0 md:max-w-7xl md:gap-4 md:h-[calc(100dvh-4.75rem)]">
+    <div className="-mx-4 -mt-4 flex h-[calc(100dvh-5rem)] flex-col overflow-hidden md:mt-0 md:w-full md:gap-4 md:h-[calc(100dvh-4.75rem)]">
       <div className="hidden md:flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-black text-[#F0F0F0] flex items-center gap-3">
@@ -3020,20 +3481,26 @@ export function TeamClient({
               onMoveThread={async (conversationId, projectId) => {
                 await moveConversationToProjectById(conversationId, projectId);
               }}
+              onArchiveThread={async (conversationId) => {
+                await archiveConversationById(conversationId);
+              }}
+              onDeleteThread={async (conversationId) => {
+                await deleteConversationById(conversationId);
+              }}
+              archivedThreadCount={archivedConversationsLoaded ? archivedConversations.length : null}
+              archivedViewActive={showArchivedView}
+              onOpenArchived={openArchivedThreads}
             />
 
             {activeConversation ? (
               <ConversationPane
                 currentUserId={currentUserId}
                 activeConversation={activeConversation}
-                activeConversationAvatar={activeConversationAvatar}
-                activeConversationMembers={activeConversationMembers}
                 activeConversationParticipantSummary={activeConversationParticipantSummary}
                 activeConversationWorkspaceLabel={activeConversationWorkspaceLabel}
                 activeConversationTimestamp={activeConversationTimestamp}
                 activePartner={activePartner}
                 activeAgentParticipant={activeAgentParticipant}
-                activeThreadModelLabel={activeThreadModelLabel}
                 threadDrawerOpen={threadDrawerOpen}
                 threadOriginLabel={activeThreadOriginLabel}
                 loadingMessages={loadingMessages}
@@ -3050,7 +3517,6 @@ export function TeamClient({
                 bottomRef={bottomRef}
                 threadDocumentUploads={activeThreadDocumentUploads}
                 threadDocumentError={threadDocumentError}
-                removingDocumentId={removingDocumentId}
                 activeAgentReady={activeAgentReady}
                 activeAgentSendBlocked={activeAgentSendBlocked}
                 activeAgentBootstrapPending={activeAgentBootstrapPending}
@@ -3070,6 +3536,7 @@ export function TeamClient({
                   router.push(`/agents/${activeAgentParticipant.id}/profile`);
                 }}
                 onToggleDrawer={() => setThreadDrawerOpen((current) => !current)}
+                onEngageConversationArea={handleEngageConversationArea}
                 onHandleChatScroll={handleChatScroll}
                 onChangeMessageInput={setMessageInput}
                 onUploadThreadDocuments={uploadThreadDocuments}
@@ -3078,7 +3545,6 @@ export function TeamClient({
                 onChangeEditingDraft={setEditingDraft}
                 onCancelEditingMessage={cancelEditingMessage}
                 onSaveEditedMessage={saveEditedMessage}
-                onRemoveThreadDocument={removeThreadDocument}
                 onDismissThreadUpload={dismissThreadUpload}
                 onCopyMessage={(body, messageId) => void copyToClipboard(body, "message", messageId)}
                 onStartEditingMessage={startEditingMessage}
@@ -3089,6 +3555,14 @@ export function TeamClient({
                 currentUserId={currentUserId}
                 projects={chatProjects}
                 conversations={conversations}
+                archivedMode={showArchivedView}
+                archivedConversations={archivedConversations}
+                archivedLoading={archivedConversationsLoading}
+                archivedError={archivedConversationsError}
+                archivedActionError={archivedActionError}
+                archivedActionConversationId={archivedActionConversationId}
+                restoringConversationId={restoringConversationId}
+                deletingConversationId={deletingArchivedConversationId}
                 threadSections={threadSections}
                 searchResults={searchResults}
                 searchLoading={searchLoading}
@@ -3098,6 +3572,8 @@ export function TeamClient({
                 isDesktop={isDesktop}
                 onChangeSearchQuery={handleDiscoveryQueryChange}
                 onOpenConversation={openConversationFromDiscovery}
+                onRestoreConversation={restoreConversationById}
+                onDeleteConversation={deleteArchivedConversationById}
                 onOpenProject={openProjectSummary}
                 onOpenNewThread={openNewThreadComposer}
                 onBack={closeDiscoveryPane}

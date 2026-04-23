@@ -3,27 +3,25 @@
 import type { DragEvent, ReactNode } from "react";
 import { useEffect, useState } from "react";
 import {
+  Archive,
   ChevronDown,
-  Hash,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
-  Pencil,
-  Plus,
   Search,
-  Trash2,
   UserPlus,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { Avatar } from "@/components/ui/Avatar";
 import { Button } from "@/components/ui/Button";
+import { ProjectRowMenu } from "@/components/team/ProjectRowMenu";
 import { ThreadRowMenu } from "@/components/team/ThreadRowMenu";
 import {
   type DirectConversationShortcut,
   directConversationShortcutContainsConversation,
 } from "@/components/team/team-chat-thread-shortcuts";
 import { deriveInviteName } from "@/lib/team-invites";
-import { cn } from "@/lib/utils";
+import { cn, getInitials } from "@/lib/utils";
 import {
   type AIAgent,
   type ChatProjectOption,
@@ -60,6 +58,37 @@ function isUtilitySectionId(value: string): value is UtilitySectionId {
   return UTILITY_SECTION_IDS.some((sectionId) => sectionId === value);
 }
 
+function ThreadGlyph({
+  label,
+  compact = false,
+  active = false,
+}: {
+  label: string;
+  compact?: boolean;
+  active?: boolean;
+}) {
+  const initials = getInitials(label.trim() || "Thread");
+
+  return (
+    <div
+      className={cn(
+        "flex items-center justify-center rounded-xl border font-semibold uppercase tracking-[0.14em]",
+        compact ? "h-8 w-8 text-[10px]" : "h-7 w-7 text-[9px]",
+        active
+          ? "border-[rgba(247,148,29,0.18)] bg-[rgba(247,148,29,0.12)] text-[#FFF4E5]"
+          : "border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.035)] text-[#D5CFC8]"
+      )}
+      aria-hidden="true"
+    >
+      {initials || "TH"}
+    </div>
+  );
+}
+
+const railSectionLabelClassName = "truncate text-[13px] font-medium text-[#8E887F]";
+const railActionPillClassName =
+  "inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium leading-none transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(247,148,29,0.35)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212]";
+
 export function ThreadRail({
   currentUserId,
   members,
@@ -91,6 +120,11 @@ export function ThreadRail({
   onDeleteProject,
   onRenameThread,
   onMoveThread,
+  onArchiveThread,
+  onDeleteThread,
+  archivedThreadCount,
+  archivedViewActive,
+  onOpenArchived,
 }: {
   currentUserId: string;
   members: TeamMember[];
@@ -122,18 +156,17 @@ export function ThreadRail({
   onDeleteProject: (projectId: string) => Promise<{ deletedProjectId: string; movedThreadCount: number }>;
   onRenameThread: (conversationId: string, name: string | null) => Promise<void>;
   onMoveThread: (conversationId: string, projectId: string | null) => Promise<void>;
+  onArchiveThread: (conversationId: string) => Promise<void>;
+  onDeleteThread: (conversationId: string) => Promise<void>;
+  archivedThreadCount: number | null;
+  archivedViewActive: boolean;
+  onOpenArchived: () => void;
 }) {
   const router = useRouter();
   const [showCreateProject, setShowCreateProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
   const [createProjectError, setCreateProjectError] = useState<string | null>(null);
-  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
-  const [editingProjectName, setEditingProjectName] = useState("");
-  const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
-  const [projectActionError, setProjectActionError] = useState<{ id: string; message: string } | null>(null);
-  const [deleteConfirmProjectId, setDeleteConfirmProjectId] = useState<string | null>(null);
-  const [deletingProjectId, setDeletingProjectId] = useState<string | null>(null);
   const [draggingConversationId, setDraggingConversationId] = useState<string | null>(null);
   const [dragOverSectionId, setDragOverSectionId] = useState<string | null>(null);
   const [collapsedSectionIds, setCollapsedSectionIds] = useState<string[]>([]);
@@ -213,19 +246,6 @@ export function ThreadRail({
     }
   }, [collapsedUtilitySectionIds, hasLoadedUtilityCollapsedState]);
 
-  useEffect(() => {
-    if (editingProjectId && !threadSections.some((section) => section.id === editingProjectId)) {
-      setEditingProjectId(null);
-      setEditingProjectName("");
-      setProjectActionError(null);
-    }
-
-    if (deleteConfirmProjectId && !threadSections.some((section) => section.id === deleteConfirmProjectId)) {
-      setDeleteConfirmProjectId(null);
-      setProjectActionError(null);
-    }
-  }, [deleteConfirmProjectId, editingProjectId, threadSections]);
-
   async function handleCreateProject() {
     const projectName = newProjectName.trim();
     if (!projectName) {
@@ -246,51 +266,6 @@ export function ThreadRail({
       );
     } finally {
       setCreatingProject(false);
-    }
-  }
-
-  async function handleRenameProject(projectId: string) {
-    const projectName = editingProjectName.trim();
-    if (!projectName) {
-      setProjectActionError({ id: projectId, message: "Project name is required." });
-      return;
-    }
-
-    setProjectActionError(null);
-    setRenamingProjectId(projectId);
-
-    try {
-      await onRenameProject(projectId, projectName);
-      setEditingProjectId(null);
-      setEditingProjectName("");
-    } catch (error) {
-      setProjectActionError({
-        id: projectId,
-        message: error instanceof Error ? error.message : "Unable to rename that chat project right now.",
-      });
-    } finally {
-      setRenamingProjectId(null);
-    }
-  }
-
-  async function handleDeleteProject(projectId: string) {
-    setProjectActionError(null);
-    setDeletingProjectId(projectId);
-
-    try {
-      await onDeleteProject(projectId);
-      setDeleteConfirmProjectId(null);
-      if (editingProjectId === projectId) {
-        setEditingProjectId(null);
-        setEditingProjectName("");
-      }
-    } catch (error) {
-      setProjectActionError({
-        id: projectId,
-        message: error instanceof Error ? error.message : "Unable to delete that chat project right now.",
-      });
-    } finally {
-      setDeletingProjectId(null);
     }
   }
 
@@ -353,7 +328,7 @@ export function ThreadRail({
           aria-expanded={!isCollapsed}
           aria-controls={sectionBodyId}
           aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${label}`}
-          className="flex w-full items-center gap-2 rounded-xl px-2 py-1 text-left transition-colors hover:bg-[rgba(255,255,255,0.02)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(247,148,29,0.35)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212]"
+          className="flex w-full items-center gap-2 rounded-xl px-1.5 py-1 text-left transition-colors hover:bg-[rgba(255,255,255,0.02)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(247,148,29,0.35)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212]"
         >
           <ChevronDown
             size={12}
@@ -362,10 +337,10 @@ export function ThreadRail({
               isCollapsed ? "-rotate-90" : "rotate-0"
             )}
           />
-          <p className="truncate text-[10px] font-semibold uppercase tracking-[0.18em] text-[#6F6A64]">
+          <p className={railSectionLabelClassName}>
             {label}
           </p>
-          <span className="rounded-full bg-[rgba(255,255,255,0.03)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-[#7B756E]">
+          <span className="rounded-full bg-[rgba(255,255,255,0.03)] px-1.5 py-0.5 text-[9px] font-medium text-[#7B756E]">
             {count}
           </span>
           {containsSelectedThread ? (
@@ -376,7 +351,11 @@ export function ThreadRail({
           ) : null}
         </button>
 
-        <div id={sectionBodyId} className="space-y-1" hidden={isCollapsed}>
+        <div
+          id={sectionBodyId}
+          className="ml-4 mt-1 space-y-1 border-l border-[rgba(255,255,255,0.05)] pl-2"
+          hidden={isCollapsed}
+        >
           {children}
         </div>
       </section>
@@ -489,7 +468,7 @@ export function ThreadRail({
         onDragEnd={handleThreadDragEnd}
         aria-grabbed={isDragging}
         className={cn(
-          "group flex items-center gap-1 rounded-xl px-1 transition-all",
+          "group flex items-center gap-1 rounded-xl px-0.5 transition-all",
           isDragging ? "opacity-50" : "opacity-100"
         )}
       >
@@ -500,13 +479,13 @@ export function ThreadRail({
           aria-label={`Open thread ${label}`}
           title={label}
           className={cn(
-            "min-w-0 flex-1 rounded-xl px-3 py-2 text-left text-sm transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(247,148,29,0.35)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212]",
+            "min-w-0 flex-1 rounded-xl px-2.5 py-1.5 text-left transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(247,148,29,0.35)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212]",
             isActive
-              ? "bg-[rgba(247,148,29,0.16)] text-[#FFF4E5]"
+              ? "bg-[rgba(247,148,29,0.12)] text-[#FFF4E5]"
               : "text-[#D5CFC8] hover:bg-[rgba(255,255,255,0.04)] hover:text-[#F6F3EE]"
           )}
         >
-          <span className="block truncate font-medium">{label}</span>
+          <span className="block truncate text-[13px] font-medium">{label}</span>
         </button>
 
         <ThreadRowMenu
@@ -516,6 +495,8 @@ export function ThreadRail({
           active={isActive}
           onRenameThread={onRenameThread}
           onMoveThread={onMoveThread}
+          onArchiveThread={onArchiveThread}
+          onDeleteThread={onDeleteThread}
         />
       </div>
     );
@@ -550,6 +531,7 @@ export function ThreadRail({
                       {section.items.map((conversation) => {
                         const label = getConversationLabel(conversation, currentUserId);
                         const title = section.label === "General" ? label : `${section.label}: ${label}`;
+                        const isActive = conversation.id === selectedConversationId;
 
                         return (
                           <button
@@ -559,13 +541,13 @@ export function ThreadRail({
                             aria-label={`Open thread ${title}`}
                             className={cn(
                               "flex h-10 w-10 items-center justify-center rounded-2xl border transition-all",
-                              conversation.id === selectedConversationId
-                                ? "border-[rgba(247,148,29,0.5)] bg-[rgba(247,148,29,0.22)]"
-                                : "border-transparent bg-[rgba(247,148,29,0.1)] hover:bg-[rgba(247,148,29,0.18)]"
+                              isActive
+                                ? "border-[rgba(255,255,255,0.14)] bg-[rgba(255,255,255,0.06)] shadow-[inset_0_0_0_1px_rgba(247,148,29,0.05)]"
+                                : "border-transparent bg-transparent hover:bg-[rgba(255,255,255,0.04)]"
                             )}
                             type="button"
                           >
-                            <Hash size={17} className="text-[#F7941D]" />
+                            <ThreadGlyph label={label} compact active={isActive} />
                           </button>
                         );
                       })}
@@ -709,19 +691,35 @@ export function ThreadRail({
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-3 py-3">
           <section>
             <div className="mb-2 flex items-center justify-between px-2">
-              <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[#8D877F]">Projects</p>
+              <p className="text-[11px] font-medium text-[#8D877F]">Projects</p>
               <div className="flex items-center gap-2">
                 <span className="text-xs text-[#6F6A64]">{totalThreadCount}</span>
+                <button
+                  onClick={onOpenArchived}
+                  className={cn(
+                    railActionPillClassName,
+                    archivedViewActive
+                      ? "border-[rgba(247,148,29,0.18)] bg-[rgba(247,148,29,0.12)] text-[#FFF4E5]"
+                      : "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] text-[#B7B0A8] hover:text-[#F6F3EE]"
+                  )}
+                  type="button"
+                >
+                  <Archive size={12} />
+                  Archived
+                  {archivedThreadCount !== null ? <span>{archivedThreadCount}</span> : null}
+                </button>
                 <button
                   onClick={() => {
                     setShowCreateProject((current) => !current);
                     setCreateProjectError(null);
                   }}
-                  className="inline-flex items-center gap-1 rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8] transition-colors hover:text-[#F6F3EE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(247,148,29,0.35)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212]"
+                  className={cn(
+                    railActionPillClassName,
+                    "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] text-[#B7B0A8] hover:text-[#F6F3EE]"
+                  )}
                   type="button"
                 >
-                  <Plus size={12} />
-                  New Project
+                  + Project
                 </button>
               </div>
             </div>
@@ -791,7 +789,7 @@ export function ThreadRail({
                     <div
                       key={section.id}
                       className={cn(
-                        "rounded-[22px] border border-transparent px-1.5 py-1.5 transition-all",
+                        "rounded-[20px] border border-transparent px-1 py-1 transition-all",
                         isDropTarget
                           ? "border-[rgba(247,148,29,0.22)] bg-[rgba(247,148,29,0.08)] shadow-[inset_0_0_0_1px_rgba(247,148,29,0.08)]"
                           : "bg-transparent"
@@ -800,127 +798,71 @@ export function ThreadRail({
                       onDragLeave={(event) => handleSectionDragLeave(event, section.id)}
                       onDrop={(event) => void handleSectionDrop(event, section.id)}
                     >
-                      <div className="flex items-start justify-between gap-2 px-1">
+                      <div className="group flex items-start justify-between gap-2 px-1">
                         <div className="min-w-0 flex-1">
-                          {editingProjectId === section.id ? (
-                            <div className="space-y-2">
-                              <input
-                                value={editingProjectName}
-                                onChange={(event) => setEditingProjectName(event.target.value)}
-                                disabled={renamingProjectId === section.id}
-                                className="w-full rounded-xl border border-[rgba(255,255,255,0.08)] bg-[#111111] px-3 py-2 text-sm text-[#F0F0F0] placeholder:text-[#606060] transition-all duration-200 focus:border-[#F7941D] focus:outline-none focus:ring-1 focus:ring-[rgba(247,148,29,0.2)]"
-                              />
-                              {projectActionError?.id === section.id ? (
-                                <p className="text-xs leading-5 text-[#E7BBBB]">{projectActionError.message}</p>
-                              ) : null}
-                              <div className="flex justify-end gap-2">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => {
-                                    setEditingProjectId(null);
-                                    setEditingProjectName("");
-                                    setProjectActionError(null);
-                                  }}
-                                >
-                                  Cancel
-                                </Button>
-                                <Button
-                                  variant="secondary"
-                                  size="sm"
-                                  loading={renamingProjectId === section.id}
-                                  onClick={() => void handleRenameProject(section.id)}
-                                >
-                                  Save
-                                </Button>
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="flex items-center gap-1">
-                              <button
-                                type="button"
-                                onClick={() => toggleSectionCollapsed(section.id)}
-                                aria-expanded={!isCollapsed}
-                                aria-controls={sectionBodyId}
-                                aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${section.label}`}
-                                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[#8D877F] transition-colors hover:bg-[rgba(255,255,255,0.03)] hover:text-[#F6F3EE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(247,148,29,0.35)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212]"
-                              >
-                                <ChevronDown
-                                  size={13}
-                                  className={cn("transition-transform", isCollapsed ? "-rotate-90" : "rotate-0")}
-                                />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => onSelectProject(section.id)}
-                                aria-current={isProjectActive ? "page" : undefined}
-                                aria-label={`Open ${section.label} project summary`}
-                                className={cn(
-                                  "flex min-w-0 flex-1 items-center gap-2 rounded-xl px-1.5 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(247,148,29,0.35)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212]",
-                                  isProjectActive
-                                    ? "bg-[rgba(255,255,255,0.04)] text-[#F6F3EE]"
-                                    : "hover:bg-[rgba(255,255,255,0.03)]"
-                                )}
-                              >
-                                <p className={cn(
-                                  "truncate text-[10px] font-semibold uppercase tracking-[0.18em]",
-                                  isProjectActive ? "text-[#F6F3EE]" : "text-[#7B756E]"
-                                )}>
-                                  {section.label}
-                                </p>
-                                <span className="rounded-full border border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.04)] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em] text-[#8D877F]">
-                                  {section.items.length}
-                                </span>
-                                {containsSelectedThread || isProjectActive ? (
-                                  <span
-                                    className={cn(
-                                      "h-1.5 w-1.5 rounded-full",
-                                      containsSelectedThread ? "bg-[#F7941D]" : "bg-[#FDBA4D]"
-                                    )}
-                                    aria-hidden="true"
-                                  />
-                                ) : null}
-                                {containsSelectedThread ? (
-                                  <span className="sr-only">Contains the active thread.</span>
-                                ) : null}
-                                {isProjectActive ? (
-                                  <span className="sr-only">Project summary is open.</span>
-                                ) : null}
-                              </button>
-                            </div>
-                          )}
-                        </div>
-
-                        {section.id !== "general" && editingProjectId !== section.id ? (
                           <div className="flex items-center gap-1">
                             <button
                               type="button"
-                              onClick={() => {
-                                setEditingProjectId(section.id);
-                                setEditingProjectName(section.label);
-                                setDeleteConfirmProjectId(null);
-                                setProjectActionError(null);
-                              }}
-                              className="flex h-7 w-7 items-center justify-center rounded-lg border border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.03)] text-[#8D877F] transition-colors hover:text-[#F6F3EE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(247,148,29,0.35)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212]"
-                              title={`Rename ${section.label}`}
-                              aria-label={`Rename ${section.label}`}
+                              onClick={() => toggleSectionCollapsed(section.id)}
+                              aria-expanded={!isCollapsed}
+                              aria-controls={sectionBodyId}
+                              aria-label={`${isCollapsed ? "Expand" : "Collapse"} ${section.label}`}
+                              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[#8D877F] transition-colors hover:bg-[rgba(255,255,255,0.03)] hover:text-[#F6F3EE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(247,148,29,0.35)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212]"
                             >
-                              <Pencil size={13} />
+                              <ChevronDown
+                                size={13}
+                                className={cn("transition-transform", isCollapsed ? "-rotate-90" : "rotate-0")}
+                              />
                             </button>
                             <button
                               type="button"
-                              onClick={() => {
-                                setDeleteConfirmProjectId((current) => current === section.id ? null : section.id);
-                                setEditingProjectId(null);
-                                setProjectActionError(null);
-                              }}
-                              className="flex h-7 w-7 items-center justify-center rounded-lg border border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.03)] text-[#8D877F] transition-colors hover:text-[#F6F3EE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(247,148,29,0.35)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212]"
-                              title={`Delete ${section.label}`}
-                              aria-label={`Delete ${section.label}`}
+                              onClick={() => onSelectProject(section.id)}
+                              aria-current={isProjectActive ? "page" : undefined}
+                              aria-label={`Open ${section.label} project summary`}
+                              className={cn(
+                                "flex min-w-0 flex-1 items-center gap-2 rounded-xl px-1.5 py-1 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(247,148,29,0.35)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#121212]",
+                                isProjectActive
+                                  ? "bg-[rgba(255,255,255,0.04)] text-[#F6F3EE]"
+                                  : "hover:bg-[rgba(255,255,255,0.03)]"
+                              )}
                             >
-                              <Trash2 size={13} />
+                              <p className={cn(
+                                railSectionLabelClassName,
+                                isProjectActive ? "text-[#F6F3EE]" : "text-[#8E887F]"
+                              )}>
+                                {section.label}
+                              </p>
+                              <span className="rounded-full bg-[rgba(255,255,255,0.04)] px-1.5 py-0.5 text-[9px] font-medium text-[#8D877F]">
+                                {section.items.length}
+                              </span>
+                              {containsSelectedThread || isProjectActive ? (
+                                <span
+                                  className={cn(
+                                    "h-1.5 w-1.5 rounded-full",
+                                    containsSelectedThread ? "bg-[#F7941D]" : "bg-[#FDBA4D]"
+                                  )}
+                                  aria-hidden="true"
+                                />
+                              ) : null}
+                              {containsSelectedThread ? (
+                                <span className="sr-only">Contains the active thread.</span>
+                              ) : null}
+                              {isProjectActive ? (
+                                <span className="sr-only">Project summary is open.</span>
+                              ) : null}
                             </button>
                           </div>
+                        </div>
+
+                        {section.id !== "general" ? (
+                          <ProjectRowMenu
+                            active={containsSelectedThread || isProjectActive}
+                            projectId={section.id}
+                            projectLabel={section.label}
+                            threadCount={section.items.length}
+                            onRenameProject={onRenameProject}
+                            onDeleteProject={onDeleteProject}
+                          />
                         ) : null}
                       </div>
 
@@ -930,46 +872,16 @@ export function ThreadRail({
                         </div>
                       ) : null}
 
-                      {deleteConfirmProjectId === section.id ? (
-                        <div className="mx-2 rounded-2xl border border-[rgba(239,68,68,0.16)] bg-[rgba(239,68,68,0.06)] px-3 py-3">
-                          <p className="text-sm font-medium text-[#F6F3EE]">Delete {section.label}?</p>
-                          <p className="mt-1 text-xs leading-5 text-[#D1B5B5]">
-                            {section.items.length > 0
-                              ? `${section.items.length} thread${section.items.length === 1 ? "" : "s"} will move to General.`
-                              : "No threads will be deleted. Future threads can still use General."}
-                          </p>
-                          {projectActionError?.id === section.id ? (
-                            <p className="mt-2 text-xs leading-5 text-[#F2C7C7]">{projectActionError.message}</p>
-                          ) : null}
-                          <div className="mt-3 flex justify-end gap-2">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => {
-                                setDeleteConfirmProjectId(null);
-                                setProjectActionError(null);
-                              }}
-                            >
-                              Cancel
-                            </Button>
-                            <Button
-                              variant="danger"
-                              size="sm"
-                              loading={deletingProjectId === section.id}
-                              onClick={() => void handleDeleteProject(section.id)}
-                            >
-                              Delete Project
-                            </Button>
-                          </div>
-                        </div>
-                      ) : null}
-
-                      <div id={sectionBodyId} className="space-y-0.5" hidden={isCollapsed}>
+                      <div
+                        id={sectionBodyId}
+                        className="ml-4 mt-1 space-y-0.5 border-l border-[rgba(255,255,255,0.05)] pl-2"
+                        hidden={isCollapsed}
+                      >
                         {section.items.length > 0 ? (
                           section.items.map((conversation) => renderProjectThreadRow(conversation))
                         ) : (
-                          <div className="px-3 py-2">
-                            <p className="text-sm text-[#6F6A64]">
+                          <div className="px-2.5 py-2">
+                            <p className="text-xs text-[#6F6A64]">
                               {section.id === "general" && !hasAnyThreads && projects.length === 0
                                 ? "No threads yet. Start a new chat from above."
                                 : section.id === "general"
@@ -1001,22 +913,23 @@ export function ThreadRail({
                 ),
                 children: groupConversations.length > 0 ? (
                   <>
-                    {groupConversations.map((conversation) => (
-                      <SidebarRow
-                        key={conversation.id}
-                        variant="secondary"
-                        active={conversation.id === selectedConversationId}
-                        icon={
-                          <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[rgba(247,148,29,0.08)] text-[#D89A3C]">
-                            <Hash size={15} />
-                          </div>
-                        }
-                        title={getConversationLabel(conversation, currentUserId)}
-                        preview={getPreviewText(conversation)}
-                        meta={conversation.latestMessage ? formatPreviewTime(conversation.latestMessage.createdAt) : null}
-                        onClick={() => onSelectConversation(conversation.id)}
-                      />
-                    ))}
+                    {groupConversations.map((conversation) => {
+                      const label = getConversationLabel(conversation, currentUserId);
+                      const isActive = conversation.id === selectedConversationId;
+
+                      return (
+                        <SidebarRow
+                          key={conversation.id}
+                          variant="secondary"
+                          active={isActive}
+                          icon={<ThreadGlyph label={label} active={isActive} />}
+                          title={label}
+                          preview={getPreviewText(conversation)}
+                          meta={conversation.latestMessage ? formatPreviewTime(conversation.latestMessage.createdAt) : null}
+                          onClick={() => onSelectConversation(conversation.id)}
+                        />
+                      );
+                    })}
                   </>
                 ) : (
                   <div className="px-2 py-2">

@@ -6,18 +6,24 @@ import {
   getConversationForUser,
   isMissingChatTablesError,
   listConversationsForUser,
+  listConversationsForUserWithOptions,
   resolveChatProjectSelection,
   serializeConversation,
 } from "@/lib/chat";
 
-export async function GET() {
+export async function GET(request: Request) {
   const session = await auth();
   if (!session?.user?.id) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   try {
-    const conversations = await listConversationsForUser(session.user.id);
+    const { searchParams } = new URL(request.url);
+    const archivedParam = searchParams.get("archived");
+    const conversations =
+      archivedParam === "only"
+        ? await listConversationsForUserWithOptions(session.user.id, { archived: "only" })
+        : await listConversationsForUser(session.user.id);
     return NextResponse.json({ conversations });
   } catch (error) {
     if (isMissingChatTablesError(error)) {
@@ -125,6 +131,7 @@ export async function POST(request: Request) {
 
     const otherUserId = typeof body?.userId === "string" ? body.userId.trim() : "";
     const agentId = typeof body?.agentId === "string" ? body.agentId.trim() : "";
+    const directConversationName = typeof body?.name === "string" ? body.name.trim() : "";
 
     if (!otherUserId && !agentId) {
       return NextResponse.json({ error: "A teammate or agent is required" }, { status: 400 });
@@ -175,6 +182,7 @@ export async function POST(request: Request) {
     const createdConversation = await prisma.conversation.create({
       data: {
         type: "direct",
+        name: directConversationName || null,
         createdById: session.user.id,
         ...(resolvedProject.project ? { chatProjectId: resolvedProject.project.id } : {}),
         members: {

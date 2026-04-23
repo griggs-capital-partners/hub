@@ -1,20 +1,22 @@
 "use client";
 
-import type { FormEvent, KeyboardEvent, RefObject } from "react";
+import { useRef, useState, type ChangeEvent, type DragEvent, type FormEvent, type KeyboardEvent, type RefObject } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { TOOL_LABELS } from "@/lib/agent-tools";
-import { Avatar } from "@/components/ui/Avatar";
 import { Button } from "@/components/ui/Button";
-import { ThreadDocumentsPanel, type ThreadDocumentUploadState } from "@/components/team/ThreadDocumentsPanel";
+import { type ThreadDocumentUploadState } from "@/components/team/ThreadDocumentsPanel";
 import { Textarea } from "@/components/ui/Input";
 import {
+  AlertTriangle,
   ArrowLeft,
   Bot,
+  ChevronDown,
   Check,
   Copy,
-  Hash,
+  Loader2,
   MessageSquare,
+  Paperclip,
   Pencil,
   Send,
   Trash2,
@@ -22,37 +24,203 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import { CONVERSATION_DOCUMENT_ACCEPT } from "@/lib/conversation-documents";
 import { cn } from "@/lib/utils";
 import {
   type AgentInspectorData,
   type ChatMessage,
-  type ConversationDocumentSummary,
-  type ConversationAvatarInfo,
   type ConversationMemberSummary,
   type ConversationSummary,
+  MemberAvatar,
   chatMarkdownComponents,
   formatMessageTime,
   formatRelativeTime,
-  formatThinkingMode,
-  formatTokensK,
   getConversationLabel,
-  getOnlineStatus,
-  MemberAvatar,
-  PresenceBadge,
-  RadialContextBar,
 } from "@/components/team/team-chat-shared";
+
+const CONVERSATION_COLUMN_CLASS = "mx-auto w-full max-w-[60rem]";
+const HUMAN_MESSAGE_WIDTH_CLASS = "w-full max-w-[85%] md:max-w-[48rem]";
+
+function eventHasFiles(event: DragEvent<HTMLElement>) {
+  return Array.from(event.dataTransfer.items ?? []).some((item) => item.kind === "file")
+    || Array.from(event.dataTransfer.types ?? []).includes("Files");
+}
+
+function getStreamingStatusLabel(message: ChatMessage) {
+  if (!message.isStreaming) {
+    return null;
+  }
+
+  if (message.streamState === "using_tools") {
+    return "Working with tools...";
+  }
+
+  if (message.streamState === "responding") {
+    return message.body ? "Streaming reply..." : "Drafting reply...";
+  }
+
+  if (message.thinkingEnabled === false) {
+    return "Gathering context...";
+  }
+
+  if (message.thinking) {
+    return "Thinking through it...";
+  }
+
+  return "Thinking...";
+}
+
+function getSpeakerLabel(
+  message: ChatMessage,
+  currentUserId: string,
+  mixedAgentThread: boolean
+) {
+  if (message.sender?.kind === "user") {
+    return message.sender.id === currentUserId ? "You" : message.sender.name || "User";
+  }
+
+  if (message.sender?.kind === "agent") {
+    return mixedAgentThread && message.sender.name ? `Agent · ${message.sender.name}` : (message.sender.name || "Assistant");
+  }
+
+  return message.sender?.name || "Unknown";
+}
+
+function MessageOperationalDetails({ message }: { message: ChatMessage }) {
+  const hasThinking = Boolean(message.thinking?.trim());
+  const toolCount = message.toolActivity?.length ?? 0;
+  const retrievalCount = message.retrievalSources?.length ?? 0;
+  const retrievalIssueCount =
+    message.retrievalSources?.filter((source) => source.status && source.status !== "used").length ?? 0;
+  const hasRunningTool = message.toolActivity?.some((tool) => tool.status === "running") ?? false;
+  const streamingLabel = getStreamingStatusLabel(message);
+  const hasInspectableDetails = hasThinking || toolCount > 0 || retrievalCount > 0;
+
+  if (!streamingLabel && !hasInspectableDetails) {
+    return null;
+  }
+
+  return (
+    <div className="mt-2 space-y-2">
+      {streamingLabel ? (
+        <div className="flex items-center gap-2 px-1 text-[11px] text-[#8D877F]">
+          <div className="h-3 w-3 shrink-0 rounded-full border-2 border-[rgba(126,200,227,0.18)] border-t-[#7EC8E3] animate-spin" />
+          <span>{streamingLabel}</span>
+        </div>
+      ) : null}
+
+      {hasInspectableDetails ? (
+        <details className="rounded-2xl border border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.025)]">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-[11px] text-[#8D877F] [&::-webkit-details-marker]:hidden">
+            <span className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="font-medium text-[#CFC9C2]">Details</span>
+              {hasThinking ? (
+                <span className="rounded-full border border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.04)] px-2 py-0.5 text-[10px] text-[#A8A29C]">
+                  Thinking
+                </span>
+              ) : null}
+              {toolCount > 0 ? (
+                <span className="rounded-full border border-[rgba(75,156,211,0.16)] bg-[rgba(75,156,211,0.08)] px-2 py-0.5 text-[10px] text-[#A9DCF3]">
+                  {hasRunningTool ? "Working" : "Actions"} {toolCount}
+                </span>
+              ) : null}
+              {retrievalCount > 0 ? (
+                <span
+                  className={cn(
+                    "rounded-full border px-2 py-0.5 text-[10px]",
+                    retrievalIssueCount > 0
+                      ? "border-[rgba(247,148,29,0.18)] bg-[rgba(247,148,29,0.08)] text-[#F6C177]"
+                      : "border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.04)] text-[#A8A29C]"
+                  )}
+                >
+                  {retrievalIssueCount > 0
+                    ? `${retrievalIssueCount} issue${retrievalIssueCount === 1 ? "" : "s"}`
+                    : `${retrievalCount} source${retrievalCount === 1 ? "" : "s"}`}
+                </span>
+              ) : null}
+            </span>
+            <ChevronDown size={12} className="shrink-0 text-[#6F6A64]" />
+          </summary>
+
+          <div className="space-y-3 border-t border-[rgba(255,255,255,0.05)] px-3 py-3">
+            {hasThinking ? (
+              <div>
+                <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8D877F]">
+                  Thinking
+                </p>
+                <p className="whitespace-pre-wrap text-xs leading-5 text-[#CFC9C2] [overflow-wrap:anywhere]">{message.thinking}</p>
+              </div>
+            ) : null}
+
+            {toolCount > 0 ? (
+              <div>
+                <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#7EC8E3]">
+                  Actions Taken
+                </p>
+                <div className="flex flex-col gap-1">
+                  {message.toolActivity?.map((tool) => (
+                    <div key={tool.id} className="flex items-center gap-2 text-[11px]">
+                      {tool.status === "running" ? (
+                        <div className="h-3 w-3 shrink-0 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
+                      ) : (
+                        <Wrench size={11} className="shrink-0 text-[#7EC8E3]" />
+                      )}
+                      <span className="text-[#A9DCF3]">
+                        {TOOL_LABELS[tool.name] ?? tool.name}
+                      </span>
+                      {tool.status === "running" ? (
+                        <span className="text-[#5A8FA8]">...</span>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {retrievalCount > 0 ? (
+              <div>
+                <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8D877F]">
+                  Resolved Context Sources
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {message.retrievalSources?.map((source, index) => (
+                    <span
+                      key={`${source.kind}-${source.target}-${index}`}
+                      className={cn(
+                        "rounded-full border px-2 py-1 text-[10px]",
+                        source.status === "failed" || source.status === "unsupported" || source.status === "unavailable"
+                          ? "border-[rgba(247,148,29,0.18)] bg-[rgba(247,148,29,0.08)] text-[#F6C177]"
+                          : "border-[rgba(75,156,211,0.18)] bg-[rgba(75,156,211,0.08)] text-[#A9DCF3]"
+                      )}
+                      title={`${source.target} - ${source.detail}`}
+                    >
+                      {source.status === "unsupported"
+                        ? `Unsupported - ${source.label}`
+                        : source.status === "failed"
+                          ? `Failed - ${source.label}`
+                          : source.status === "unavailable"
+                            ? `Unavailable - ${source.label}`
+                            : `Used - ${source.label}`}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </details>
+      ) : null}
+    </div>
+  );
+}
 
 function ThreadHeader({
   currentUserId,
   activeConversation,
-  activeConversationAvatar,
-  activeConversationMembers,
   activeConversationParticipantSummary,
   activeConversationWorkspaceLabel,
   activeConversationTimestamp,
   activePartner,
-  activeAgentParticipant,
-  activeThreadModelLabel,
+  attachmentCount,
   threadDrawerOpen,
   threadOriginLabel,
   onBack,
@@ -61,64 +229,52 @@ function ThreadHeader({
 }: {
   currentUserId: string;
   activeConversation: ConversationSummary;
-  activeConversationAvatar: ConversationAvatarInfo | null;
-  activeConversationMembers: ConversationMemberSummary[];
   activeConversationParticipantSummary: string | null;
   activeConversationWorkspaceLabel: string | null;
   activeConversationTimestamp: string | null;
   activePartner: ConversationMemberSummary | null;
-  activeAgentParticipant: ConversationMemberSummary | null;
-  activeThreadModelLabel: string | null;
+  attachmentCount: number;
   threadDrawerOpen: boolean;
   threadOriginLabel: string | null;
   onBack: () => void;
   onOpenThreadTarget: () => void;
   onToggleDrawer: () => void;
 }) {
-  const agentParticipantCount = activeConversation.members.filter((member) => member.kind === "agent").length;
+  const metaItems = [
+    activeConversationParticipantSummary,
+    activeConversationWorkspaceLabel,
+    activeConversationTimestamp ? formatRelativeTime(activeConversationTimestamp) : null,
+  ].filter((value): value is string => Boolean(value));
+  const visibleMembers = activeConversation.members.slice(0, 4);
+  const overflowMemberCount = Math.max(activeConversation.members.length - visibleMembers.length, 0);
 
   return (
-    <div className="shrink-0 flex items-start justify-between gap-3 border-b border-[rgba(255,255,255,0.06)] px-3 py-3 md:px-5 md:py-4">
-      <div className="flex min-w-0 items-start gap-3">
-        <button
-          onClick={onBack}
-          className="flex h-10 w-10 items-center justify-center rounded-2xl border border-[rgba(255,255,255,0.07)] bg-[#181818] text-[#8D877F] md:hidden"
-          type="button"
-        >
-          <ArrowLeft size={18} />
-        </button>
-
-        {activeConversationAvatar?.kind === "group" ? (
-          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[rgba(247,148,29,0.14)] text-[#F7941D]">
-            <Hash size={20} />
-          </div>
-        ) : activeConversationAvatar?.kind === "agent" ? (
-          <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-2xl border border-[rgba(75,156,211,0.3)] bg-[rgba(75,156,211,0.16)] text-[#7EC8E3]">
-            {activeConversationAvatar.image
-              ? activeConversationAvatar.image.startsWith("data:") || activeConversationAvatar.image.startsWith("https://")
-                ? <img src={activeConversationAvatar.image} alt={activeConversationAvatar.name} className="h-full w-full object-cover" />
-                : <span className="text-lg">{activeConversationAvatar.image}</span>
-              : <Bot size={20} />}
-          </div>
-        ) : (
-          <Avatar src={activeConversationAvatar?.image} name={activeConversationAvatar?.name} size="lg" />
-        )}
-
+    <div className="shrink-0 border-b border-[rgba(255,255,255,0.05)] px-3 py-3 md:px-6 md:py-4">
+      <div className={cn(CONVERSATION_COLUMN_CLASS, "flex items-start justify-between gap-3")}>
         <div className="min-w-0">
-          {threadOriginLabel ? (
+          <div className="flex items-center gap-2">
             <button
-              type="button"
               onClick={onBack}
-              className="mb-2 inline-flex max-w-full items-center gap-1 rounded-full border border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.03)] px-2.5 py-1 text-[11px] font-medium text-[#8D877F] transition-colors hover:border-[rgba(247,148,29,0.12)] hover:bg-[rgba(255,255,255,0.05)] hover:text-[#F6F3EE]"
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.03)] text-[#8D877F] md:hidden"
+              type="button"
             >
-              <ArrowLeft size={12} />
-              <span className="truncate">{threadOriginLabel}</span>
+              <ArrowLeft size={16} />
             </button>
-          ) : null}
+            {threadOriginLabel ? (
+              <button
+                type="button"
+                onClick={onBack}
+                className="hidden max-w-full items-center gap-1 text-xs font-medium text-[#7D7770] transition-colors hover:text-[#F6F3EE] md:inline-flex"
+              >
+                <ArrowLeft size={12} />
+                <span className="truncate">{threadOriginLabel}</span>
+              </button>
+            ) : null}
+          </div>
 
           <button
             className={cn(
-              "truncate text-left text-base font-semibold text-[#F6F3EE] md:text-lg",
+              "mt-1 truncate text-left text-[1.05rem] font-semibold text-[#F6F3EE] md:text-[1.1rem]",
               activePartner ? "hover:text-[#FDBA4D]" : "cursor-default"
             )}
             onClick={onOpenThreadTarget}
@@ -126,37 +282,42 @@ function ThreadHeader({
           >
             {getConversationLabel(activeConversation, currentUserId)}
           </button>
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[#6F6A64]">
+
+          <div className="mt-2 flex items-center gap-2">
             <div className="flex -space-x-2">
-              {activeConversationMembers.slice(0, 4).map((member) => (
-                <div key={`${member.kind}-${member.id}`} className="rounded-full ring-2 ring-[#111111]">
+              {visibleMembers.map((member) => (
+                <div key={`${member.kind}-${member.id}`} className="rounded-full ring-2 ring-[#121212]">
                   <MemberAvatar member={member} size="xs" />
                 </div>
               ))}
+              {overflowMemberCount > 0 ? (
+                <span className="flex h-6 w-6 items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] text-[9px] font-medium text-[#A8A29C] ring-2 ring-[#121212]">
+                  +{overflowMemberCount}
+                </span>
+              ) : null}
             </div>
-            {activeConversationParticipantSummary ? <span>{activeConversationParticipantSummary}</span> : null}
-            {activeConversationWorkspaceLabel ? <span>{activeConversationWorkspaceLabel}</span> : null}
-            {activeConversationTimestamp ? <span>{formatRelativeTime(activeConversationTimestamp)}</span> : null}
-            {activePartner?.kind === "user" ? (
-              <PresenceBadge status={getOnlineStatus(activePartner.lastSeen ?? null)} />
+            {metaItems.length > 0 ? (
+              <p className="min-w-0 truncate text-xs text-[#7D7770]">
+                {metaItems.join(" · ")}
+              </p>
             ) : null}
-            {activeAgentParticipant && (activeConversation.type === "group" || agentParticipantCount > 1) ? (
-              <span>Active agent: {activeAgentParticipant.name}</span>
-            ) : null}
-            {activeAgentParticipant && activeThreadModelLabel ? <span>{activeThreadModelLabel}</span> : null}
           </div>
         </div>
-      </div>
 
-      <div className="flex items-center gap-2">
         <Button
           variant="secondary"
           size="sm"
-          className="rounded-2xl px-3"
+          className="rounded-full border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.03)] px-3.5 text-[#CFC9C2] hover:bg-[rgba(255,255,255,0.05)]"
           icon={<UsersRound size={14} />}
           onClick={onToggleDrawer}
         >
-          <span className="hidden md:inline">{threadDrawerOpen ? "Hide Details" : "Thread Details"}</span>
+          <span>{threadDrawerOpen ? "Hide details" : "Details"}</span>
+          {attachmentCount > 0 ? (
+            <span className="inline-flex items-center gap-1 text-[11px] text-[#8D877F]">
+              <Paperclip size={11} />
+              {attachmentCount}
+            </span>
+          ) : null}
         </Button>
       </div>
     </div>
@@ -168,12 +329,17 @@ function ThreadComposer({
   activeConversation,
   activeAgentParticipant,
   activeAgentReady,
+  activeAgentOfflineDetail,
   activeAgentSendBlocked,
   activeAgentBootstrapPending,
-  agentInspector,
+  threadDocumentUploads,
+  threadDocumentError,
   messageInput,
   sending,
+  onEngageConversationArea,
   onChangeMessageInput,
+  onUploadThreadDocuments,
+  onDismissThreadUpload,
   onSubmitMessage,
   onSendMessage,
 }: {
@@ -181,81 +347,211 @@ function ThreadComposer({
   activeConversation: ConversationSummary;
   activeAgentParticipant: ConversationMemberSummary | null;
   activeAgentReady: boolean;
+  activeAgentOfflineDetail: string | null;
   activeAgentSendBlocked: boolean;
   activeAgentBootstrapPending: boolean;
-  agentInspector: AgentInspectorData | null;
+  threadDocumentUploads: ThreadDocumentUploadState[];
+  threadDocumentError: string | null;
   messageInput: string;
   sending: boolean;
+  onEngageConversationArea: () => void;
   onChangeMessageInput: (value: string) => void;
+  onUploadThreadDocuments: (files: File[]) => void;
+  onDismissThreadUpload: (uploadId: string) => void;
   onSubmitMessage: (event: FormEvent<HTMLFormElement>) => void | Promise<void>;
   onSendMessage: () => Promise<void>;
 }) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [dragDepth, setDragDepth] = useState(0);
+  const dragActive = dragDepth > 0;
+
+  function queueUploads(files: FileList | null) {
+    const nextFiles = Array.from(files ?? []);
+    if (nextFiles.length > 0) {
+      onEngageConversationArea();
+      onUploadThreadDocuments(nextFiles);
+    }
+  }
+
+  function handleFileInputChange(event: ChangeEvent<HTMLInputElement>) {
+    queueUploads(event.target.files);
+    event.currentTarget.value = "";
+  }
+
+  function handleDragEnter(event: DragEvent<HTMLFormElement>) {
+    if (!eventHasFiles(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    setDragDepth((current) => current + 1);
+  }
+
+  function handleDragOver(event: DragEvent<HTMLFormElement>) {
+    if (!eventHasFiles(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleDragLeave(event: DragEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setDragDepth((current) => Math.max(0, current - 1));
+  }
+
+  function handleDrop(event: DragEvent<HTMLFormElement>) {
+    if (!eventHasFiles(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    setDragDepth(0);
+    queueUploads(event.dataTransfer.files);
+  }
+
   return activeAgentParticipant && !activeAgentReady && !activeAgentBootstrapPending ? (
     <div className="shrink-0 border-t border-[rgba(255,255,255,0.06)] bg-[#121212] px-3 py-3 md:px-5 md:py-4">
       <div className="flex items-center justify-center gap-2.5 rounded-2xl border border-[rgba(239,68,68,0.15)] bg-[rgba(239,68,68,0.06)] px-4 py-3 text-sm text-[#9A9A9A]">
         <span className="h-2 w-2 shrink-0 rounded-full bg-[#EF4444]" />
-        {agentInspector?.readiness.detail || "Agent not online. Configure the LLM connection in the agent profile to start chatting."}
+        {activeAgentOfflineDetail || "Agent not online. Configure the LLM connection in the agent profile to start chatting."}
       </div>
     </div>
   ) : (
     <form
       onSubmit={onSubmitMessage}
-      className="shrink-0 border-t border-[rgba(255,255,255,0.04)] bg-[linear-gradient(180deg,rgba(18,18,18,0),rgba(18,18,18,0.9)_18%,#121212)] px-3 py-3 md:px-5 md:py-4"
+      onFocusCapture={onEngageConversationArea}
+      onPointerDown={onEngageConversationArea}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className="shrink-0 border-t border-[rgba(255,255,255,0.04)] bg-[#121212] px-3 py-3 md:px-5 md:py-4"
     >
-      {activeAgentParticipant && agentInspector ? (
-        <div className="mb-2 flex items-center gap-2 text-[11px] text-[#4E4A45]">
-          <span className={agentInspector.readiness.label === "Ready" ? "text-[#4ade80]" : "text-[#9FCBE0]"}>
-            {agentInspector.readiness.label}
-          </span>
-          <span className="inline-flex items-center gap-1">
-            <RadialContextBar tokens={agentInspector.context.estimatedTokens} />
-            <span>{formatTokensK(agentInspector.context.estimatedTokens)} / 128K</span>
-          </span>
-          <span>{agentInspector.context.recentHistoryCount}/{agentInspector.context.historyWindowSize} msgs</span>
-          <span>{formatThinkingMode(agentInspector.agent.llmThinkingMode)} thinking</span>
-        </div>
-      ) : null}
+      <div className={cn(CONVERSATION_COLUMN_CLASS, "space-y-2")}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept={CONVERSATION_DOCUMENT_ACCEPT}
+          className="hidden"
+          onChange={handleFileInputChange}
+        />
 
-      <div className="flex items-center gap-2">
-        <div className="min-w-0 flex-1">
-          <Textarea
-            value={messageInput}
-            onChange={(event) => onChangeMessageInput(event.target.value)}
-            placeholder={
-              activeAgentParticipant && activeAgentBootstrapPending
-                ? `Preparing ${activeAgentParticipant.name}...`
-                : `Message ${getConversationLabel(activeConversation, currentUserId)}...`
-            }
-            rows={1}
-            className="min-h-[52px] w-full resize-none rounded-[24px] border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-4 py-3 shadow-[0_12px_32px_rgba(0,0,0,0.18)] md:min-h-[56px]"
-            disabled={sending || activeAgentSendBlocked}
-            onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                void onSendMessage();
-              }
-            }}
-          />
-        </div>
-        <Button
-          type="submit"
-          variant="primary"
-          size="md"
-          disabled={!messageInput.trim() || sending || activeAgentSendBlocked}
-          loading={sending}
-          className="h-12 w-12 shrink-0 rounded-2xl px-0 md:h-14 md:w-auto md:px-5"
+        <div
+          className={cn(
+            "rounded-[24px] border px-3 py-3 transition-colors",
+            dragActive
+              ? "border-[rgba(247,148,29,0.28)] bg-[rgba(247,148,29,0.06)]"
+              : "border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.025)]"
+          )}
         >
-          {!sending ? <Send size={15} /> : null}
-        </Button>
-      </div>
+          {threadDocumentUploads.length > 0 ? (
+            <div className="mb-2.5 flex flex-wrap gap-2">
+              {threadDocumentUploads.map((upload) => (
+                <div
+                  key={upload.id}
+                  className={cn(
+                    "flex min-w-0 max-w-full items-center gap-2 rounded-full border px-3 py-1.5 text-[11px]",
+                    upload.status === "failed"
+                      ? "border-[rgba(239,68,68,0.18)] bg-[rgba(239,68,68,0.07)] text-[#F2C0C0]"
+                      : upload.status === "uploaded"
+                        ? "border-[rgba(74,222,128,0.18)] bg-[rgba(74,222,128,0.08)] text-[#D4F7DF]"
+                        : "border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.04)] text-[#CFC9C2]"
+                  )}
+                >
+                  {upload.status === "failed" ? (
+                    <AlertTriangle size={12} className="shrink-0 text-[#EF4444]" />
+                  ) : upload.status === "uploaded" ? (
+                    <Check size={12} className="shrink-0 text-[#4ADE80]" />
+                  ) : (
+                    <Loader2 size={12} className="shrink-0 animate-spin text-[#F7941D]" />
+                  )}
+                  <p className="min-w-0 truncate text-[#F6F3EE]">
+                    <span className="font-medium">{upload.filename}</span>
+                    <span className="text-[#8D877F]">
+                      {" · "}
+                      {upload.status === "failed"
+                        ? upload.error ?? "Upload failed"
+                        : upload.status === "uploaded"
+                          ? "Attached"
+                          : "Uploading"}
+                    </span>
+                  </p>
+                  {upload.status === "failed" ? (
+                    <button
+                      type="button"
+                      onClick={() => onDismissThreadUpload(upload.id)}
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
+                      aria-label={`Dismiss failed upload ${upload.filename}`}
+                    >
+                      <X size={11} />
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
 
-      <p className="mt-2 hidden text-xs text-[#6F6A64] md:block">
-        {activeAgentParticipant
-          ? activeAgentBootstrapPending
-            ? "We are initializing the model, refreshing readiness, and loading the thread context bundle before input is enabled."
-            : "Use Thread Details for participants, readiness, and inspector access."
-          : "Workspace-visible thread. Press Enter to send and Shift+Enter for a new line."}
-      </p>
+          {threadDocumentError ? (
+            <div className="mb-2.5 flex items-center gap-2 text-xs leading-5 text-[#F2C0C0]">
+              <AlertTriangle size={12} className="shrink-0 text-[#EF4444]" />
+              {threadDocumentError}
+            </div>
+          ) : null}
+
+          <div className="flex items-end gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              size="md"
+              className="h-10 w-10 shrink-0 rounded-full border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-0 md:h-11 md:w-11"
+              onClick={() => fileInputRef.current?.click()}
+              title="Attach files to this thread"
+            >
+              <Paperclip size={15} />
+            </Button>
+            <div className="min-w-0 flex-1">
+              <Textarea
+                value={messageInput}
+                onChange={(event) => onChangeMessageInput(event.target.value)}
+                placeholder={
+                  activeAgentParticipant && activeAgentBootstrapPending
+                    ? `Preparing ${activeAgentParticipant.name}...`
+                    : `Message ${getConversationLabel(activeConversation, currentUserId)}...`
+                }
+                rows={1}
+                className="min-h-[46px] w-full resize-none rounded-[20px] border-transparent bg-transparent px-3 py-2.5 shadow-none focus:border-transparent focus:ring-0 md:min-h-[50px]"
+                disabled={sending || activeAgentSendBlocked}
+                onKeyDown={(event: KeyboardEvent<HTMLTextAreaElement>) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void onSendMessage();
+                  }
+                }}
+              />
+            </div>
+            <Button
+              type="submit"
+              variant="primary"
+              size="md"
+              disabled={!messageInput.trim() || sending || activeAgentSendBlocked}
+              loading={sending}
+              className="h-10 w-10 shrink-0 rounded-full px-0 md:h-11 md:w-11"
+              title="Send message"
+            >
+              {!sending ? <Send size={15} /> : null}
+            </Button>
+          </div>
+        </div>
+
+        {dragActive ? (
+          <p className="text-[11px] text-[#7D7770]">Drop files to attach them to this thread.</p>
+        ) : activeAgentParticipant && activeAgentBootstrapPending ? (
+          <p className="text-[11px] text-[#7D7770]">Preparing {activeAgentParticipant.name} before input is enabled.</p>
+        ) : null}
+      </div>
     </form>
   );
 }
@@ -263,14 +559,11 @@ function ThreadComposer({
 export function ConversationPane({
   currentUserId,
   activeConversation,
-  activeConversationAvatar,
-  activeConversationMembers,
   activeConversationParticipantSummary,
   activeConversationWorkspaceLabel,
   activeConversationTimestamp,
   activePartner,
   activeAgentParticipant,
-  activeThreadModelLabel,
   threadDrawerOpen,
   threadOriginLabel,
   loadingMessages,
@@ -287,7 +580,6 @@ export function ConversationPane({
   bottomRef,
   threadDocumentUploads,
   threadDocumentError,
-  removingDocumentId,
   activeAgentReady,
   activeAgentSendBlocked,
   activeAgentBootstrapPending,
@@ -297,6 +589,7 @@ export function ConversationPane({
   onOpenThreadTarget,
   onOpenActiveAgentProfile,
   onToggleDrawer,
+  onEngageConversationArea,
   onHandleChatScroll,
   onChangeMessageInput,
   onUploadThreadDocuments,
@@ -305,7 +598,6 @@ export function ConversationPane({
   onChangeEditingDraft,
   onCancelEditingMessage,
   onSaveEditedMessage,
-  onRemoveThreadDocument,
   onDismissThreadUpload,
   onCopyMessage,
   onStartEditingMessage,
@@ -313,14 +605,11 @@ export function ConversationPane({
 }: {
   currentUserId: string;
   activeConversation: ConversationSummary | null;
-  activeConversationAvatar: ConversationAvatarInfo | null;
-  activeConversationMembers: ConversationMemberSummary[];
   activeConversationParticipantSummary: string | null;
   activeConversationWorkspaceLabel: string | null;
   activeConversationTimestamp: string | null;
   activePartner: ConversationMemberSummary | null;
   activeAgentParticipant: ConversationMemberSummary | null;
-  activeThreadModelLabel: string | null;
   threadDrawerOpen: boolean;
   threadOriginLabel: string | null;
   loadingMessages: boolean;
@@ -337,7 +626,6 @@ export function ConversationPane({
   bottomRef: RefObject<HTMLDivElement | null>;
   threadDocumentUploads: ThreadDocumentUploadState[];
   threadDocumentError: string | null;
-  removingDocumentId: string | null;
   activeAgentReady: boolean;
   activeAgentSendBlocked: boolean;
   activeAgentBootstrapPending: boolean;
@@ -347,6 +635,7 @@ export function ConversationPane({
   onOpenThreadTarget: () => void;
   onOpenActiveAgentProfile: () => void;
   onToggleDrawer: () => void;
+  onEngageConversationArea: () => void;
   onHandleChatScroll: () => void;
   onChangeMessageInput: (value: string) => void;
   onUploadThreadDocuments: (files: File[]) => void;
@@ -355,7 +644,6 @@ export function ConversationPane({
   onChangeEditingDraft: (value: string) => void;
   onCancelEditingMessage: () => void;
   onSaveEditedMessage: (messageId: string) => Promise<void>;
-  onRemoveThreadDocument: (document: ConversationDocumentSummary) => Promise<void>;
   onDismissThreadUpload: (uploadId: string) => void;
   onCopyMessage: (body: string, messageId: string) => void;
   onStartEditingMessage: (message: ChatMessage) => void;
@@ -370,14 +658,11 @@ export function ConversationPane({
           <ThreadHeader
             currentUserId={currentUserId}
             activeConversation={activeConversation}
-            activeConversationAvatar={activeConversationAvatar}
-            activeConversationMembers={activeConversationMembers}
             activeConversationParticipantSummary={activeConversationParticipantSummary}
             activeConversationWorkspaceLabel={activeConversationWorkspaceLabel}
             activeConversationTimestamp={activeConversationTimestamp}
             activePartner={activePartner}
-            activeAgentParticipant={activeAgentParticipant}
-            activeThreadModelLabel={activeThreadModelLabel}
+            attachmentCount={activeConversation.documents.length}
             threadDrawerOpen={threadDrawerOpen}
             threadOriginLabel={threadOriginLabel}
             onBack={onBack}
@@ -388,6 +673,7 @@ export function ConversationPane({
           <div
             ref={chatScrollRef}
             onScroll={onHandleChatScroll}
+            onPointerDown={onEngageConversationArea}
             className="chat-scroll flex-1 overflow-y-auto overflow-x-hidden bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.035),transparent_58%)] px-4 py-5 md:min-h-0 md:px-8 md:py-8"
           >
             {loadingMessages && rawMessageCount === 0 ? (
@@ -434,49 +720,28 @@ export function ConversationPane({
                 </p>
               </div>
             ) : (
-              <div className="mx-auto flex w-full max-w-[52rem] flex-col gap-6 pb-6">
+              <div className={cn(CONVERSATION_COLUMN_CLASS, "flex flex-col gap-6 pb-6")}>
                 {renderedMessages.map((message) => {
                   const isCurrentUser = message.sender?.id === currentUserId && message.sender?.kind === "user";
                   const isEditing = editingMessageId === message.id;
-                  const showMixedAgentAttribution = mixedAgentThread && message.sender?.kind === "agent";
+                  const speakerLabel = getSpeakerLabel(message, currentUserId, mixedAgentThread);
 
                   return (
                     <div
                       key={message.id}
-                      className={cn("group flex items-start gap-4", isCurrentUser ? "justify-end" : "justify-start")}
+                      className={cn("group flex w-full", isCurrentUser ? "justify-end" : "justify-start")}
                     >
-                      {!isCurrentUser ? (
-                        message.sender?.kind === "agent" ? (
-                          <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-[rgba(75,156,211,0.18)] bg-[rgba(75,156,211,0.1)] text-[#7EC8E3]">
-                            {message.sender.image
-                              ? message.sender.image.startsWith("data:") || message.sender.image.startsWith("https://")
-                                ? <img src={message.sender.image} alt={message.sender.name ?? ""} className="h-full w-full object-cover" />
-                                : <span>{message.sender.image}</span>
-                              : <Bot size={16} />}
-                          </div>
-                        ) : (
-                          <Avatar src={message.sender?.image} name={message.sender?.name} size="sm" />
-                        )
-                      ) : null}
-
                       <div
-                        className={cn("min-w-0 max-w-[88%] md:max-w-[44rem]", isCurrentUser ? "items-end" : "items-start")}
-                        style={{ display: "flex", flexDirection: "column" }}
+                        className={cn("flex min-w-0 w-full flex-col", isCurrentUser ? "items-end" : "items-start")}
                       >
-                        {!isCurrentUser && message.sender?.name ? (
-                          showMixedAgentAttribution ? (
-                            <div className="mb-1 flex items-center gap-2 px-1">
-                              <span className="rounded-full border border-[rgba(75,156,211,0.18)] bg-[rgba(75,156,211,0.08)] px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.18em] text-[#9FCBE0]">
-                                Agent
-                              </span>
-                              <p className="text-[11px] font-semibold text-[#A9DCF3]">
-                                {message.sender.name}
-                              </p>
-                            </div>
-                          ) : (
-                            <p className="mb-0.5 px-1 text-[11px] font-medium text-[#8D877F]">{message.sender.name}</p>
-                          )
-                        ) : null}
+                        <p
+                          className={cn(
+                            "mb-0.5 px-1 text-[11px] font-medium",
+                            isCurrentUser ? "text-right text-[#A89C8C]" : "text-[#8D877F]"
+                          )}
+                        >
+                          {speakerLabel}
+                        </p>
 
                         {isEditing ? (
                           <div
@@ -516,12 +781,12 @@ export function ConversationPane({
                         ) : (
                           <div
                             className={cn(
-                              "chat-scroll max-h-[min(60vh,36rem)] overflow-y-auto overflow-x-hidden text-sm leading-6 [overflow-wrap:anywhere]",
+                              "min-w-0 text-sm leading-6 [overflow-wrap:anywhere]",
                               isCurrentUser
-                                ? "rounded-[24px] px-4 py-3 shadow-sm"
+                                ? cn(HUMAN_MESSAGE_WIDTH_CLASS, "rounded-[24px] px-4 py-3 shadow-sm")
                                 : message.sender?.kind === "agent"
-                                  ? "px-1 py-1.5"
-                                  : "rounded-[22px] px-4 py-3"
+                                  ? "w-full px-1 py-1.5"
+                                  : cn(HUMAN_MESSAGE_WIDTH_CLASS, "rounded-[22px] px-4 py-3")
                             )}
                             style={
                               isCurrentUser
@@ -546,25 +811,6 @@ export function ConversationPane({
                                   }
                             }
                           >
-                            {message.thinking ? (
-                              <div className="mb-2 rounded-xl border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-3 py-2">
-                                <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8D877F]">
-                                  Thinking
-                                </p>
-                                <p className="whitespace-pre-wrap text-xs leading-5 text-[#CFC9C2] [overflow-wrap:anywhere]">{message.thinking}</p>
-                                {message.isStreaming && !message.body ? (
-                                  <div className="mt-2 flex items-center gap-2 text-[11px] text-[#9FCBE0]">
-                                    <div className="h-3 w-3 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                                    <span>
-                                      {message.streamState === "responding"
-                                        ? "Turning thoughts into a reply..."
-                                        : "Thinking through it..."}
-                                    </span>
-                                  </div>
-                                ) : null}
-                              </div>
-                            ) : null}
-
                             {message.body ? (
                               message.sender?.kind === "agent" ? (
                                 <div className="[overflow-wrap:anywhere] prose-chat">
@@ -575,79 +821,14 @@ export function ConversationPane({
                               ) : (
                                 <div className="whitespace-pre-wrap [overflow-wrap:anywhere]">{message.body}</div>
                               )
-                            ) : message.isStreaming ? (
+                            ) : message.isStreaming && message.sender?.kind !== "agent" ? (
                               <div className="flex items-center gap-2 text-[#CFC9C2]">
                                 <div className="h-3.5 w-3.5 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                                <span>
-                                  {message.streamState === "using_tools"
-                                    ? "Working on it..."
-                                    : message.streamState === "responding"
-                                      ? "Drafting reply..."
-                                      : message.thinkingEnabled === false
-                                        ? "Gathering context..."
-                                        : message.thinking
-                                          ? "Thinking through it..."
-                                          : "Thinking..."}
-                                </span>
+                                <span>{getStreamingStatusLabel(message)}</span>
                               </div>
                             ) : null}
 
-                            {message.isStreaming && message.body ? (
-                              <div className="mt-2 flex items-center gap-2 text-[11px] text-[#9FCBE0]">
-                                <div className="h-3 w-3 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                                <span>Streaming reply...</span>
-                              </div>
-                            ) : null}
-
-                            {message.toolActivity && message.toolActivity.length > 0 ? (
-                              <div className="mt-2 rounded-xl border border-[rgba(126,200,227,0.15)] bg-[rgba(75,156,211,0.07)] px-3 py-2">
-                                <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#7EC8E3]">
-                                  Actions Taken
-                                </p>
-                                <div className="flex flex-col gap-1">
-                                  {message.toolActivity.map((tool) => (
-                                    <div key={tool.id} className="flex items-center gap-2 text-[11px]">
-                                      {tool.status === "running" ? (
-                                        <div className="h-3 w-3 shrink-0 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                                      ) : (
-                                        <Wrench size={11} className="shrink-0 text-[#7EC8E3]" />
-                                      )}
-                                      <span className="text-[#A9DCF3]">
-                                        {TOOL_LABELS[tool.name] ?? tool.name}
-                                      </span>
-                                      {tool.status === "running" ? (
-                                        <span className="text-[#5A8FA8]">...</span>
-                                      ) : null}
-                                    </div>
-                                  ))}
-                                </div>
-                              </div>
-                            ) : null}
-
-                            {message.retrievalSources && message.retrievalSources.length > 0 ? (
-                              <div className="mt-3 rounded-xl border border-[rgba(255,255,255,0.08)] bg-[rgba(0,0,0,0.18)] px-3 py-2">
-                                <p className="mb-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#8D877F]">
-                                  Resolved Context Sources
-                                </p>
-                                <div className="flex flex-wrap gap-1.5">
-                                  {message.retrievalSources.map((source, index) => (
-                                    <span
-                                      key={`${source.kind}-${source.target}-${index}`}
-                                      className="rounded-full border border-[rgba(75,156,211,0.18)] bg-[rgba(75,156,211,0.08)] px-2 py-1 text-[10px] text-[#A9DCF3]"
-                                      title={`${source.target} - ${source.detail}`}
-                                    >
-                                      {source.status === "unsupported"
-                                        ? `Unsupported - ${source.label}`
-                                        : source.status === "failed"
-                                          ? `Failed - ${source.label}`
-                                          : source.status === "unavailable"
-                                            ? `Unavailable - ${source.label}`
-                                            : `Used - ${source.label}`}
-                                    </span>
-                                  ))}
-                                </div>
-                              </div>
-                            ) : null}
+                            {message.sender?.kind === "agent" ? <MessageOperationalDetails message={message} /> : null}
                           </div>
                         )}
 
@@ -699,36 +880,22 @@ export function ConversationPane({
               </div>
             )}
           </div>
-
-          <div className="shrink-0 border-t border-[rgba(255,255,255,0.04)] bg-[#121212] px-3 pb-3 md:px-5 md:pb-4">
-            <div className="mx-auto w-full max-w-[52rem]">
-              <ThreadDocumentsPanel
-                conversationId={activeConversation.id}
-                documents={activeConversation.documents}
-                uploads={threadDocumentUploads}
-                error={threadDocumentError}
-                canUpload
-                canRemove
-                removingDocumentId={removingDocumentId}
-                uploadButtonLabel="Attach Files"
-                description="Upload supporting files directly into this thread and keep them attached to the conversation."
-                onUpload={onUploadThreadDocuments}
-                onRemoveDocument={(document) => void onRemoveThreadDocument(document)}
-                onDismissUpload={onDismissThreadUpload}
-              />
-            </div>
-          </div>
           <ThreadComposer
             currentUserId={currentUserId}
             activeConversation={activeConversation}
             activeAgentParticipant={activeAgentParticipant}
             activeAgentReady={activeAgentReady}
+            activeAgentOfflineDetail={agentInspectorError || agentInspector?.readiness.detail || null}
             activeAgentSendBlocked={activeAgentSendBlocked}
             activeAgentBootstrapPending={activeAgentBootstrapPending}
-            agentInspector={agentInspector}
+            threadDocumentUploads={threadDocumentUploads}
+            threadDocumentError={threadDocumentError}
             messageInput={messageInput}
             sending={sending}
+            onEngageConversationArea={onEngageConversationArea}
             onChangeMessageInput={onChangeMessageInput}
+            onUploadThreadDocuments={onUploadThreadDocuments}
+            onDismissThreadUpload={onDismissThreadUpload}
             onSubmitMessage={onSubmitMessage}
             onSendMessage={onSendMessage}
           />

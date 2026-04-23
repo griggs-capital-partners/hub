@@ -8,6 +8,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { authClient } from "@/lib/auth-client";
 import {
   LayoutDashboard,
+  MessageSquare,
   FolderGit2,
   Users,
   Settings,
@@ -31,6 +32,7 @@ import {
 import { cn } from "@/lib/utils";
 import { Avatar } from "@/components/ui/Avatar";
 import { useMobileNav } from "@/components/layout/MobileNav";
+import { useDesktopSidebar } from "@/components/layout/DesktopSidebarContext";
 
 // ─── Nav items ────────────────────────────────────────────────────────────────
 
@@ -40,6 +42,12 @@ const NAV_ITEMS = [
     icon: LayoutDashboard,
     label: "Home",
     description: "Today's focus & overview",
+  },
+  {
+    href: "/chat",
+    icon: MessageSquare,
+    label: "Chat",
+    description: "Threads & team context",
   },
   {
     href: "/knowledge",
@@ -342,7 +350,7 @@ function NavLinks({
 // ─── Desktop Sidebar ──────────────────────────────────────────────────────────
 
 function DesktopSidebar() {
-  const [collapsed, setCollapsed] = useState(false);
+  const { collapsed, collapseManually, expandManually } = useDesktopSidebar();
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [hasNotifications] = useState(true);
   const pathname = usePathname();
@@ -371,7 +379,7 @@ function DesktopSidebar() {
               initial={{ opacity: 0, scale: 0.85 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.85 }}
-              onClick={() => setCollapsed(false)}
+              onClick={expandManually}
               className="w-full flex items-center justify-center"
               title="Expand menu"
             >
@@ -396,7 +404,7 @@ function DesktopSidebar() {
 
         {!collapsed && (
           <button
-            onClick={() => setCollapsed(true)}
+            onClick={collapseManually}
             className="p-1.5 text-[#606060] hover:text-[#F7941D] hover:bg-[rgba(247,148,29,0.05)] rounded-lg transition-all flex-shrink-0 ml-1"
             title="Collapse menu"
           >

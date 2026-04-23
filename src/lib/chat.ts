@@ -136,6 +136,7 @@ type ConversationWithRelations = Prisma.ConversationGetPayload<{
 type ConversationMemberWithRelations = ConversationWithRelations["members"][number];
 
 export type ConversationMemberScope = "active" | "all";
+export type ConversationArchiveScope = "exclude" | "only" | "include";
 
 export type ConversationMembershipRecord = {
   id: string;
@@ -697,9 +698,21 @@ export async function resolveChatProjectSelection(params: {
 }
 
 export async function listConversationsForUser(userId: string) {
+  return listConversationsForUserWithOptions(userId);
+}
+
+export async function listConversationsForUserWithOptions(
+  userId: string,
+  options: { archived?: ConversationArchiveScope } = {}
+) {
   try {
     const conversations = await prisma.conversation.findMany({
       where: {
+        ...(options.archived === "only"
+          ? { archivedAt: { not: null } }
+          : options.archived === "include"
+            ? {}
+            : { archivedAt: null }),
         members: {
           some: { userId, removedAt: null },
         },
@@ -721,12 +734,17 @@ export async function listConversationsForUser(userId: string) {
 export async function getConversationForUser(
   conversationId: string,
   userId: string,
-  options: { memberScope?: ConversationMemberScope } = {}
+  options: { memberScope?: ConversationMemberScope; archived?: ConversationArchiveScope } = {}
 ) {
   try {
     return await prisma.conversation.findFirst({
       where: {
         id: conversationId,
+        ...(options.archived === "only"
+          ? { archivedAt: { not: null } }
+          : options.archived === "include"
+            ? {}
+            : { archivedAt: null }),
         members: {
           some: { userId, removedAt: null },
         },
@@ -788,6 +806,7 @@ export async function findDirectConversation(params: {
     const conversations = await prisma.conversation.findMany({
       where: {
         type: "direct",
+        archivedAt: null,
         members: {
           some: { userId: params.currentUserId, removedAt: null },
         },
@@ -862,6 +881,8 @@ export function isMissingChatTablesError(error: unknown) {
         "public.conversations.chatProjectId",
         "conversations.repoId",
         "public.conversations.repoId",
+        "conversations.archivedAt",
+        "public.conversations.archivedAt",
         "conversation_members.removedAt",
         "public.conversation_members.removedAt",
         "ConversationMember.removedAt",
@@ -869,6 +890,7 @@ export function isMissingChatTablesError(error: unknown) {
       || [
         "chatProjectId",
         "repoId",
+        "archivedAt",
         "removedAt",
       ].includes(normalizedMissingColumn ?? "")
     );
@@ -886,6 +908,7 @@ export async function searchConversationsForUser(userId: string, rawQuery: strin
   try {
     const conversations = await prisma.conversation.findMany({
       where: {
+        archivedAt: null,
         members: {
           some: { userId, removedAt: null },
         },
