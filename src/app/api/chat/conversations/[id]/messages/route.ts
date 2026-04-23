@@ -103,6 +103,8 @@ type RuntimeSnapshot = {
     recentHistoryCount: number;
     historyWindowSize: number;
     knowledgeSources: ReturnType<typeof buildAgentRuntimePreview>["knowledgeSources"];
+    sourceSelection: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceSelection"];
+    sourceDecisions: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceDecisions"];
     resolvedSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"];
   };
   payload: {
@@ -126,6 +128,8 @@ function serializeRuntimeHistory(history: LlmMessage[]) {
 
 function buildRuntimeSnapshot(params: {
   runtimePreview: ReturnType<typeof buildAgentRuntimePreview>;
+  sourceSelection: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceSelection"];
+  sourceDecisions: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceDecisions"];
   resolvedSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"];
   currentUserName: string | null;
   history: LlmMessage[];
@@ -140,6 +144,8 @@ function buildRuntimeSnapshot(params: {
       recentHistoryCount: params.runtimePreview.recentHistoryCount,
       historyWindowSize: 12,
       knowledgeSources: params.runtimePreview.knowledgeSources,
+      sourceSelection: params.sourceSelection,
+      sourceDecisions: params.sourceDecisions,
       resolvedSources: params.resolvedSources,
     },
     payload: {
@@ -277,7 +283,15 @@ export async function POST(
                 take: 12,
               }),
               buildOrgContext(),
-              resolveConversationContextBundle({ conversationId: conversation.id }),
+              resolveConversationContextBundle({
+                conversationId: conversation.id,
+                authority: {
+                  requestingUserId: session.user.id,
+                  activeUserIds: runtimeState.activeUserIds,
+                  activeAgentId: runtimeState.activeAgentMember?.agent.id ?? null,
+                  activeAgentIds: runtimeState.activeAgentIds,
+                },
+              }),
               prisma.user.findUnique({
                 where: { id: session.user.id },
                 select: { displayName: true, name: true },
@@ -374,6 +388,8 @@ export async function POST(
             });
             runtimeSnapshot = buildRuntimeSnapshot({
               runtimePreview,
+              sourceSelection: contextBundle.sourceSelection,
+              sourceDecisions: contextBundle.sourceDecisions,
               resolvedSources: contextBundle.sources,
               currentUserName,
               history,
@@ -592,7 +608,15 @@ export async function POST(
       try {
         const [orgContext, contextBundle, senderUser] = await Promise.all([
           buildOrgContext(),
-          resolveConversationContextBundle({ conversationId: conversation.id }),
+          resolveConversationContextBundle({
+            conversationId: conversation.id,
+            authority: {
+              requestingUserId: session.user.id,
+              activeUserIds: runtimeState.activeUserIds,
+              activeAgentId: runtimeState.activeAgentMember?.agent.id ?? null,
+              activeAgentIds: runtimeState.activeAgentIds,
+            },
+          }),
           prisma.user.findUnique({
             where: { id: session.user.id },
             select: { displayName: true, name: true },
@@ -626,6 +650,8 @@ export async function POST(
         });
         runtimeSnapshot = buildRuntimeSnapshot({
           runtimePreview,
+          sourceSelection: contextBundle.sourceSelection,
+          sourceDecisions: contextBundle.sourceDecisions,
           resolvedSources: contextBundle.sources,
           currentUserName,
           history,

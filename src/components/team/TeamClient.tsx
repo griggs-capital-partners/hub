@@ -72,6 +72,8 @@ type Props = {
 
 type ThreadDocumentUploadMap = Record<string, ThreadDocumentUploadState[]>;
 type AgentRuntimeSnapshot = Pick<AgentInspectorData, "context" | "payload">;
+type AgentContextSourceDecision = AgentInspectorData["context"]["sourceDecisions"][number];
+type AgentResolvedSource = AgentInspectorData["context"]["resolvedSources"][number];
 
 function getApiErrorMessage(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -108,6 +110,139 @@ async function parseApiResponse(response: Response) {
 
   const fallbackMessage = normalizeApiFallbackMessage(bodyText);
   return fallbackMessage ? { error: fallbackMessage } : ({} as Record<string, unknown>);
+}
+
+function formatContextSourceDecisionStatusLabel(status: AgentContextSourceDecision["status"]) {
+  return status === "allowed" ? "Allowed" : "Excluded";
+}
+
+function formatContextSourceRequestStatusLabel(status: AgentContextSourceDecision["request"]["status"]) {
+  switch (status) {
+    case "candidate":
+      return "Candidate";
+    case "proposed":
+      return "Proposed";
+    case "required":
+      return "Required";
+    default:
+      return "Requested";
+  }
+}
+
+function formatContextSourceRequestOriginLabel(origin: AgentContextSourceDecision["request"]["origins"][number]) {
+  switch (origin) {
+    case "default_system_candidate":
+      return "Default candidate";
+    case "explicit_user_request":
+      return "User requested";
+    case "planner_proposed":
+      return "Planner proposed";
+    case "policy_required":
+      return "Policy required";
+    default:
+      return "Fallback candidate";
+  }
+}
+
+function formatContextSourceAdmissionStatusLabel(status: AgentContextSourceDecision["admission"]["status"]) {
+  return status === "allowed" ? "Allowed" : "Excluded";
+}
+
+function formatContextSourceExecutionStatusLabel(status: AgentContextSourceDecision["execution"]["status"]) {
+  return status === "executed" ? "Executed" : "Not executed";
+}
+
+function formatContextSourceDecisionReasonLabel(reason: AgentContextSourceDecision["reason"]) {
+  switch (reason) {
+    case "allowed":
+      return "Allowed";
+    case "not_registered":
+      return "Not registered";
+    case "not_in_scope":
+      return "Out of scope";
+    case "not_available":
+      return "Unavailable";
+    case "requesting_user_not_allowed":
+      return "User not allowed";
+    case "active_agent_not_allowed":
+      return "Active agent required";
+    case "budget_exhausted":
+      return "Budget exhausted";
+    default:
+      return "Not implemented";
+  }
+}
+
+function formatContextSourceExclusionCategoryLabel(
+  category: NonNullable<AgentContextSourceDecision["exclusion"]>["category"]
+) {
+  switch (category) {
+    case "registration":
+      return "Registration";
+    case "scope":
+      return "Scope";
+    case "authorization":
+      return "Authorization";
+    case "availability":
+      return "Availability";
+    case "budget":
+      return "Budget";
+    default:
+      return "Implementation";
+  }
+}
+
+function formatContextSourceExecutionSummary(summary: NonNullable<AgentContextSourceDecision["execution"]["summary"]>) {
+  const parts = [
+    summary.usedCount > 0 ? `${summary.usedCount} used` : null,
+    summary.unsupportedCount > 0 ? `${summary.unsupportedCount} unsupported` : null,
+    summary.failedCount > 0 ? `${summary.failedCount} failed` : null,
+    summary.unavailableCount > 0 ? `${summary.unavailableCount} unavailable` : null,
+  ].filter((part): part is string => Boolean(part));
+
+  if (parts.length === 0) {
+    return summary.totalCount === 0 ? "0 attachments evaluated" : `${summary.totalCount} attachments evaluated`;
+  }
+
+  return parts.join(", ");
+}
+
+function buildContextSourceOriginSummary(selection: AgentInspectorData["context"]["sourceSelection"]) {
+  const parts = [
+    selection.defaultCandidateSourceIds.length > 0
+      ? `${selection.defaultCandidateSourceIds.length} default candidate${selection.defaultCandidateSourceIds.length === 1 ? "" : "s"}`
+      : null,
+    selection.explicitUserRequestedSourceIds.length > 0
+      ? `${selection.explicitUserRequestedSourceIds.length} user requested`
+      : null,
+    selection.plannerProposedSourceIds.length > 0
+      ? `${selection.plannerProposedSourceIds.length} planner proposed`
+      : null,
+    selection.policyRequiredSourceIds.length > 0
+      ? `${selection.policyRequiredSourceIds.length} policy required`
+      : null,
+    selection.fallbackCandidateSourceIds.length > 0
+      ? `${selection.fallbackCandidateSourceIds.length} fallback candidate${selection.fallbackCandidateSourceIds.length === 1 ? "" : "s"}`
+      : null,
+  ].filter((part): part is string => Boolean(part));
+
+  return parts.length > 0 ? parts.join(", ") : "No source candidates or requests were considered.";
+}
+
+function formatResolvedSourceStatusLabel(status: AgentResolvedSource["status"]) {
+  if (status === "unsupported") {
+    return "Unsupported";
+  }
+
+  if (status === "failed") {
+    return "Failed";
+  }
+
+  if (status === "unavailable") {
+    return "Unavailable";
+  }
+
+  return "Used";
 }
 
 function mergeChatProjects(
@@ -355,6 +490,16 @@ function ContextInspectorDialog({
   onCopyJson: () => void;
 }) {
   const rawJson = JSON.stringify(data, null, 2);
+  const consideredSourceCount = data.context.sourceSelection.consideredSourceIds.length;
+  const defaultCandidateSourceCount = data.context.sourceSelection.defaultCandidateSourceIds.length;
+  const explicitUserRequestedSourceCount = data.context.sourceSelection.explicitUserRequestedSourceIds.length;
+  const plannerProposedSourceCount = data.context.sourceSelection.plannerProposedSourceIds.length;
+  const policyRequiredSourceCount = data.context.sourceSelection.policyRequiredSourceIds.length;
+  const fallbackCandidateSourceCount = data.context.sourceSelection.fallbackCandidateSourceIds.length;
+  const requestedSourceCount = data.context.sourceSelection.requestedSourceIds.length;
+  const allowedSourceCount = data.context.sourceSelection.allowedSourceIds.length;
+  const executedSourceCount = data.context.sourceSelection.executedSourceIds.length;
+  const excludedSourceCount = data.context.sourceSelection.excludedSourceIds.length;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
@@ -474,23 +619,134 @@ function ContextInspectorDialog({
               ))}
             </div>
 
+            {data.context.sourceSelection ? (
+              <div className="mt-5 rounded-2xl border border-[rgba(255,255,255,0.06)] bg-[#101010] p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-[#F6F3EE]">Source Decisions</p>
+                  <span className="text-xs text-[#6F6A64]">
+                    {consideredSourceCount} considered, {allowedSourceCount} allowed, {executedSourceCount} executed, {excludedSourceCount} excluded
+                  </span>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+                  <div className="rounded-xl bg-[rgba(255,255,255,0.03)] px-3 py-2">
+                    <div className="text-[11px] uppercase tracking-[0.14em] text-[#8D877F]">Considered</div>
+                    <div className="mt-1 text-sm font-semibold text-[#F6F3EE]">{consideredSourceCount}</div>
+                  </div>
+                  <div className="rounded-xl bg-[rgba(75,156,211,0.08)] px-3 py-2">
+                    <div className="text-[11px] uppercase tracking-[0.14em] text-[#7EC8E3]">Allowed</div>
+                    <div className="mt-1 text-sm font-semibold text-[#F6F3EE]">{allowedSourceCount}</div>
+                  </div>
+                  <div className="rounded-xl bg-[rgba(126,200,227,0.08)] px-3 py-2">
+                    <div className="text-[11px] uppercase tracking-[0.14em] text-[#9FCBE0]">Executed</div>
+                    <div className="mt-1 text-sm font-semibold text-[#F6F3EE]">{executedSourceCount}</div>
+                  </div>
+                  <div className="rounded-xl bg-[rgba(240,200,137,0.08)] px-3 py-2">
+                    <div className="text-[11px] uppercase tracking-[0.14em] text-[#F0C889]">Excluded</div>
+                    <div className="mt-1 text-sm font-semibold text-[#F6F3EE]">{excludedSourceCount}</div>
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <span className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]">
+                    Default Candidates {defaultCandidateSourceCount}
+                  </span>
+                  <span className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]">
+                    User Requested {explicitUserRequestedSourceCount}
+                  </span>
+                  <span className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]">
+                    Planner Proposed {plannerProposedSourceCount}
+                  </span>
+                  {policyRequiredSourceCount > 0 ? (
+                    <span className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]">
+                      Policy Required {policyRequiredSourceCount}
+                    </span>
+                  ) : null}
+                  {fallbackCandidateSourceCount > 0 ? (
+                    <span className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]">
+                      Fallback Candidates {fallbackCandidateSourceCount}
+                    </span>
+                  ) : null}
+                  {requestedSourceCount > 0 ? (
+                    <span className="rounded-full border border-[rgba(126,200,227,0.18)] bg-[rgba(126,200,227,0.08)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#9FCBE0]">
+                      Active Requests {requestedSourceCount}
+                    </span>
+                  ) : null}
+                </div>
+                <p className="mt-2 text-xs leading-5 text-[#6F6A64]">
+                  Request origins: {buildContextSourceOriginSummary(data.context.sourceSelection)}
+                </p>
+                <div className="mt-4 grid gap-2">
+                  {data.context.sourceDecisions.map((source) => (
+                    <div
+                      key={`source-decision-${source.sourceId}`}
+                      className={cn(
+                        "rounded-2xl border px-3 py-3",
+                        source.admission.status === "allowed"
+                          ? "border-[rgba(75,156,211,0.16)] bg-[rgba(75,156,211,0.08)]"
+                          : "border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.03)]"
+                      )}
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-semibold text-[#F6F3EE]">{source.label}</p>
+                        <span className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]">
+                          {formatContextSourceRequestStatusLabel(source.request.status)}
+                        </span>
+                        {source.request.origins.map((origin) => (
+                          <span
+                            key={`${source.sourceId}-${origin}`}
+                            className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]"
+                          >
+                            {formatContextSourceRequestOriginLabel(origin)}
+                          </span>
+                        ))}
+                        <span className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]">
+                          {formatContextSourceAdmissionStatusLabel(source.admission.status)}
+                        </span>
+                        <span className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]">
+                          {formatContextSourceExecutionStatusLabel(source.execution.status)}
+                        </span>
+                        {source.exclusion ? (
+                          <span className="rounded-full border border-[rgba(240,200,137,0.18)] bg-[rgba(240,200,137,0.08)] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#F0C889]">
+                            {formatContextSourceExclusionCategoryLabel(source.exclusion.category)}
+                          </span>
+                        ) : null}
+                      </div>
+                      <p className="mt-1 text-xs leading-5 text-[#B7B0A8]">{source.request.detail}</p>
+                      <p className={cn(
+                        "mt-1 text-sm leading-6",
+                        source.admission.status === "allowed" ? "text-[#9FCBE0]" : "text-[#8D877F]"
+                      )}>
+                        {source.detail}
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-[#B7B0A8]">{source.execution.detail}</p>
+                      {source.execution.summary ? (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <span className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]">
+                            {formatContextSourceExecutionSummary(source.execution.summary)}
+                          </span>
+                          {source.execution.summary.excludedCategories.map((category) => (
+                            <span
+                              key={`${source.sourceId}-${category}`}
+                              className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]"
+                            >
+                              {formatContextSourceExclusionCategoryLabel(category)}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
             {data.context.resolvedSources.length > 0 ? (
               <div className="mt-5 rounded-2xl border border-[rgba(255,255,255,0.06)] bg-[#101010] p-4">
                 <div className="flex items-center justify-between gap-3">
-                  <p className="text-sm font-semibold text-[#F6F3EE]">Resolved Thread Sources</p>
+                  <p className="text-sm font-semibold text-[#F6F3EE]">Runtime Outcomes</p>
                   <span className="text-xs text-[#6F6A64]">{data.context.resolvedSources.length} files checked</span>
                 </div>
                 <div className="mt-3 grid gap-2">
                   {data.context.resolvedSources.map((source, index) => {
-                    const statusLabel =
-                      source.status === "unsupported"
-                        ? "Unsupported"
-                        : source.status === "failed"
-                          ? "Failed"
-                          : source.status === "unavailable"
-                            ? "Unavailable"
-                          : "Used";
-
                     return (
                       <div
                         key={`${source.kind}-${source.target}-${index}`}
@@ -499,7 +755,7 @@ function ContextInspectorDialog({
                         <div className="flex flex-wrap items-center gap-2">
                           <p className="text-sm font-semibold text-[#F6F3EE]">{source.label}</p>
                           <span className="rounded-full border border-[rgba(255,255,255,0.08)] bg-[#0B0B0B] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#B7B0A8]">
-                            {statusLabel}
+                            {formatResolvedSourceStatusLabel(source.status)}
                           </span>
                         </div>
                         <p className="mt-1 text-sm leading-6 text-[#8D877F]">{source.detail}</p>
@@ -2661,19 +2917,33 @@ export function TeamClient({
         "",
         "Context sources:",
         ...activeAgentInspector.context.knowledgeSources.map((source) => `- ${source.label}: ${source.description}`),
+        "",
+        `Considered sources: ${activeAgentInspector.context.sourceSelection.consideredSourceIds.length}`,
+        `Default candidates: ${activeAgentInspector.context.sourceSelection.defaultCandidateSourceIds.length}`,
+        `Explicit user requests: ${activeAgentInspector.context.sourceSelection.explicitUserRequestedSourceIds.length}`,
+        `Planner proposals: ${activeAgentInspector.context.sourceSelection.plannerProposedSourceIds.length}`,
+        `Policy-required sources: ${activeAgentInspector.context.sourceSelection.policyRequiredSourceIds.length}`,
+        `Fallback candidates: ${activeAgentInspector.context.sourceSelection.fallbackCandidateSourceIds.length}`,
+        `Requested sources: ${activeAgentInspector.context.sourceSelection.requestedSourceIds.length}`,
+        `Allowed sources: ${activeAgentInspector.context.sourceSelection.allowedSourceIds.length}`,
+        `Executed sources: ${activeAgentInspector.context.sourceSelection.executedSourceIds.length}`,
+        `Excluded sources: ${activeAgentInspector.context.sourceSelection.excludedSourceIds.length}`,
+        ...activeAgentInspector.context.sourceDecisions.map((source) => {
+          const exclusionLabel = source.exclusion
+            ? `; exclusion=${formatContextSourceExclusionCategoryLabel(source.exclusion.category)}`
+            : "";
+          const executionSummary = source.execution.summary
+            ? `; runtime=${formatContextSourceExecutionSummary(source.execution.summary)}`
+            : "";
+          const requestOrigins = source.request.origins.map((origin) => formatContextSourceRequestOriginLabel(origin)).join(", ");
+          return `- ${source.label} [request=${formatContextSourceRequestStatusLabel(source.request.status)} via ${requestOrigins}, admission=${formatContextSourceAdmissionStatusLabel(source.admission.status)}, execution=${formatContextSourceExecutionStatusLabel(source.execution.status)}${exclusionLabel}]: ${source.request.detail} ${source.detail}${executionSummary ? ` ${executionSummary}` : ""}`;
+        }),
         ...(activeAgentInspector.context.resolvedSources.length > 0
           ? [
               "",
-              "Resolved thread sources:",
+              "Runtime outcomes:",
               ...activeAgentInspector.context.resolvedSources.map((source) => {
-                const statusLabel =
-                  source.status === "unsupported"
-                    ? "unsupported"
-                    : source.status === "failed"
-                      ? "failed"
-                      : source.status === "unavailable"
-                        ? "unavailable"
-                      : "used";
+                const statusLabel = formatResolvedSourceStatusLabel(source.status).toLowerCase();
                 return `- ${source.label} [${statusLabel}]: ${source.detail}`;
               }),
             ]

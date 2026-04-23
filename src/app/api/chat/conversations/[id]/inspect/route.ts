@@ -109,7 +109,15 @@ export async function GET(
     const [llmHealth, orgContext, contextBundle, senderUser] = await Promise.all([
       probeAgentLlm(threadExecutionTarget ? buildExecutionTargetRuntimeConfig(threadExecutionTarget) : agent),
       buildOrgContext(),
-      resolveConversationContextBundle({ conversationId: conversation.id }),
+      resolveConversationContextBundle({
+        conversationId: conversation.id,
+        authority: {
+          requestingUserId: session.user.id,
+          activeUserIds: runtimeState.activeUserIds,
+          activeAgentId: runtimeState.activeAgentMember?.agent.id ?? null,
+          activeAgentIds: runtimeState.activeAgentIds,
+        },
+      }),
       prisma.user.findUnique({
         where: { id: session.user.id },
         select: { displayName: true, name: true },
@@ -181,6 +189,8 @@ export async function GET(
         recentHistoryCount: runtimePreview.recentHistoryCount,
         historyWindowSize: 12,
         knowledgeSources: runtimePreview.knowledgeSources,
+        sourceSelection: contextBundle.sourceSelection,
+        sourceDecisions: contextBundle.sourceDecisions,
         resolvedSources: contextBundle.sources,
       },
       payload: {

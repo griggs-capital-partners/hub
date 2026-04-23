@@ -243,6 +243,84 @@ export interface AgentInspectorData {
       label: string;
       description: string;
     }>;
+    sourceSelection: {
+      requestMode: "default" | "plan";
+      consideredSourceIds: string[];
+      defaultCandidateSourceIds: string[];
+      explicitUserRequestedSourceIds: string[];
+      requestedSourceIds: string[];
+      plannerProposedSourceIds: string[];
+      policyRequiredSourceIds: string[];
+      fallbackCandidateSourceIds: string[];
+      allowedSourceIds: string[];
+      executedSourceIds: string[];
+      excludedSourceIds: string[];
+    };
+    sourceDecisions: Array<{
+      sourceId: string;
+      label: string;
+      request: {
+        status: "candidate" | "requested" | "proposed" | "required";
+        mode: "default" | "plan";
+        origins: Array<
+          | "default_system_candidate"
+          | "explicit_user_request"
+          | "planner_proposed"
+          | "policy_required"
+          | "fallback_candidate"
+        >;
+        detail: string;
+      };
+      admission: {
+        status: "allowed" | "excluded";
+      };
+      execution: {
+        status: "executed" | "not_executed";
+        detail: string;
+        summary: {
+          totalCount: number;
+          usedCount: number;
+          unsupportedCount: number;
+          failedCount: number;
+          unavailableCount: number;
+          excludedCategories: Array<"registration" | "scope" | "authorization" | "availability" | "implementation" | "budget">;
+        } | null;
+      };
+      exclusion: {
+        category: "registration" | "scope" | "authorization" | "availability" | "implementation" | "budget";
+        reason:
+          | "not_registered"
+          | "not_in_scope"
+          | "not_available"
+          | "requesting_user_not_allowed"
+          | "active_agent_not_allowed"
+          | "not_implemented"
+          | "budget_exhausted";
+        detail: string;
+      } | null;
+      status: "allowed" | "excluded";
+      reason:
+        | "allowed"
+        | "not_registered"
+        | "not_in_scope"
+        | "not_available"
+        | "requesting_user_not_allowed"
+        | "active_agent_not_allowed"
+        | "not_implemented"
+        | "budget_exhausted";
+      detail: string;
+      domain: string;
+      scope: string;
+      policyMode: string;
+      eligibility: {
+        isRegistered: boolean;
+        isInScope: boolean;
+        isAvailable: boolean;
+        isRequestingUserAllowed: boolean;
+        isActiveAgentAllowed: boolean;
+        isImplemented: boolean;
+      };
+    }>;
     resolvedSources: Array<{
       kind: string;
       label: string;

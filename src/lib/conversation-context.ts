@@ -8,6 +8,105 @@ import { prisma } from "./prisma";
 
 export type ConversationContextSourceStatus = "used" | "unsupported" | "failed" | "unavailable";
 
+export type ConversationContextSourceId =
+  | "thread_documents"
+  | "company_documents"
+  | "browsing"
+  | "memory"
+  | "live_data";
+
+export type ConversationContextSourceScope = "thread" | "workspace" | "user" | "external" | "unknown";
+
+export type ConversationContextSourcePolicyMode =
+  | "thread_active_membership"
+  | "future_authorized_retrieval"
+  | "unknown";
+
+export type ConversationContextSourceRequestMode = "default" | "plan";
+
+export type ConversationContextSourceRequestOrigin =
+  | "default_system_candidate"
+  | "explicit_user_request"
+  | "planner_proposed"
+  | "policy_required"
+  | "fallback_candidate";
+
+export type ConversationContextSourceRequestStatus =
+  | "candidate"
+  | "requested"
+  | "proposed"
+  | "required";
+
+export type ConversationContextSourceExclusionCategory =
+  | "registration"
+  | "scope"
+  | "authorization"
+  | "availability"
+  | "implementation"
+  | "budget";
+
+export type ConversationContextSourceExclusionReason =
+  | "not_registered"
+  | "not_in_scope"
+  | "not_available"
+  | "requesting_user_not_allowed"
+  | "active_agent_not_allowed"
+  | "not_implemented"
+  | "budget_exhausted";
+
+export type ConversationContextSourceDecisionReason =
+  | "allowed"
+  | ConversationContextSourceExclusionReason;
+
+export type ConversationContextSourceEligibility = {
+  isRegistered: boolean;
+  isInScope: boolean;
+  isAvailable: boolean;
+  isRequestingUserAllowed: boolean;
+  isActiveAgentAllowed: boolean;
+  isImplemented: boolean;
+};
+
+export type ConversationContextSourceExclusion = {
+  category: ConversationContextSourceExclusionCategory;
+  reason: ConversationContextSourceExclusionReason;
+  detail: string;
+};
+
+export type ConversationContextSourceDecision = {
+  sourceId: string;
+  label: string;
+  request: {
+    status: ConversationContextSourceRequestStatus;
+    mode: ConversationContextSourceRequestMode;
+    origins: ConversationContextSourceRequestOrigin[];
+    detail: string;
+  };
+  admission: {
+    status: "allowed" | "excluded";
+  };
+  execution: {
+    status: "executed" | "not_executed";
+    detail: string;
+    summary: {
+      totalCount: number;
+      usedCount: number;
+      unsupportedCount: number;
+      failedCount: number;
+      unavailableCount: number;
+      excludedCategories: ConversationContextSourceExclusionCategory[];
+    } | null;
+  };
+  exclusion: ConversationContextSourceExclusion | null;
+  status: "allowed" | "excluded";
+  reason: ConversationContextSourceDecisionReason;
+  detail: string;
+  domain: string;
+  scope: ConversationContextSourceScope;
+  policyMode: ConversationContextSourcePolicyMode;
+  eligibility: ConversationContextSourceEligibility;
+};
+
 export type ConversationContextSource = {
   kind: "thread-document";
   label: string;
@@ -24,10 +123,43 @@ export type ConversationContextSummarySource = {
   description: string;
 };
 
+export type ConversationContextSourceAuthority = {
+  requestingUserId: string | null;
+  activeUserIds: string[];
+  activeAgentId: string | null;
+  activeAgentIds: string[];
+};
+
+export type ConversationContextAcquisitionPlan = {
+  // Future LLM planning can propose a ranked/source-specific acquisition plan here.
+  // The app-side resolver will still evaluate registry + eligibility before execution.
+  requestedSourceIds?: string[];
+  sourceRequests?: Array<{
+    sourceId: string;
+    origin: Exclude<ConversationContextSourceRequestOrigin, "default_system_candidate">;
+  }>;
+};
+
+export type ConversationContextSourceSelection = {
+  requestMode: ConversationContextSourceRequestMode;
+  consideredSourceIds: string[];
+  defaultCandidateSourceIds: string[];
+  explicitUserRequestedSourceIds: string[];
+  requestedSourceIds: string[];
+  plannerProposedSourceIds: string[];
+  policyRequiredSourceIds: string[];
+  fallbackCandidateSourceIds: string[];
+  allowedSourceIds: string[];
+  executedSourceIds: string[];
+  excludedSourceIds: string[];
+};
+
 export type ConversationContextBundle = {
   text: string;
   sources: ConversationContextSource[];
   summarySources: ConversationContextSummarySource[];
+  sourceSelection: ConversationContextSourceSelection;
+  sourceDecisions: ConversationContextSourceDecision[];
 };
 
 type ConversationContextDocumentRecord = {
@@ -62,6 +194,89 @@ const SUPPORTED_THREAD_SPREADSHEET_EXTENSIONS = new Set(["xlsx", "csv", "tsv"]);
 const SUPPORTED_THREAD_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp"]);
 const THREAD_DOCUMENT_SUPPORT_DETAIL =
   "plain text, markdown, PDF, DOCX, PPTX, XLSX, CSV, TSV, and baseline PNG/JPG/JPEG/WEBP image attachment handling";
+const CONVERSATION_CONTEXT_SOURCE_REGISTRY = [
+  {
+    id: "thread_documents",
+    label: "Thread-attached documents",
+    domain: "thread_documents",
+    scope: "thread",
+    policyMode: "thread_active_membership",
+    isAvailable: true,
+    isImplemented: true,
+  },
+  {
+    id: "company_documents",
+    label: "Company documents",
+    domain: "company_documents",
+    scope: "workspace",
+    policyMode: "future_authorized_retrieval",
+    isAvailable: true,
+    isImplemented: false,
+  },
+  {
+    id: "browsing",
+    label: "Browsing",
+    domain: "browsing",
+    scope: "external",
+    policyMode: "future_authorized_retrieval",
+    isAvailable: true,
+    isImplemented: false,
+  },
+  {
+    id: "memory",
+    label: "Memory",
+    domain: "memory",
+    scope: "user",
+    policyMode: "future_authorized_retrieval",
+    isAvailable: true,
+    isImplemented: false,
+  },
+  {
+    id: "live_data",
+    label: "Live data",
+    domain: "live_data",
+    scope: "workspace",
+    policyMode: "future_authorized_retrieval",
+    isAvailable: true,
+    isImplemented: false,
+  },
+] as const satisfies ReadonlyArray<{
+  id: ConversationContextSourceId;
+  label: string;
+  domain: ConversationContextSourceId;
+  scope: Exclude<ConversationContextSourceScope, "unknown">;
+  policyMode: Exclude<ConversationContextSourcePolicyMode, "unknown">;
+  isAvailable: boolean;
+  isImplemented: boolean;
+}>;
+const CONVERSATION_CONTEXT_SOURCE_REGISTRY_BY_ID = new Map(
+  CONVERSATION_CONTEXT_SOURCE_REGISTRY.map((source) => [source.id, source])
+);
+const CONVERSATION_CONTEXT_SOURCE_REQUEST_ORIGIN_PRECEDENCE = [
+  "policy_required",
+  "explicit_user_request",
+  "planner_proposed",
+  "fallback_candidate",
+  "default_system_candidate",
+] as const satisfies ReadonlyArray<ConversationContextSourceRequestOrigin>;
+const CONVERSATION_CONTEXT_SOURCE_REQUEST_STATUS_BY_ORIGIN = {
+  default_system_candidate: "candidate",
+  explicit_user_request: "requested",
+  planner_proposed: "proposed",
+  policy_required: "required",
+  fallback_candidate: "candidate",
+} as const satisfies Record<
+  ConversationContextSourceRequestOrigin,
+  ConversationContextSourceRequestStatus
+>;
+const NON_DEFAULT_CONVERSATION_CONTEXT_SOURCE_REQUEST_ORIGINS = new Set<
+  Exclude<ConversationContextSourceRequestOrigin, "default_system_candidate">
+>([
+  "explicit_user_request",
+  "planner_proposed",
+  "policy_required",
+  "fallback_candidate",
+]);
 let pdfJsWorkerBootstrapPromise: Promise<void> | null = null;
 const MAX_SPREADSHEET_SHEETS = 3;
 const MAX_SPREADSHEET_ROWS_PER_SHEET = 20;
@@ -988,8 +1203,509 @@ function buildContextSource(
   };
 }
 
+type ConversationContextRequestedSource = {
+  sourceId: string;
+  status: ConversationContextSourceRequestStatus;
+  origins: ConversationContextSourceRequestOrigin[];
+  detail: string;
+};
+
+type ConversationContextRequestedSourcePlan = {
+  requestMode: ConversationContextSourceRequestMode;
+  requests: ConversationContextRequestedSource[];
+  consideredSourceIds: string[];
+  defaultCandidateSourceIds: string[];
+  explicitUserRequestedSourceIds: string[];
+  requestedSourceIds: string[];
+  plannerProposedSourceIds: string[];
+  policyRequiredSourceIds: string[];
+  fallbackCandidateSourceIds: string[];
+};
+
+function normalizeConversationContextSourceIds(sourceIds: unknown[] | null | undefined) {
+  if (!Array.isArray(sourceIds)) {
+    return [];
+  }
+
+  return Array.from(new Set(
+    sourceIds
+      .filter((sourceId): sourceId is string => typeof sourceId === "string" && sourceId.trim().length > 0)
+      .map((sourceId) => sourceId.trim())
+  ));
+}
+
+function isConversationContextSourceRequestOrigin(
+  value: unknown
+): value is Exclude<ConversationContextSourceRequestOrigin, "default_system_candidate"> {
+  return typeof value === "string" && NON_DEFAULT_CONVERSATION_CONTEXT_SOURCE_REQUEST_ORIGINS.has(
+    value as Exclude<ConversationContextSourceRequestOrigin, "default_system_candidate">
+  );
+}
+
+function resolveConversationContextSourceRequestStatus(
+  origins: ConversationContextSourceRequestOrigin[]
+): ConversationContextSourceRequestStatus {
+  for (const origin of CONVERSATION_CONTEXT_SOURCE_REQUEST_ORIGIN_PRECEDENCE) {
+    if (origins.includes(origin)) {
+      return CONVERSATION_CONTEXT_SOURCE_REQUEST_STATUS_BY_ORIGIN[origin];
+    }
+  }
+
+  return "candidate";
+}
+
+function formatConversationContextSourceRequestOriginLabel(origin: ConversationContextSourceRequestOrigin) {
+  switch (origin) {
+    case "default_system_candidate":
+      return "a default system candidate";
+    case "explicit_user_request":
+      return "an explicit user request";
+    case "planner_proposed":
+      return "a planner proposal";
+    case "policy_required":
+      return "a policy-required source";
+    default:
+      return "a fallback candidate";
+  }
+}
+
+function buildConversationContextSourceRequestDetail(origins: ConversationContextSourceRequestOrigin[]) {
+  const primaryOrigin = CONVERSATION_CONTEXT_SOURCE_REQUEST_ORIGIN_PRECEDENCE.find(
+    (origin) => origins.includes(origin)
+  ) ?? "default_system_candidate";
+  const additionalOrigins = origins.filter((origin) => origin !== primaryOrigin);
+  let detail = "";
+
+  if (primaryOrigin === "default_system_candidate") {
+    detail = "Considered as a default system candidate for this conversation runtime.";
+  } else if (primaryOrigin === "explicit_user_request") {
+    detail = "Included because the user explicitly requested this source for the conversation.";
+  } else if (primaryOrigin === "planner_proposed") {
+    detail = "Included as a planner-compatible proposal for app-side verification before any execution.";
+  } else if (primaryOrigin === "policy_required") {
+    detail = "Included because app-side policy marked this source as required before execution could proceed.";
+  } else {
+    detail = "Considered as a fallback candidate if stronger or preferred sources are unavailable.";
+  }
+
+  if (additionalOrigins.length === 0) {
+    return detail;
+  }
+
+  const additionalLabels = additionalOrigins.map((origin) => formatConversationContextSourceRequestOriginLabel(origin));
+  return `${detail} Also marked as ${additionalLabels.join(" and ")}.`;
+}
+
+function resolveRequestedConversationContextSourcePlan(
+  sourcePlan: ConversationContextAcquisitionPlan | null | undefined
+) : ConversationContextRequestedSourcePlan {
+  if (!sourcePlan) {
+    const defaultCandidateSourceIds = CONVERSATION_CONTEXT_SOURCE_REGISTRY.map((source) => source.id);
+    const requests = defaultCandidateSourceIds.map((sourceId) => ({
+      sourceId,
+      status: "candidate" as const,
+      origins: ["default_system_candidate"] as ConversationContextSourceRequestOrigin[],
+      detail: buildConversationContextSourceRequestDetail(["default_system_candidate"]),
+    }));
+    return {
+      requestMode: "default",
+      requests,
+      consideredSourceIds: defaultCandidateSourceIds,
+      defaultCandidateSourceIds,
+      explicitUserRequestedSourceIds: [],
+      requestedSourceIds: [],
+      plannerProposedSourceIds: [],
+      policyRequiredSourceIds: [],
+      fallbackCandidateSourceIds: [],
+    };
+  }
+
+  const requestOriginsBySourceId = new Map<string, Set<ConversationContextSourceRequestOrigin>>();
+  for (const sourceId of normalizeConversationContextSourceIds(sourcePlan.requestedSourceIds)) {
+    const origins = requestOriginsBySourceId.get(sourceId) ?? new Set<ConversationContextSourceRequestOrigin>();
+    origins.add("planner_proposed");
+    requestOriginsBySourceId.set(sourceId, origins);
+  }
+
+  if (Array.isArray(sourcePlan.sourceRequests)) {
+    for (const sourceRequest of sourcePlan.sourceRequests) {
+      if (!sourceRequest || typeof sourceRequest !== "object") {
+        continue;
+      }
+
+      const sourceId = typeof sourceRequest.sourceId === "string" ? sourceRequest.sourceId.trim() : "";
+      if (!sourceId) {
+        continue;
+      }
+
+      if (!isConversationContextSourceRequestOrigin(sourceRequest.origin)) {
+        continue;
+      }
+
+      const origins = requestOriginsBySourceId.get(sourceId) ?? new Set<ConversationContextSourceRequestOrigin>();
+      origins.add(sourceRequest.origin);
+      requestOriginsBySourceId.set(sourceId, origins);
+    }
+  }
+
+  const requests = Array.from(requestOriginsBySourceId.entries()).map(([sourceId, originsSet]) => {
+    const origins = CONVERSATION_CONTEXT_SOURCE_REQUEST_ORIGIN_PRECEDENCE.filter((origin) => originsSet.has(origin));
+    const status = resolveConversationContextSourceRequestStatus(origins);
+    return {
+      sourceId,
+      status,
+      origins,
+      detail: buildConversationContextSourceRequestDetail(origins),
+    } satisfies ConversationContextRequestedSource;
+  });
+
+  const explicitUserRequestedSourceIds = requests
+    .filter((request) => request.origins.includes("explicit_user_request"))
+    .map((request) => request.sourceId);
+  const plannerProposedSourceIds = requests
+    .filter((request) => request.origins.includes("planner_proposed"))
+    .map((request) => request.sourceId);
+  const policyRequiredSourceIds = requests
+    .filter((request) => request.origins.includes("policy_required"))
+    .map((request) => request.sourceId);
+  const fallbackCandidateSourceIds = requests
+    .filter((request) => request.origins.includes("fallback_candidate"))
+    .map((request) => request.sourceId);
+
+  return {
+    requestMode: "plan",
+    requests,
+    consideredSourceIds: requests.map((request) => request.sourceId),
+    defaultCandidateSourceIds: [],
+    explicitUserRequestedSourceIds,
+    requestedSourceIds: requests
+      .filter((request) => request.status !== "candidate")
+      .map((request) => request.sourceId),
+    plannerProposedSourceIds,
+    policyRequiredSourceIds,
+    fallbackCandidateSourceIds,
+  };
+}
+
+function buildConversationContextSourceDecisionDetail(params: {
+  sourceId: string;
+  reason: ConversationContextSourceDecisionReason;
+}) {
+  if (params.reason === "allowed") {
+    if (params.sourceId === "thread_documents") {
+      return "Allowed because the requesting user is an authoritative active thread member and the active agent is the authoritative active agent for this thread runtime.";
+    }
+
+    return "Allowed for execution in the current conversation runtime.";
+  }
+
+  if (params.reason === "not_registered") {
+    return "Excluded because this source is not registered in the current conversation-context source registry.";
+  }
+
+  if (params.reason === "not_in_scope") {
+    if (params.sourceId === "thread_documents") {
+      return "Excluded because thread-attached documents only apply to a concrete thread conversation scope.";
+    }
+
+    return "Excluded because this source is outside the current conversation scope.";
+  }
+
+  if (params.reason === "not_available") {
+    return "Excluded because this source is not enabled or available in the current workspace runtime.";
+  }
+
+  if (params.reason === "requesting_user_not_allowed") {
+    return "Excluded because the requesting user is not an authoritative active member of this thread.";
+  }
+
+  if (params.reason === "active_agent_not_allowed") {
+    return "Excluded because no authoritative active agent is available for this thread runtime.";
+  }
+
+  return "Excluded because this source is registered as a future capability, but retrieval for it is not implemented in the current runtime.";
+}
+
+function resolveConversationContextSourceExclusionCategory(
+  reason: ConversationContextSourceExclusionReason
+): ConversationContextSourceExclusionCategory {
+  if (reason === "not_registered") {
+    return "registration";
+  }
+
+  if (reason === "not_in_scope") {
+    return "scope";
+  }
+
+  if (reason === "requesting_user_not_allowed" || reason === "active_agent_not_allowed") {
+    return "authorization";
+  }
+
+  if (reason === "not_available" || reason === "budget_exhausted") {
+    return reason === "budget_exhausted" ? "budget" : "availability";
+  }
+
+  return "implementation";
+}
+
+function resolveConversationContextSourceExclusion(params: {
+  sourceId: string;
+  reason: ConversationContextSourceDecisionReason;
+}) {
+  if (params.reason === "allowed") {
+    return null;
+  }
+
+  const detail = buildConversationContextSourceDecisionDetail(params);
+  return {
+    category: resolveConversationContextSourceExclusionCategory(params.reason),
+    reason: params.reason,
+    detail,
+  } satisfies ConversationContextSourceExclusion;
+}
+
+function buildConversationContextSourceExecutionDetail(params: {
+  sourceId: string;
+  admissionStatus: ConversationContextSourceDecision["admission"]["status"];
+  exclusion: ConversationContextSourceExclusion | null;
+  executed: boolean;
+  threadDocumentCount?: number;
+}) {
+  if (!params.executed) {
+    if (params.admissionStatus === "excluded") {
+      return params.exclusion
+        ? `Did not execute because this source was excluded before runtime execution (${params.exclusion.category}: ${params.exclusion.reason}).`
+        : "Did not execute because this source was excluded before runtime execution.";
+    }
+
+    return "Did not execute a runtime adapter for this source in this pass.";
+  }
+
+  if (params.sourceId === "thread_documents") {
+    const attachmentCount = params.threadDocumentCount ?? 0;
+    return attachmentCount === 0
+      ? "Executed thread-attached document retrieval for this conversation, but no in-scope thread attachments were available."
+      : attachmentCount === 1
+        ? "Executed thread-attached document retrieval for this conversation and evaluated 1 in-scope attachment."
+        : `Executed thread-attached document retrieval for this conversation and evaluated ${attachmentCount.toLocaleString("en-US")} in-scope attachments.`;
+  }
+
+  return "Executed this source adapter in the current runtime.";
+}
+
+function resolveConversationContextSourceDecision(params: {
+  request: ConversationContextRequestedSource;
+  conversationId: string;
+  authority: ConversationContextSourceAuthority;
+  requestMode: ConversationContextSourceRequestMode;
+}): ConversationContextSourceDecision {
+  const source = CONVERSATION_CONTEXT_SOURCE_REGISTRY_BY_ID.get(
+    params.request.sourceId as ConversationContextSourceId
+  );
+
+  if (!source) {
+    const exclusion = resolveConversationContextSourceExclusion({
+      sourceId: params.request.sourceId,
+      reason: "not_registered",
+    });
+    if (!exclusion) {
+      throw new Error("Source exclusion resolution must exist for unregistered sources.");
+    }
+    return {
+      sourceId: params.request.sourceId,
+      label: params.request.sourceId,
+      request: {
+        status: params.request.status,
+        mode: params.requestMode,
+        origins: params.request.origins,
+        detail: params.request.detail,
+      },
+      admission: {
+        status: "excluded",
+      },
+      execution: {
+        status: "not_executed",
+        detail: buildConversationContextSourceExecutionDetail({
+          sourceId: params.request.sourceId,
+          admissionStatus: "excluded",
+          exclusion,
+          executed: false,
+        }),
+        summary: null,
+      },
+      exclusion,
+      status: "excluded",
+      reason: "not_registered",
+      detail: exclusion.detail,
+      domain: "unknown",
+      scope: "unknown",
+      policyMode: "unknown",
+      eligibility: {
+        isRegistered: false,
+        isInScope: false,
+        isAvailable: false,
+        isRequestingUserAllowed: false,
+        isActiveAgentAllowed: false,
+        isImplemented: false,
+      },
+    };
+  }
+
+  const isInScope = source.scope === "thread" ? Boolean(params.conversationId.trim()) : true;
+  const isRequestingUserAllowed = source.policyMode === "thread_active_membership"
+    ? Boolean(
+        params.authority.requestingUserId
+        && params.authority.activeUserIds.includes(params.authority.requestingUserId)
+      )
+    : true;
+  const isActiveAgentAllowed = source.policyMode === "thread_active_membership"
+    ? Boolean(
+        params.authority.activeAgentId
+        && params.authority.activeAgentIds.includes(params.authority.activeAgentId)
+      )
+    : true;
+  const eligibility = {
+    isRegistered: true,
+    isInScope,
+    isAvailable: source.isAvailable,
+    isRequestingUserAllowed,
+    isActiveAgentAllowed,
+    isImplemented: source.isImplemented,
+  };
+  let reason: ConversationContextSourceDecisionReason = "allowed";
+
+  if (!eligibility.isInScope) {
+    reason = "not_in_scope";
+  } else if (!eligibility.isAvailable) {
+    reason = "not_available";
+  } else if (!eligibility.isRequestingUserAllowed) {
+    reason = "requesting_user_not_allowed";
+  } else if (!eligibility.isActiveAgentAllowed) {
+    reason = "active_agent_not_allowed";
+  } else if (!eligibility.isImplemented) {
+    reason = "not_implemented";
+  }
+  const exclusion = resolveConversationContextSourceExclusion({
+    sourceId: source.id,
+    reason,
+  });
+  const admissionStatus = reason === "allowed" ? "allowed" : "excluded";
+  const detail = exclusion?.detail ?? buildConversationContextSourceDecisionDetail({
+    sourceId: source.id,
+    reason,
+  });
+
+  return {
+    sourceId: source.id,
+    label: source.label,
+    request: {
+      status: params.request.status,
+      mode: params.requestMode,
+      origins: params.request.origins,
+      detail: params.request.detail,
+    },
+    admission: {
+      status: admissionStatus,
+    },
+    execution: {
+      status: "not_executed",
+      detail: buildConversationContextSourceExecutionDetail({
+        sourceId: source.id,
+        admissionStatus,
+        exclusion,
+        executed: false,
+      }),
+      summary: null,
+    },
+    exclusion,
+    status: admissionStatus,
+    reason,
+    detail,
+    domain: source.domain,
+    scope: source.scope,
+    policyMode: source.policyMode,
+    eligibility,
+  };
+}
+
+function resolveConversationContextSourceDecisions(params: {
+  conversationId: string;
+  authority: ConversationContextSourceAuthority;
+  requestedSources: ConversationContextRequestedSourcePlan;
+}) {
+  return params.requestedSources.requests.map((request) =>
+    resolveConversationContextSourceDecision({
+      request,
+      conversationId: params.conversationId,
+      authority: params.authority,
+      requestMode: params.requestedSources.requestMode,
+    })
+  );
+}
+
+function finalizeConversationContextSourceDecision(params: {
+  sourceDecision: ConversationContextSourceDecision;
+  threadDocumentSummary: {
+    totalCount: number;
+    usedCount: number;
+    unsupportedCount: number;
+    failedCount: number;
+    unavailableCount: number;
+    excludedCategories: ConversationContextSourceExclusionCategory[];
+  };
+}) {
+  if (params.sourceDecision.sourceId !== "thread_documents") {
+    return params.sourceDecision;
+  }
+
+  const executed = params.sourceDecision.admission.status === "allowed";
+  const executionStatus: ConversationContextSourceDecision["execution"]["status"] =
+    executed ? "executed" : "not_executed";
+  return {
+    ...params.sourceDecision,
+    execution: {
+      status: executionStatus,
+      detail: buildConversationContextSourceExecutionDetail({
+        sourceId: params.sourceDecision.sourceId,
+        admissionStatus: params.sourceDecision.admission.status,
+        exclusion: params.sourceDecision.exclusion,
+        executed,
+        threadDocumentCount: params.threadDocumentSummary.totalCount,
+      }),
+      summary: executed ? params.threadDocumentSummary : null,
+    },
+  };
+}
+
+function buildConversationContextSourceSelection(params: {
+  requestedSources: ConversationContextRequestedSourcePlan;
+  sourceDecisions: ConversationContextSourceDecision[];
+}): ConversationContextSourceSelection {
+  return {
+    requestMode: params.requestedSources.requestMode,
+    consideredSourceIds: params.requestedSources.consideredSourceIds,
+    defaultCandidateSourceIds: params.requestedSources.defaultCandidateSourceIds,
+    explicitUserRequestedSourceIds: params.requestedSources.explicitUserRequestedSourceIds,
+    requestedSourceIds: params.requestedSources.requestedSourceIds,
+    plannerProposedSourceIds: params.requestedSources.plannerProposedSourceIds,
+    policyRequiredSourceIds: params.requestedSources.policyRequiredSourceIds,
+    fallbackCandidateSourceIds: params.requestedSources.fallbackCandidateSourceIds,
+    allowedSourceIds: params.sourceDecisions
+      .filter((sourceDecision) => sourceDecision.admission.status === "allowed")
+      .map((sourceDecision) => sourceDecision.sourceId),
+    executedSourceIds: params.sourceDecisions
+      .filter((sourceDecision) => sourceDecision.execution.status === "executed")
+      .map((sourceDecision) => sourceDecision.sourceId),
+    excludedSourceIds: params.sourceDecisions
+      .filter((sourceDecision) => sourceDecision.admission.status === "excluded")
+      .map((sourceDecision) => sourceDecision.sourceId),
+  };
+}
+
 export async function resolveConversationContextBundle(params: {
   conversationId: string;
+  authority: ConversationContextSourceAuthority;
+  sourcePlan?: ConversationContextAcquisitionPlan | null;
 }, dependencies: ConversationContextResolverDependencies = {}): Promise<ConversationContextBundle> {
   const listDocuments = dependencies.listDocuments ?? (async (conversationId: string) => prisma.conversationDocument.findMany({
     where: { conversationId },
@@ -1009,10 +1725,20 @@ export async function resolveConversationContextBundle(params: {
   const extractDocxText = dependencies.extractDocxText ?? extractThreadDocxText;
   const extractPptxText = dependencies.extractPptxText ?? extractThreadPptxText;
   const extractSpreadsheetText = dependencies.extractSpreadsheetText ?? extractThreadSpreadsheetText;
-
-  const documents = (await listDocuments(params.conversationId)).filter(
-    (document) => document.conversationId === params.conversationId
+  const requestedSources = resolveRequestedConversationContextSourcePlan(params.sourcePlan);
+  const sourceDecisions = resolveConversationContextSourceDecisions({
+    conversationId: params.conversationId,
+    authority: params.authority,
+    requestedSources,
+  });
+  const threadDocumentsSourceDecision = sourceDecisions.find(
+    (sourceDecision) => sourceDecision.sourceId === "thread_documents"
   );
+  const documents = threadDocumentsSourceDecision?.status === "allowed"
+    ? (await listDocuments(params.conversationId)).filter(
+        (document) => document.conversationId === params.conversationId
+      )
+    : [];
 
   const sources: ConversationContextSource[] = [];
   const sections: string[] = [];
@@ -1022,12 +1748,14 @@ export async function resolveConversationContextBundle(params: {
   let unsupportedCount = 0;
   let failedCount = 0;
   let unavailableCount = 0;
+  const threadDocumentExcludedCategories = new Set<ConversationContextSourceExclusionCategory>();
 
   for (const document of documents) {
     const contextKind = resolveThreadDocumentContextKind(document);
 
     if (!contextKind) {
       unsupportedCount += 1;
+      threadDocumentExcludedCategories.add("implementation");
       const detail = `Attached to this thread, but thread-document context currently supports only ${THREAD_DOCUMENT_SUPPORT_DETAIL}.`;
       availabilityNotes.push(`- ${document.filename}: ${detail}`);
       sources.push(buildContextSource("unsupported", document.filename, detail));
@@ -1044,6 +1772,7 @@ export async function resolveConversationContextBundle(params: {
 
     if (contextKind === "image") {
       unavailableCount += 1;
+      threadDocumentExcludedCategories.add("availability");
       const detail = buildImageRuntimeUnavailableDetail();
       availabilityNotes.push(`- ${document.filename}: ${detail}`);
       sources.push(buildContextSource("unavailable", document.filename, detail));
@@ -1052,6 +1781,7 @@ export async function resolveConversationContextBundle(params: {
 
     if (remainingDocumentChars <= 0) {
       unavailableCount += 1;
+      threadDocumentExcludedCategories.add("budget");
       const detail =
         "Attached to this thread, but not included in this runtime because the thread-document context budget was already used by earlier attachments.";
       availabilityNotes.push(`- ${document.filename}: ${detail}`);
@@ -1153,6 +1883,19 @@ export async function resolveConversationContextBundle(params: {
           : "Documents are attached to this thread, but none produced context for this runtime.",
     });
   }
+  const finalizedSourceDecisions = sourceDecisions.map((sourceDecision) =>
+    finalizeConversationContextSourceDecision({
+      sourceDecision,
+      threadDocumentSummary: {
+        totalCount: documents.length,
+        usedCount,
+        unsupportedCount,
+        failedCount,
+        unavailableCount,
+        excludedCategories: [...threadDocumentExcludedCategories],
+      },
+    })
+  );
 
   return {
     text: [
@@ -1173,5 +1916,10 @@ export async function resolveConversationContextBundle(params: {
     ].filter((section): section is string => Boolean(section)).join("\n\n"),
     sources,
     summarySources,
+    sourceSelection: buildConversationContextSourceSelection({
+      requestedSources,
+      sourceDecisions: finalizedSourceDecisions,
+    }),
+    sourceDecisions: finalizedSourceDecisions,
   };
 }

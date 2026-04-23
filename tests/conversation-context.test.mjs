@@ -11,7 +11,7 @@ const __dirname = path.dirname(__filename);
 const jiti = createJiti(import.meta.url, { moduleCache: false });
 const {
   MAX_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS,
-  resolveConversationContextBundle,
+  resolveConversationContextBundle: resolveConversationContextBundleBase,
 } = jiti(path.join(__dirname, "..", "src", "lib", "conversation-context.ts"));
 const {
   CONVERSATION_DOCUMENT_ACCEPT,
@@ -28,6 +28,29 @@ function makeDocument(overrides = {}) {
     fileType: overrides.fileType ?? "text",
     storagePath: overrides.storagePath ?? "C:\\GitHub\\hub\\uploads\\thread-1\\notes.md",
   };
+}
+
+function makeAuthority(overrides = {}) {
+  return {
+    requestingUserId: overrides.requestingUserId ?? "user-1",
+    activeUserIds: overrides.activeUserIds ?? ["user-1"],
+    activeAgentId: overrides.activeAgentId ?? "agent-1",
+    activeAgentIds: overrides.activeAgentIds ?? ["agent-1"],
+  };
+}
+
+function resolveConversationContextBundle(params, dependencies) {
+  return resolveConversationContextBundleBase(
+    {
+      ...params,
+      authority: params.authority ?? makeAuthority(),
+    },
+    dependencies
+  );
+}
+
+function findSourceDecision(bundle, sourceId) {
+  return bundle.sourceDecisions.find((source) => source.sourceId === sourceId) ?? null;
 }
 
 function escapePdfLiteralText(value) {
@@ -328,6 +351,14 @@ await runTest("marks image attachments as unavailable when the current runtime c
   assert.match(bundle.sources[0].detail, /does not yet load image attachments into the active model context/i);
   assert.match(bundle.text, /inspection\.png: Attached to this thread, but the current Team Chat runtime does not yet load image attachments into the active model context\./i);
   assert.match(bundle.summarySources[0].description, /1 unavailable/);
+  assert.deepEqual(findSourceDecision(bundle, "thread_documents")?.execution.summary, {
+    totalCount: 1,
+    usedCount: 0,
+    unsupportedCount: 0,
+    failedCount: 0,
+    unavailableCount: 1,
+    excludedCategories: ["availability"],
+  });
 });
 
 await runTest("uses supported PDF attachments when extraction succeeds", async () => {
@@ -1204,7 +1235,7 @@ await runTest("stays truthful when a CSV has no clear header row", async () => {
   assert.match(bundle.text, /Row 1: Call vendor/);
 });
 
-await runTest("returns an empty bundle when no attachments exist", async () => {
+await runTest("reports source decisions even when no attachments exist", async () => {
   const bundle = await resolveConversationContextBundle(
     { conversationId: "thread-1" },
     {
@@ -1213,11 +1244,313 @@ await runTest("returns an empty bundle when no attachments exist", async () => {
     }
   );
 
-  assert.deepEqual(bundle, {
-    text: "",
-    sources: [],
-    summarySources: [],
+  assert.equal(bundle.text, "");
+  assert.deepEqual(bundle.sources, []);
+  assert.deepEqual(bundle.summarySources, []);
+  assert.deepEqual(bundle.sourceSelection, {
+    requestMode: "default",
+    consideredSourceIds: ["thread_documents", "company_documents", "browsing", "memory", "live_data"],
+    defaultCandidateSourceIds: ["thread_documents", "company_documents", "browsing", "memory", "live_data"],
+    explicitUserRequestedSourceIds: [],
+    requestedSourceIds: [],
+    plannerProposedSourceIds: [],
+    policyRequiredSourceIds: [],
+    fallbackCandidateSourceIds: [],
+    allowedSourceIds: ["thread_documents"],
+    executedSourceIds: ["thread_documents"],
+    excludedSourceIds: ["company_documents", "browsing", "memory", "live_data"],
   });
+  assert.deepEqual(
+    bundle.sourceDecisions.map((source) => [source.sourceId, source.status, source.reason]),
+    [
+      ["thread_documents", "allowed", "allowed"],
+      ["company_documents", "excluded", "not_implemented"],
+      ["browsing", "excluded", "not_implemented"],
+      ["memory", "excluded", "not_implemented"],
+      ["live_data", "excluded", "not_implemented"],
+    ]
+  );
+  assert.deepEqual(findSourceDecision(bundle, "thread_documents")?.request, {
+    status: "candidate",
+    mode: "default",
+    origins: ["default_system_candidate"],
+    detail: "Considered as a default system candidate for this conversation runtime.",
+  });
+  assert.deepEqual(findSourceDecision(bundle, "thread_documents")?.admission, {
+    status: "allowed",
+  });
+  assert.deepEqual(findSourceDecision(bundle, "thread_documents")?.execution, {
+    status: "executed",
+    detail: "Executed thread-attached document retrieval for this conversation, but no in-scope thread attachments were available.",
+    summary: {
+      totalCount: 0,
+      usedCount: 0,
+      unsupportedCount: 0,
+      failedCount: 0,
+      unavailableCount: 0,
+      excludedCategories: [],
+    },
+  });
+  assert.equal(findSourceDecision(bundle, "company_documents")?.exclusion?.category, "implementation");
+});
+
+await runTest("honors an explicit empty source plan without falling back to the default registry sweep", async () => {
+  let listDocumentsCalled = false;
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      sourcePlan: {
+        requestedSourceIds: [],
+      },
+    },
+    {
+      listDocuments: async () => {
+        listDocumentsCalled = true;
+        return [makeDocument()];
+      },
+    }
+  );
+
+  assert.equal(listDocumentsCalled, false);
+  assert.equal(bundle.text, "");
+  assert.deepEqual(bundle.sources, []);
+  assert.deepEqual(bundle.sourceSelection, {
+    requestMode: "plan",
+    consideredSourceIds: [],
+    defaultCandidateSourceIds: [],
+    explicitUserRequestedSourceIds: [],
+    requestedSourceIds: [],
+    plannerProposedSourceIds: [],
+    policyRequiredSourceIds: [],
+    fallbackCandidateSourceIds: [],
+    allowedSourceIds: [],
+    executedSourceIds: [],
+    excludedSourceIds: [],
+  });
+  assert.deepEqual(bundle.sourceDecisions, []);
+});
+
+await runTest("supports an explicit requested source plan without widening live execution", async () => {
+  let listDocumentsCalled = false;
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      sourcePlan: {
+        requestedSourceIds: ["thread_documents", "browsing"],
+      },
+    },
+    {
+      listDocuments: async () => {
+        listDocumentsCalled = true;
+        return [];
+      },
+    }
+  );
+
+  assert.equal(listDocumentsCalled, true);
+  assert.deepEqual(bundle.sourceSelection, {
+    requestMode: "plan",
+    consideredSourceIds: ["thread_documents", "browsing"],
+    defaultCandidateSourceIds: [],
+    explicitUserRequestedSourceIds: [],
+    requestedSourceIds: ["thread_documents", "browsing"],
+    plannerProposedSourceIds: ["thread_documents", "browsing"],
+    policyRequiredSourceIds: [],
+    fallbackCandidateSourceIds: [],
+    allowedSourceIds: ["thread_documents"],
+    executedSourceIds: ["thread_documents"],
+    excludedSourceIds: ["browsing"],
+  });
+  assert.deepEqual(
+    bundle.sourceDecisions.map((source) => [source.sourceId, source.request.status, source.request.mode, source.request.origins, source.admission.status, source.execution.status]),
+    [
+      ["thread_documents", "proposed", "plan", ["planner_proposed"], "allowed", "executed"],
+      ["browsing", "proposed", "plan", ["planner_proposed"], "excluded", "not_executed"],
+    ]
+  );
+  assert.equal(findSourceDecision(bundle, "browsing")?.exclusion?.category, "implementation");
+});
+
+await runTest("marks unknown requested sources as registration exclusions", async () => {
+  const bundle = await resolveConversationContextBundle({
+    conversationId: "thread-1",
+    sourcePlan: {
+      requestedSourceIds: ["not_real"],
+    },
+  });
+
+  assert.deepEqual(bundle.sourceSelection, {
+    requestMode: "plan",
+    consideredSourceIds: ["not_real"],
+    defaultCandidateSourceIds: [],
+    explicitUserRequestedSourceIds: [],
+    requestedSourceIds: ["not_real"],
+    plannerProposedSourceIds: ["not_real"],
+    policyRequiredSourceIds: [],
+    fallbackCandidateSourceIds: [],
+    allowedSourceIds: [],
+    executedSourceIds: [],
+    excludedSourceIds: ["not_real"],
+  });
+  assert.equal(findSourceDecision(bundle, "not_real")?.reason, "not_registered");
+  assert.equal(findSourceDecision(bundle, "not_real")?.request.status, "proposed");
+  assert.deepEqual(findSourceDecision(bundle, "not_real")?.request.origins, ["planner_proposed"]);
+  assert.equal(findSourceDecision(bundle, "not_real")?.exclusion?.category, "registration");
+});
+
+await runTest("preserves explicit user request origin separately from planner proposals", async () => {
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      sourcePlan: {
+        sourceRequests: [
+          { sourceId: "thread_documents", origin: "explicit_user_request" },
+        ],
+      },
+    },
+    {
+      listDocuments: async () => [],
+    }
+  );
+
+  assert.deepEqual(bundle.sourceSelection, {
+    requestMode: "plan",
+    consideredSourceIds: ["thread_documents"],
+    defaultCandidateSourceIds: [],
+    explicitUserRequestedSourceIds: ["thread_documents"],
+    requestedSourceIds: ["thread_documents"],
+    plannerProposedSourceIds: [],
+    policyRequiredSourceIds: [],
+    fallbackCandidateSourceIds: [],
+    allowedSourceIds: ["thread_documents"],
+    executedSourceIds: ["thread_documents"],
+    excludedSourceIds: [],
+  });
+  assert.deepEqual(findSourceDecision(bundle, "thread_documents")?.request, {
+    status: "requested",
+    mode: "plan",
+    origins: ["explicit_user_request"],
+    detail: "Included because the user explicitly requested this source for the conversation.",
+  });
+});
+
+await runTest("preserves policy-required sources separately from user or planner requests", async () => {
+  const bundle = await resolveConversationContextBundle({
+    conversationId: "thread-1",
+    sourcePlan: {
+      sourceRequests: [
+        { sourceId: "company_documents", origin: "policy_required" },
+      ],
+    },
+  });
+
+  assert.deepEqual(bundle.sourceSelection, {
+    requestMode: "plan",
+    consideredSourceIds: ["company_documents"],
+    defaultCandidateSourceIds: [],
+    explicitUserRequestedSourceIds: [],
+    requestedSourceIds: ["company_documents"],
+    plannerProposedSourceIds: [],
+    policyRequiredSourceIds: ["company_documents"],
+    fallbackCandidateSourceIds: [],
+    allowedSourceIds: [],
+    executedSourceIds: [],
+    excludedSourceIds: ["company_documents"],
+  });
+  assert.deepEqual(findSourceDecision(bundle, "company_documents")?.request, {
+    status: "required",
+    mode: "plan",
+    origins: ["policy_required"],
+    detail: "Included because app-side policy marked this source as required before execution could proceed.",
+  });
+  assert.equal(findSourceDecision(bundle, "company_documents")?.reason, "not_implemented");
+  assert.equal(findSourceDecision(bundle, "company_documents")?.exclusion?.category, "implementation");
+});
+
+await runTest("marks thread-scoped sources as out of scope when no conversation id is available", async () => {
+  let listDocumentsCalled = false;
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "",
+    },
+    {
+      listDocuments: async () => {
+        listDocumentsCalled = true;
+        return [makeDocument()];
+      },
+    }
+  );
+
+  assert.equal(listDocumentsCalled, false);
+  assert.equal(findSourceDecision(bundle, "thread_documents")?.reason, "not_in_scope");
+  assert.equal(findSourceDecision(bundle, "thread_documents")?.exclusion?.category, "scope");
+});
+
+await runTest("skips thread-document loading when the requesting user is not an active thread member", async () => {
+  let listDocumentsCalled = false;
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      authority: makeAuthority({
+        requestingUserId: "user-2",
+        activeUserIds: ["user-1"],
+      }),
+    },
+    {
+      listDocuments: async () => {
+        listDocumentsCalled = true;
+        return [makeDocument()];
+      },
+      readTextFile: async () => "This should never load.",
+    }
+  );
+
+  assert.equal(listDocumentsCalled, false);
+  assert.deepEqual(bundle.sources, []);
+  assert.equal(bundle.text, "");
+  const decision = findSourceDecision(bundle, "thread_documents");
+  assert.equal(decision?.status, "excluded");
+  assert.equal(decision?.reason, "requesting_user_not_allowed");
+  assert.equal(decision?.request.status, "candidate");
+  assert.equal(decision?.request.mode, "default");
+  assert.deepEqual(decision?.request.origins, ["default_system_candidate"]);
+  assert.equal(decision?.admission.status, "excluded");
+  assert.equal(decision?.execution.status, "not_executed");
+  assert.equal(decision?.exclusion?.category, "authorization");
+  assert.equal(decision?.eligibility.isRequestingUserAllowed, false);
+});
+
+await runTest("skips thread-document loading when no authoritative active agent is available", async () => {
+  let listDocumentsCalled = false;
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      authority: makeAuthority({
+        activeAgentId: null,
+        activeAgentIds: [],
+      }),
+    },
+    {
+      listDocuments: async () => {
+        listDocumentsCalled = true;
+        return [makeDocument()];
+      },
+      readTextFile: async () => "This should never load.",
+    }
+  );
+
+  assert.equal(listDocumentsCalled, false);
+  assert.deepEqual(bundle.sources, []);
+  assert.equal(bundle.text, "");
+  const decision = findSourceDecision(bundle, "thread_documents");
+  assert.equal(decision?.status, "excluded");
+  assert.equal(decision?.reason, "active_agent_not_allowed");
+  assert.equal(decision?.request.status, "candidate");
+  assert.deepEqual(decision?.request.origins, ["default_system_candidate"]);
+  assert.equal(decision?.admission.status, "excluded");
+  assert.equal(decision?.execution.status, "not_executed");
+  assert.equal(decision?.exclusion?.category, "authorization");
+  assert.equal(decision?.eligibility.isActiveAgentAllowed, false);
 });
 
 await runTest("enforces thread scope even when the document provider returns extra records", async () => {
@@ -1267,6 +1600,17 @@ await runTest("caps total thread-document context and marks oversized PDF overfl
   );
   assert.match(bundle.text, /delta\.pdf: Attached to this thread, but not included in this runtime/);
   assert.match(bundle.summarySources[0].description, /1 unavailable/);
+  const decision = findSourceDecision(bundle, "thread_documents");
+  assert.equal(decision?.admission.status, "allowed");
+  assert.equal(decision?.execution.status, "executed");
+  assert.deepEqual(decision?.execution.summary, {
+    totalCount: 4,
+    usedCount: 3,
+    unsupportedCount: 0,
+    failedCount: 0,
+    unavailableCount: 1,
+    excludedCategories: ["budget"],
+  });
 });
 
 await runTest("caps total thread-document context and marks oversized DOCX overflow as unavailable", async () => {
