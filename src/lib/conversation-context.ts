@@ -2,7 +2,6 @@ import { readFile } from "fs/promises";
 import { normalize, resolve, sep } from "path";
 import mammoth from "mammoth";
 import { parseOffice, type OfficeContentNode, type SlideMetadata } from "officeparser";
-import { PDFParse } from "pdf-parse";
 import * as XLSX from "xlsx";
 import { prisma } from "./prisma";
 
@@ -277,7 +276,11 @@ const NON_DEFAULT_CONVERSATION_CONTEXT_SOURCE_REQUEST_ORIGINS = new Set<
   "policy_required",
   "fallback_candidate",
 ]);
+type PdfParseModule = typeof import("pdf-parse");
+
+let pdfCanvasBootstrapPromise: Promise<void> | null = null;
 let pdfJsWorkerBootstrapPromise: Promise<void> | null = null;
+let pdfParseModulePromise: Promise<PdfParseModule> | null = null;
 const MAX_SPREADSHEET_SHEETS = 3;
 const MAX_SPREADSHEET_ROWS_PER_SHEET = 20;
 const MAX_SPREADSHEET_COLUMNS_PER_ROW = 8;
@@ -961,7 +964,47 @@ async function ensureServerPdfJsWorker() {
   await pdfJsWorkerBootstrapPromise;
 }
 
+async function ensureServerPdfCanvasGlobals() {
+  const runtimeGlobal = globalThis as unknown as Record<string, unknown>;
+
+  if (runtimeGlobal["DOMMatrix"]) {
+    return;
+  }
+
+  if (!pdfCanvasBootstrapPromise) {
+    // pdf.js expects DOMMatrix during module evaluation, so install the Node polyfill
+    // before importing the parser in server routes.
+    pdfCanvasBootstrapPromise = import("@napi-rs/canvas")
+      .then((canvas) => {
+        runtimeGlobal["DOMMatrix"] ??= canvas.DOMMatrix as unknown;
+        if (!runtimeGlobal["DOMMatrix"]) {
+          throw new Error("Server PDF parsing requires DOMMatrix support.");
+        }
+      })
+      .catch((error) => {
+        pdfCanvasBootstrapPromise = null;
+        throw error;
+      });
+  }
+
+  await pdfCanvasBootstrapPromise;
+}
+
+async function loadServerPdfParseModule() {
+  await ensureServerPdfCanvasGlobals();
+
+  if (!pdfParseModulePromise) {
+    pdfParseModulePromise = import("pdf-parse").catch((error) => {
+      pdfParseModulePromise = null;
+      throw error;
+    });
+  }
+
+  return pdfParseModulePromise;
+}
+
 async function extractThreadPdfText(fileBuffer: Buffer) {
+  const { PDFParse } = await loadServerPdfParseModule();
   await ensureServerPdfJsWorker();
   const parser = new PDFParse({ data: fileBuffer });
 
