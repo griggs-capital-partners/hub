@@ -366,10 +366,10 @@ function getNormalizedAgentLlmConfig(agent: Agent) {
   }, [agent]);
 
   const statusLabel = agent.llmStatus === "online"
-    ? "LLM Brain Online"
+    ? "LLM Configured"
     : agent.llmStatus === "offline"
-      ? "LLM Brain Offline"
-      : "LLM Brain Not Connected";
+      ? "LLM Check Failed"
+      : "LLM Not Connected";
 
   const statusColor = agent.llmStatus === "online"
     ? "#22C55E"
@@ -639,18 +639,18 @@ function getProviderLabel(provider: AgentLlmProvider) {
 
 function getConnectionStatusMeta(connection: AgentLlmConnection) {
   if (connection.status === "online") {
-    return { label: "LLM Brain Online", color: "#22C55E" };
+    return { label: "LLM Configured", color: "#22C55E" };
   }
 
   if (connection.status === "offline") {
-    return { label: "LLM Brain Offline", color: "#EF4444" };
+    return { label: "LLM Check Failed", color: "#EF4444" };
   }
 
   if (isAgentLlmConnectionConfigured(connection)) {
     return { label: "Connection Saved", color: AGENT_COLOR };
   }
 
-  return { label: "LLM Brain Not Connected", color: "#8D877F" };
+  return { label: "LLM Not Connected", color: "#8D877F" };
 }
 
 function LlmSecretField({
@@ -2030,7 +2030,7 @@ export default function AgentProfilePage() {
                   "ml-auto text-xs font-semibold",
                   agent.llmStatus === "online" ? "text-[#22C55E]" : agent.llmStatus === "offline" ? "text-[#EF4444]" : "text-[#8D877F]"
                 )}>
-                  {agent.llmStatus === "online" ? "Online" : agent.llmStatus === "offline" ? "Offline" : "Not connected"}
+                  {agent.llmStatus === "online" ? "Configured" : agent.llmStatus === "offline" ? "Check failed" : "Not connected"}
                 </span>
               </div>
             </CardBody>

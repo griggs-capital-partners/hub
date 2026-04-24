@@ -606,10 +606,10 @@ export function getConversationSubtext(conversation: ConversationSummary, curren
   const partner = getDirectConversationPartner(conversation, currentUserId);
   if (partner?.kind === "agent") {
     return partner.llmStatus === "online"
-      ? "LLM Brain Online"
+      ? "LLM Configured"
       : partner.llmStatus === "offline"
-        ? "LLM Brain Offline"
-        : "LLM Brain Not Connected";
+        ? "LLM Check Failed"
+        : "LLM Not Connected";
   }
 
   return "Direct message";
@@ -813,8 +813,8 @@ export function MemberAvatar({
 export function getAgentSidebarStatus(status?: string) {
   if (status === "online") {
     return {
-      label: "Ready",
-      description: "Configured and ready to chat",
+      label: "Configured",
+      description: "Saved provider settings; live readiness is checked when chat opens",
       dot: "#22C55E",
       chipClassName: "border-[rgba(75,156,211,0.28)] bg-[rgba(75,156,211,0.16)] text-[#B9E4F6]",
       metaClassName: "text-[#7EC8E3]",
@@ -823,8 +823,8 @@ export function getAgentSidebarStatus(status?: string) {
 
   if (status === "offline") {
     return {
-      label: "Offline",
-      description: "Connection needs attention",
+      label: "Check Failed",
+      description: "The last server-side provider check failed",
       dot: "#EF4444",
       chipClassName: "border-[rgba(239,68,68,0.22)] bg-[rgba(239,68,68,0.12)] text-[#F5B4B4]",
       metaClassName: "text-[#F08B8B]",
@@ -832,7 +832,7 @@ export function getAgentSidebarStatus(status?: string) {
   }
 
   return {
-    label: "Not Ready",
+    label: "Not Connected",
     description: "No LLM connection configured",
     dot: "#8D877F",
     chipClassName: "border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.04)] text-[#B7B0A8]",

@@ -99,7 +99,7 @@ function AgentRow({ agent, onUpdate }: { agent: Agent; onUpdate: (updated: Agent
           <div className="hidden sm:flex items-center gap-1.5 flex-shrink-0">
             <PlugZap size={12} style={{ color: statusColor }} />
             <span className="text-xs font-medium" style={{ color: statusColor }}>
-              {agent.llmStatus === "online" ? (agent.llmModel ?? "Online") : agent.llmStatus === "offline" ? "Offline" : "Not connected"}
+              {agent.llmStatus === "online" ? (agent.llmModel ?? "Configured") : agent.llmStatus === "offline" ? "Check failed" : "Not connected"}
             </span>
           </div>
 

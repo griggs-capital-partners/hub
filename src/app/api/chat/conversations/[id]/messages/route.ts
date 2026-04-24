@@ -280,6 +280,12 @@ export async function POST(
             controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
           };
           let retrievalSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"] = [];
+          let selectedTargetSummary: {
+            connectionId: string;
+            provider: string;
+            model: string | null;
+            region: string | null;
+          } | null = null;
 
           try {
             const [recentMessages, orgContext, contextBundle, senderUser] = await Promise.all([
@@ -333,6 +339,14 @@ export async function POST(
               routingPolicy: resolveAgentLlmRoutingPolicy(agent.abilities),
             });
             const selectedTarget = threadLlmPlan.target;
+            selectedTargetSummary = selectedTarget
+              ? {
+                  connectionId: selectedTarget.connectionId,
+                  provider: selectedTarget.provider,
+                  model: selectedTarget.model,
+                  region: selectedTarget.region,
+                }
+              : null;
             const selectedRuntimeConfig = selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : null;
             const selectedThinkingMode = selectedTarget?.thinkingMode ?? agent.llmThinkingMode;
             const enableThinking = resolveThinkingMode({ ...agent, llmThinkingMode: selectedThinkingMode }, message);
@@ -510,7 +524,16 @@ export async function POST(
             try { controller.close(); } catch { /* already closed */ }
           } catch (error) {
             const details = error instanceof Error ? error.message : "Unable to reach the configured LLM endpoint";
-            console.error("[chat/messages][stream] Agent reply error:", details);
+            console.error(
+              "[chat/messages][stream] Agent reply error:",
+              JSON.stringify({
+                conversationId: conversation.id,
+                agentId: agent.id,
+                agentName: agent.name,
+                selectedTarget: selectedTargetSummary,
+                error: details,
+              })
+            );
 
             // Each DB operation is wrapped independently so a single failure
             // cannot prevent the subsequent steps from running. The goal is
@@ -631,6 +654,14 @@ export async function POST(
         routingPolicy: resolveAgentLlmRoutingPolicy(agent.abilities),
       });
       const selectedTarget = threadLlmPlan.target;
+      const selectedTargetSummary = selectedTarget
+        ? {
+            connectionId: selectedTarget.connectionId,
+            provider: selectedTarget.provider,
+            model: selectedTarget.model,
+            region: selectedTarget.region,
+          }
+        : null;
       try {
         const [orgContext, contextBundle, senderUser] = await Promise.all([
           buildOrgContext(),
@@ -733,6 +764,16 @@ export async function POST(
         });
       } catch (error) {
         const details = error instanceof Error ? error.message : "Unable to reach the configured LLM endpoint";
+        console.error(
+          "[chat/messages] Agent reply error:",
+          JSON.stringify({
+            conversationId: conversation.id,
+            agentId: agent.id,
+            agentName: agent.name,
+            selectedTarget: selectedTargetSummary,
+            error: details,
+          })
+        );
 
         await prisma.aIAgent.update({
           where: { id: agent.id },

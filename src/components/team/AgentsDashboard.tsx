@@ -1359,7 +1359,7 @@ export function AgentsDashboard({ agents, initialExecutions }: Props) {
                 </h1>
                 <p className="mt-0.5 text-xs text-[#505050]">
                   {agents.length} agent{agents.length !== 1 ? "s" : ""}
-                  {onlineCount > 0 && <span className="ml-1.5 text-[#22C55E]">{onlineCount} online</span>}
+                  {onlineCount > 0 && <span className="ml-1.5 text-[#22C55E]">{onlineCount} configured</span>}
                 </p>
               </div>
               <div className="flex items-center gap-1.5">

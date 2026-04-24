@@ -100,6 +100,8 @@ type AnthropicMessage = {
   content: string;
 };
 
+type AgentLlmDiagnosticStage = "probe" | "generate";
+
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
 }
@@ -223,6 +225,75 @@ function buildAnthropicHeaders(config: Pick<AgentLlmConfig, "llmApiKey">) {
     "x-api-key": apiKey,
     "anthropic-version": "2023-06-01",
   };
+}
+
+function summarizeEndpoint(rawUrl?: string | null) {
+  const value = rawUrl?.trim();
+  if (!value) {
+    return {
+      host: null,
+      path: null,
+      hasOverride: false,
+    };
+  }
+
+  try {
+    const parsed = new URL(value);
+    return {
+      host: parsed.host,
+      path: parsed.pathname,
+      hasOverride: true,
+    };
+  } catch {
+    return {
+      host: value,
+      path: null,
+      hasOverride: true,
+    };
+  }
+}
+
+function buildLlmDiagnosticContext(config: AgentLlmConfig) {
+  const endpoint = summarizeEndpoint(config.llmEndpointUrl);
+
+  return {
+    provider: resolveProvider(config),
+    protocol: config.llmProtocol ?? "auto",
+    model: config.llmModel?.trim() || null,
+    region: config.llmRegion?.trim() || null,
+    endpointHost: endpoint.host,
+    endpointPath: endpoint.path,
+    hasEndpointOverride: endpoint.hasOverride,
+    hasApiKey: Boolean(config.llmApiKey?.trim()),
+    hasUsername: Boolean(config.llmUsername?.trim()),
+    hasPassword: Boolean(config.llmPassword?.trim()),
+    hasAccessKeyId: Boolean(config.llmAccessKeyId?.trim()),
+    hasSecretAccessKey: Boolean(config.llmSecretAccessKey?.trim()),
+    envHints: {
+      hasAwsAccessKeyId: Boolean(process.env.AWS_ACCESS_KEY_ID?.trim()),
+      hasAwsSecretAccessKey: Boolean(process.env.AWS_SECRET_ACCESS_KEY?.trim()),
+      hasAwsSessionToken: Boolean(process.env.AWS_SESSION_TOKEN?.trim()),
+      hasAwsRegion: Boolean(process.env.AWS_REGION?.trim() || process.env.AWS_DEFAULT_REGION?.trim()),
+      hasOpenAiApiKey: Boolean(process.env.OPENAI_API_KEY?.trim()),
+      hasAnthropicApiKey: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
+    },
+  };
+}
+
+function logLlmInvocationFailure(
+  stage: AgentLlmDiagnosticStage,
+  config: AgentLlmConfig,
+  error: unknown
+) {
+  console.error(
+    "[agent-llm][failure]",
+    JSON.stringify({
+      stage,
+      ...buildLlmDiagnosticContext(config),
+      errorName: error instanceof Error ? error.name : "UnknownError",
+      errorMessage: error instanceof Error ? error.message : String(error),
+    })
+  );
 }
 
 function toAnthropicMessages(messages: LlmMessage[]) {
@@ -612,13 +683,64 @@ async function fetchJson(url: string, init: RequestInit) {
   return response.json();
 }
 
+async function probeResolvedEndpoint(
+  config: Pick<AgentLlmConfig, "llmAuthType" | "llmApiKey" | "llmUsername" | "llmPassword">,
+  resolved: ResolvedEndpoint
+) {
+  if (resolved.kind === "ollama") {
+    const response = await fetch(resolved.chatUrl, {
+      method: "POST",
+      headers: buildJsonHeaders(config),
+      body: JSON.stringify({
+        model: resolved.model,
+        stream: false,
+        think: false,
+        messages: [{ role: "user", content: "Ping" }],
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (!response.ok) {
+      const details = await response.text().catch(() => "");
+      throw new Error(details || `Ollama chat request failed (${response.status})`);
+    }
+
+    const payload = await response.json();
+    const content = typeof payload?.message?.content === "string" ? payload.message.content.trim() : "";
+    if (!content) {
+      throw new Error("Ollama returned an empty response");
+    }
+    return;
+  }
+
+  const response = await fetch(resolved.chatUrl, {
+    method: "POST",
+    headers: buildJsonHeaders(config),
+    body: JSON.stringify({
+      model: resolved.model,
+      max_tokens: 8,
+      messages: [{ role: "user", content: "Ping" }],
+    }),
+    signal: AbortSignal.timeout(30000),
+  });
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    throw new Error(details || `Chat completion request failed (${response.status})`);
+  }
+
+  const payload = await response.json();
+  if (!payload?.choices?.[0]) {
+    throw new Error("Chat completion returned no choices");
+  }
+}
+
 export async function probeAgentLlm(config: AgentLlmConfig): Promise<AgentLlmStatus> {
   const checkedAt = new Date();
   const provider = resolveProvider(config);
 
   if (provider === "local") {
-    const endpointUrl = config.llmEndpointUrl?.trim();
-    if (!endpointUrl) {
+    if (!config.llmEndpointUrl?.trim()) {
       return {
         llmStatus: "disconnected",
         llmModel: null,
@@ -627,114 +749,24 @@ export async function probeAgentLlm(config: AgentLlmConfig): Promise<AgentLlmSta
       };
     }
 
-    const headers = buildAuthHeader(config);
-    const protocol = config.llmProtocol ?? "auto";
-
-    if (protocol === "ollama") {
-      try {
-        const { tagsUrl } = buildOllamaUrls(endpointUrl);
-        const payload = await fetchJson(tagsUrl, { headers });
-        const models = Array.isArray(payload?.models) ? payload.models : [];
-        const firstModel = typeof models[0]?.name === "string" ? models[0].name : null;
-        const model = config.llmModel?.trim() || firstModel;
-
-        if (!model) {
-          throw new Error("No Ollama models were returned by the endpoint");
-        }
-
-        return {
-          llmStatus: "online",
-          llmModel: model,
-          llmLastCheckedAt: checkedAt,
-          llmLastError: null,
-        };
-      } catch (error) {
-        return {
-          llmStatus: "offline",
-          llmModel: config.llmModel?.trim() || null,
-          llmLastCheckedAt: checkedAt,
-          llmLastError: error instanceof Error ? error.message : "Unable to reach the Ollama endpoint",
-        };
-      }
-    }
-
-    if (protocol === "openai-compatible") {
-      try {
-        const { modelsUrl } = buildOpenAiUrls(endpointUrl);
-        const payload = await fetchJson(modelsUrl, { headers });
-        const models = Array.isArray(payload?.data) ? payload.data : [];
-        const firstModel = typeof models[0]?.id === "string" ? models[0].id : null;
-        const model = config.llmModel?.trim() || firstModel;
-
-        if (!model) {
-          throw new Error("No OpenAI-compatible models were returned by the endpoint");
-        }
-
-        return {
-          llmStatus: "online",
-          llmModel: model,
-          llmLastCheckedAt: checkedAt,
-          llmLastError: null,
-        };
-      } catch (error) {
-        return {
-          llmStatus: "offline",
-          llmModel: config.llmModel?.trim() || null,
-          llmLastCheckedAt: checkedAt,
-          llmLastError: error instanceof Error ? error.message : "Unable to reach the OpenAI-compatible endpoint",
-        };
-      }
-    }
-
     try {
-      const { tagsUrl } = buildOllamaUrls(endpointUrl);
-      const payload = await fetchJson(tagsUrl, { headers });
-      const models = Array.isArray(payload?.models) ? payload.models : [];
-      const firstModel = typeof models[0]?.name === "string" ? models[0].name : null;
-      const model = config.llmModel?.trim() || firstModel;
-
-      if (!model) {
-        throw new Error("No Ollama models were returned by the endpoint");
-      }
+      const resolved = await resolveEndpoint(config);
+      await probeResolvedEndpoint(config, resolved);
 
       return {
         llmStatus: "online",
-        llmModel: model,
+        llmModel: resolved.model,
         llmLastCheckedAt: checkedAt,
         llmLastError: null,
       };
-    } catch (ollamaError) {
-      try {
-        const { modelsUrl } = buildOpenAiUrls(endpointUrl);
-        const payload = await fetchJson(modelsUrl, { headers });
-        const models = Array.isArray(payload?.data) ? payload.data : [];
-        const firstModel = typeof models[0]?.id === "string" ? models[0].id : null;
-        const model = config.llmModel?.trim() || firstModel;
-
-        if (!model) {
-          throw new Error("No OpenAI-compatible models were returned by the endpoint");
-        }
-
-        return {
-          llmStatus: "online",
-          llmModel: model,
-          llmLastCheckedAt: checkedAt,
-          llmLastError: null,
-        };
-      } catch (openAiError) {
-        const message = openAiError instanceof Error
-          ? openAiError.message
-          : ollamaError instanceof Error
-            ? ollamaError.message
-            : "Unable to reach the LLM endpoint";
-
-        return {
-          llmStatus: "offline",
-          llmModel: config.llmModel?.trim() || null,
-          llmLastCheckedAt: checkedAt,
-          llmLastError: message,
-        };
-      }
+    } catch (error) {
+      logLlmInvocationFailure("probe", config, error);
+      return {
+        llmStatus: "offline",
+        llmModel: config.llmModel?.trim() || null,
+        llmLastCheckedAt: checkedAt,
+        llmLastError: error instanceof Error ? error.message : "Unable to reach the LLM endpoint",
+      };
     }
   }
 
@@ -750,23 +782,18 @@ export async function probeAgentLlm(config: AgentLlmConfig): Promise<AgentLlmSta
     }
 
     try {
-      const { modelsUrl } = buildOpenAiUrls(buildProviderBaseUrl(config.llmEndpointUrl, "https://api.openai.com"));
-      const payload = await fetchJson(modelsUrl, { headers: buildJsonHeaders({ ...config, llmAuthType: "bearer" }) });
-      const models = Array.isArray(payload?.data) ? payload.data : [];
-      const firstModel = typeof models[0]?.id === "string" ? models[0].id : null;
-      const model = config.llmModel?.trim() || firstModel;
-
-      if (!model) {
-        throw new Error("No OpenAI models were returned by the endpoint");
-      }
+      const authConfig = { ...config, llmAuthType: "bearer" as const };
+      const resolved = await resolveEndpoint(authConfig);
+      await probeResolvedEndpoint(authConfig, resolved);
 
       return {
         llmStatus: "online",
-        llmModel: model,
+        llmModel: resolved.model,
         llmLastCheckedAt: checkedAt,
         llmLastError: null,
       };
     } catch (error) {
+      logLlmInvocationFailure("probe", config, error);
       return {
         llmStatus: "offline",
         llmModel: config.llmModel?.trim() || null,
@@ -810,6 +837,7 @@ export async function probeAgentLlm(config: AgentLlmConfig): Promise<AgentLlmSta
         llmLastError: null,
       };
     } catch (error) {
+      logLlmInvocationFailure("probe", config, error);
       return {
         llmStatus: "offline",
         llmModel: config.llmModel?.trim() || null,
@@ -845,6 +873,7 @@ export async function probeAgentLlm(config: AgentLlmConfig): Promise<AgentLlmSta
       llmLastError: null,
     };
   } catch (error) {
+    logLlmInvocationFailure("probe", config, error);
     return {
       llmStatus: "offline",
       llmModel: config.llmModel?.trim() || null,
@@ -990,73 +1019,78 @@ async function generateBedrockReply(
 export async function generateAgentReply(
   config: AgentLlmConfig & { history: ChatMessageInput[]; enableThinking?: boolean }
 ) {
-  const systemPrompt = buildSystemPrompt(config);
-  const messages: LlmMessage[] = [
-    { role: "system" as const, content: systemPrompt },
-    ...config.history,
-  ];
-  const provider = resolveProvider(config);
+  try {
+    const systemPrompt = buildSystemPrompt(config);
+    const messages: LlmMessage[] = [
+      { role: "system" as const, content: systemPrompt },
+      ...config.history,
+    ];
+    const provider = resolveProvider(config);
 
-  if (provider === "anthropic") {
-    return generateAnthropicReply(config, messages, systemPrompt);
-  }
+    if (provider === "anthropic") {
+      return generateAnthropicReply(config, messages, systemPrompt);
+    }
 
-  if (provider === "bedrock") {
-    return generateBedrockReply(config, messages, systemPrompt);
-  }
+    if (provider === "bedrock") {
+      return generateBedrockReply(config, messages, systemPrompt);
+    }
 
-  const resolved = await resolveEndpoint(config);
+    const resolved = await resolveEndpoint(config);
 
-  if (resolved.kind === "ollama") {
+    if (resolved.kind === "ollama") {
+      const response = await fetch(resolved.chatUrl, {
+        method: "POST",
+        headers: buildJsonHeaders(config),
+        body: JSON.stringify({
+          model: resolved.model,
+          stream: false,
+          think: config.enableThinking ?? false,
+          messages,
+        }),
+        signal: AbortSignal.timeout(60000),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Ollama chat request failed (${response.status})`);
+      }
+
+      const payload = await response.json();
+      const content = typeof payload?.message?.content === "string" ? payload.message.content.trim() : "";
+      if (!content) {
+        throw new Error("Ollama returned an empty response");
+      }
+
+      return { content, model: resolved.model };
+    }
+
     const response = await fetch(resolved.chatUrl, {
       method: "POST",
       headers: buildJsonHeaders(config),
       body: JSON.stringify({
         model: resolved.model,
-        stream: false,
-        think: config.enableThinking ?? false,
         messages,
       }),
       signal: AbortSignal.timeout(60000),
     });
 
     if (!response.ok) {
-      throw new Error(`Ollama chat request failed (${response.status})`);
+      throw new Error(`Chat completion request failed (${response.status})`);
     }
 
     const payload = await response.json();
-    const content = typeof payload?.message?.content === "string" ? payload.message.content.trim() : "";
+    const content = typeof payload?.choices?.[0]?.message?.content === "string"
+      ? payload.choices[0].message.content.trim()
+      : "";
+
     if (!content) {
-      throw new Error("Ollama returned an empty response");
+      throw new Error("The LLM returned an empty response");
     }
 
     return { content, model: resolved.model };
+  } catch (error) {
+    logLlmInvocationFailure("generate", config, error);
+    throw error;
   }
-
-  const response = await fetch(resolved.chatUrl, {
-    method: "POST",
-    headers: buildJsonHeaders(config),
-    body: JSON.stringify({
-      model: resolved.model,
-      messages,
-    }),
-    signal: AbortSignal.timeout(60000),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Chat completion request failed (${response.status})`);
-  }
-
-  const payload = await response.json();
-  const content = typeof payload?.choices?.[0]?.message?.content === "string"
-    ? payload.choices[0].message.content.trim()
-    : "";
-
-  if (!content) {
-    throw new Error("The LLM returned an empty response");
-  }
-
-  return { content, model: resolved.model };
 }
 
 export async function* streamAgentReply(
