@@ -277,8 +277,11 @@ const NON_DEFAULT_CONVERSATION_CONTEXT_SOURCE_REQUEST_ORIGINS = new Set<
   "fallback_candidate",
 ]);
 type PdfParseModule = typeof import("pdf-parse");
+type ExtractionRuntimeError = Error & {
+  code?: string;
+  detail?: string | null;
+};
 
-let pdfCanvasBootstrapPromise: Promise<void> | null = null;
 let pdfJsWorkerBootstrapPromise: Promise<void> | null = null;
 let pdfParseModulePromise: Promise<PdfParseModule> | null = null;
 const MAX_SPREADSHEET_SHEETS = 3;
@@ -338,14 +341,38 @@ function buildSpreadsheetNoReadableTextDetail() {
   return "Attached to this thread, but the spreadsheet parser returned no readable workbook content.";
 }
 
-function buildExtractionFailureDetail(contextKind: "pdf" | "docx" | "pptx" | "spreadsheet", error: unknown) {
-  const message = summarizeExtractionError(error);
+function createPdfRuntimeUnavailableError(error: unknown) {
+  const runtimeError = new Error(
+    "PDF extraction is unavailable in the current server runtime."
+  ) as ExtractionRuntimeError;
+  runtimeError.code = "PDF_RUNTIME_UNAVAILABLE";
+  runtimeError.detail = summarizeExtractionError(error);
+  return runtimeError;
+}
 
+function isPdfRuntimeUnavailableError(error: unknown): error is ExtractionRuntimeError {
+  return typeof error === "object"
+    && error !== null
+    && "code" in error
+    && (error as { code?: unknown }).code === "PDF_RUNTIME_UNAVAILABLE";
+}
+
+function buildExtractionFailureDetail(contextKind: "pdf" | "docx" | "pptx" | "spreadsheet", error: unknown) {
   if (contextKind === "pdf") {
+    if (isPdfRuntimeUnavailableError(error)) {
+      const detail = typeof error.detail === "string" && error.detail.trim().length > 0
+        ? ` (${error.detail.trim()})`
+        : "";
+      return `Attached to this thread, but PDF extraction is unavailable in the current server runtime${detail}.`;
+    }
+
+    const message = summarizeExtractionError(error);
     return message
       ? `Attached to this thread, but the PDF parser failed before usable text could be extracted (${message}).`
       : "Attached to this thread, but the PDF parser failed before usable text could be extracted.";
   }
+
+  const message = summarizeExtractionError(error);
 
   if (contextKind === "pptx") {
     return message
@@ -964,58 +991,43 @@ async function ensureServerPdfJsWorker() {
   await pdfJsWorkerBootstrapPromise;
 }
 
-async function ensureServerPdfCanvasGlobals() {
-  const runtimeGlobal = globalThis as unknown as Record<string, unknown>;
-
-  if (runtimeGlobal["DOMMatrix"]) {
-    return;
-  }
-
-  if (!pdfCanvasBootstrapPromise) {
-    // pdf.js expects DOMMatrix during module evaluation, so install the Node polyfill
-    // before importing the parser in server routes.
-    pdfCanvasBootstrapPromise = import("@napi-rs/canvas")
-      .then((canvas) => {
-        runtimeGlobal["DOMMatrix"] ??= canvas.DOMMatrix as unknown;
-        if (!runtimeGlobal["DOMMatrix"]) {
-          throw new Error("Server PDF parsing requires DOMMatrix support.");
-        }
-      })
-      .catch((error) => {
-        pdfCanvasBootstrapPromise = null;
-        throw error;
-      });
-  }
-
-  await pdfCanvasBootstrapPromise;
-}
-
 async function loadServerPdfParseModule() {
-  await ensureServerPdfCanvasGlobals();
-
   if (!pdfParseModulePromise) {
-    pdfParseModulePromise = import("pdf-parse").catch((error) => {
-      pdfParseModulePromise = null;
-      throw error;
-    });
+    pdfParseModulePromise = import("pdf-parse")
+      .catch((error) => {
+        pdfParseModulePromise = null;
+        throw createPdfRuntimeUnavailableError(error);
+      });
   }
 
   return pdfParseModulePromise;
 }
 
 async function extractThreadPdfText(fileBuffer: Buffer) {
-  const { PDFParse } = await loadServerPdfParseModule();
-  await ensureServerPdfJsWorker();
-  const parser = new PDFParse({ data: fileBuffer });
+  let PDFParse: PdfParseModule["PDFParse"];
+  try {
+    ({ PDFParse } = await loadServerPdfParseModule());
+    await ensureServerPdfJsWorker();
+  } catch (error) {
+    throw isPdfRuntimeUnavailableError(error) ? error : createPdfRuntimeUnavailableError(error);
+  }
+
+  let parser: {
+    getText: () => Promise<{ text: string }>;
+    destroy: () => Promise<unknown>;
+  } | null = null;
 
   try {
+    parser = new PDFParse({ data: fileBuffer });
     const result = await parser.getText();
     return result.text;
   } finally {
-    try {
-      await parser.destroy();
-    } catch {
-      // Swallow cleanup failures so the original extraction result/error remains authoritative.
+    if (parser) {
+      try {
+        await parser.destroy();
+      } catch {
+        // Swallow cleanup failures so the original extraction result/error remains authoritative.
+      }
     }
   }
 }
