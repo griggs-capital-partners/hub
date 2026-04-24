@@ -55,6 +55,7 @@ import {
   getConversationTimestamp,
   getConversationWorkspaceLabel,
   getDirectConversationPartner,
+  isLocalPendingChatMessage,
   getPrimaryAgentParticipant,
   getMemberDisplayName,
   getOnlineStatus,
@@ -267,6 +268,17 @@ function mergeChatProjects(
 
 function sortConversationsByUpdatedAt(conversations: ConversationSummary[]) {
   return [...conversations].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+}
+
+function sortChatMessagesChronologically(messages: ChatMessage[]) {
+  return dedupeChatMessages(messages)
+    .map((message, index) => ({ message, index }))
+    .sort((a, b) => {
+      const timeDifference =
+        new Date(a.message.createdAt).getTime() - new Date(b.message.createdAt).getTime();
+      return timeDifference !== 0 ? timeDifference : a.index - b.index;
+    })
+    .map(({ message }) => message);
 }
 
 type TeamChatRouteState =
@@ -908,6 +920,7 @@ export function TeamClient({
   const isAtBottomRef = useRef(true);
   const userScrolledUpRef = useRef(false);
   const conversationsRef = useRef(conversations);
+  const messagesByConversationRef = useRef<Record<string, ChatMessage[]>>({});
   const selectedConversationIdRef = useRef<string | null>(selectedConversationId);
   const threadUploadDismissTimersRef = useRef<Record<string, number>>({});
   const threadSwitchMeasurementRef = useRef<{
@@ -924,6 +937,7 @@ export function TeamClient({
   const [showThreadStarter, setShowThreadStarter] = useState(initialConversations.length === 0);
   const [threadDrawerOpen, setThreadDrawerOpen] = useState(false);
   const hasStreamingAgentMessage = messages.some((message) => message.isStreaming);
+  const hasPendingLocalMessage = messages.some(isLocalPendingChatMessage);
   const hasHandledAgentParamRef = useRef(false);
   const routeView = searchParams.get("view");
   const routeContext = searchParams.get("context");
@@ -964,6 +978,86 @@ export function TeamClient({
     }, delayMs);
   }
 
+  const reconcileMessagesForConversation = useCallback((
+    currentMessages: ChatMessage[],
+    incomingMessages: ChatMessage[]
+  ) => {
+    const serverMessages = sortChatMessagesChronologically(incomingMessages);
+    const pendingMessages = currentMessages.filter((message) => message.clientState);
+
+    if (pendingMessages.length === 0) {
+      return serverMessages;
+    }
+
+    const matchedServerUserByRequestId = new Map<string, ChatMessage>();
+
+    const findServerUserForLocalMessage = (localMessage: ChatMessage) => {
+      const requestId = localMessage.clientRequestId?.trim();
+      if (requestId && matchedServerUserByRequestId.has(requestId)) {
+        return matchedServerUserByRequestId.get(requestId) ?? null;
+      }
+
+      const localCreatedAt = new Date(localMessage.createdAt).getTime();
+      const match = serverMessages.find((message) => {
+        if (message.sender?.kind !== "user" || message.sender.id !== currentUserId) {
+          return false;
+        }
+
+        if (message.body !== localMessage.body) {
+          return false;
+        }
+
+        const createdAtDelta = Math.abs(new Date(message.createdAt).getTime() - localCreatedAt);
+        return createdAtDelta <= 60_000;
+      }) ?? null;
+
+      if (requestId && match) {
+        matchedServerUserByRequestId.set(requestId, match);
+      }
+
+      return match;
+    };
+
+    const mergedMessages = [...serverMessages];
+
+    for (const pendingMessage of pendingMessages) {
+      if (pendingMessage.clientState === "failed_user") {
+        mergedMessages.push(pendingMessage);
+        continue;
+      }
+
+      if (pendingMessage.clientState === "optimistic_user") {
+        if (!findServerUserForLocalMessage(pendingMessage)) {
+          mergedMessages.push(pendingMessage);
+        }
+        continue;
+      }
+
+      const relatedUserMessage = pendingMessages.find(
+        (message) =>
+          message.clientState === "optimistic_user"
+          && message.clientRequestId
+          && message.clientRequestId === pendingMessage.clientRequestId
+      ) ?? null;
+      const relatedServerUserMessage = relatedUserMessage
+        ? findServerUserForLocalMessage(relatedUserMessage)
+        : null;
+      const assistantCreatedAfter =
+        new Date(relatedServerUserMessage?.createdAt ?? relatedUserMessage?.createdAt ?? pendingMessage.createdAt).getTime()
+        - 1_000;
+      const hasServerAssistantMatch = serverMessages.some((message) =>
+        message.sender?.kind === "agent"
+        && new Date(message.createdAt).getTime() >= assistantCreatedAfter
+      );
+
+      if (!hasServerAssistantMatch) {
+        mergedMessages.push(pendingMessage);
+      }
+    }
+
+    return sortChatMessagesChronologically(mergedMessages);
+  }, [currentUserId]);
+
   const replaceMessagesForConversation = useCallback((
     conversationId: string | null,
     nextMessages: ChatMessage[],
@@ -978,16 +1072,17 @@ export function TeamClient({
         return current;
       }
 
+      const reconciledMessages = reconcileMessagesForConversation(current, nextMessages);
       incrementTeamChatPerfCounter(`message_list:replace:${reason}`, {
         conversationId,
         previousCount: current.length,
-        nextCount: nextMessages.length,
-        delta: nextMessages.length - current.length,
+        nextCount: reconciledMessages.length,
+        delta: reconciledMessages.length - current.length,
       });
 
-      return nextMessages;
+      return reconciledMessages;
     });
-  }, [isConversationStillSelected]);
+  }, [isConversationStillSelected, reconcileMessagesForConversation]);
 
   const updateMessagesForConversation = useCallback((
     conversationId: string | null,
@@ -1003,7 +1098,7 @@ export function TeamClient({
         return current;
       }
 
-      const nextMessages = updater(current);
+      const nextMessages = sortChatMessagesChronologically(updater(current));
       incrementTeamChatPerfCounter(`message_list:update:${reason}`, {
         conversationId,
         previousCount: current.length,
@@ -1728,6 +1823,14 @@ export function TeamClient({
   };
 
   useEffect(() => {
+    if (!selectedConversationId) {
+      return;
+    }
+
+    messagesByConversationRef.current[selectedConversationId] = messages;
+  }, [messages, selectedConversationId]);
+
+  useEffect(() => {
     const conversationId = activeConversationId;
 
     if (!conversationId) {
@@ -1802,7 +1905,7 @@ export function TeamClient({
 
   useEffect(() => {
     const conversationId = activeConversationId;
-    if (!conversationId || hasStreamingAgentMessage) return;
+    if (!conversationId || hasStreamingAgentMessage || hasPendingLocalMessage || sending) return;
 
     const resolvedConversationId = conversationId;
 
@@ -1839,7 +1942,7 @@ export function TeamClient({
 
     const interval = setInterval(pollMessages, 3_000);
     return () => clearInterval(interval);
-  }, [activeConversationId, hasStreamingAgentMessage, replaceMessagesForConversation]);
+  }, [activeConversationId, hasPendingLocalMessage, hasStreamingAgentMessage, replaceMessagesForConversation, sending]);
 
   useEffect(() => {
     if (!userScrolledUpRef.current && isAtBottomRef.current) {
@@ -1854,7 +1957,12 @@ export function TeamClient({
   }, [selectedConversationId]);
 
   useLayoutEffect(() => {
-    setMessages([]);
+    if (!selectedConversationId) {
+      setMessages([]);
+      return;
+    }
+
+    setMessages(messagesByConversationRef.current[selectedConversationId] ?? []);
   }, [selectedConversationId]);
 
   useEffect(() => {
@@ -2838,6 +2946,7 @@ export function TeamClient({
 
   function removeConversationFromVisibleState(conversationId: string) {
     setConversations((current) => current.filter((conversation) => conversation.id !== conversationId));
+    delete messagesByConversationRef.current[conversationId];
     setThreadDocumentUploads((current) => {
       if (!(conversationId in current)) {
         return current;
@@ -3057,10 +3166,13 @@ export function TeamClient({
     const conversationId = activeConversationId;
     const text = messageInput.trim();
     const isAgentConversation = Boolean(activeConversationPrimaryAgent);
+    const clientRequestId = `client-request-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const optimisticMessage: ChatMessage = {
       id: `temp-${Date.now()}`,
       body: text,
       createdAt: new Date().toISOString(),
+      clientRequestId,
+      clientState: "optimistic_user",
       sender: {
         kind: "user",
         id: currentUserId,
@@ -3071,17 +3183,19 @@ export function TeamClient({
 
     const optimisticAgentMessage: ChatMessage | null = isAgentConversation
       ? {
-        id: `temp-agent-${Date.now()}`,
-        body: "",
-        thinking: "",
-        isStreaming: true,
-        streamState: "thinking",
-        createdAt: new Date().toISOString(),
-        sender: {
-          kind: "agent",
-          id: activeConversationPrimaryAgent?.id ?? "agent",
-          name: activeConversationPrimaryAgent?.name ?? "Agent",
-          image: activeConversationPrimaryAgent?.image ?? null,
+          id: `temp-agent-${Date.now()}`,
+          body: "",
+          thinking: "",
+          isStreaming: true,
+          streamState: "thinking",
+          createdAt: new Date().toISOString(),
+          clientRequestId,
+          clientState: "pending_assistant",
+          sender: {
+            kind: "agent",
+            id: activeConversationPrimaryAgent?.id ?? "agent",
+            name: activeConversationPrimaryAgent?.name ?? "Agent",
+            image: activeConversationPrimaryAgent?.image ?? null,
         },
       }
       : null;
@@ -3409,12 +3523,14 @@ export function TeamClient({
       updateMessagesForConversation(
         conversationId,
         (current) =>
-          current.map((message) =>
+          current
+            .filter((message) => message.id !== optimisticAgentMessage?.id)
+            .map((message) =>
             message.id === optimisticMessage.id
-              ? { ...message, body: `${message.body}\n\n(Delivery pending)` }
+              ? { ...message, clientState: "failed_user" as const }
               : message
-          ),
-        "delivery_pending"
+            ),
+        "delivery_failed"
       );
     } finally {
       setSending(false);
@@ -3616,7 +3732,10 @@ export function TeamClient({
       : null;
   const activeAgentBootstrapPending =
     Boolean(activeAgentParticipant)
-      && (agentInspectorLoading || bootstrappingConversationId === selectedConversationId);
+      && (
+        bootstrappingConversationId === selectedConversationId
+        || (!activeAgentInspector && agentInspectorLoading && messages.length === 0)
+      );
   const activeThreadModelLabel = activeAgentInspector?.threadLlm.selectedLabel
     ?? activeConversation?.llmThread?.selectedLabel
     ?? activeAgentInspector?.threadLlm.selectedModel

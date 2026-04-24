@@ -90,7 +90,13 @@ function getSpeakerLabel(
   return message.sender?.name || "Unknown";
 }
 
-function MessageOperationalDetails({ message }: { message: ChatMessage }) {
+function MessageOperationalDetails({
+  message,
+  hideStreamingLabel = false,
+}: {
+  message: ChatMessage;
+  hideStreamingLabel?: boolean;
+}) {
   const hasThinking = Boolean(message.thinking?.trim());
   const toolCount = message.toolActivity?.length ?? 0;
   const retrievalCount = message.retrievalSources?.length ?? 0;
@@ -100,13 +106,13 @@ function MessageOperationalDetails({ message }: { message: ChatMessage }) {
   const streamingLabel = getStreamingStatusLabel(message);
   const hasInspectableDetails = hasThinking || toolCount > 0 || retrievalCount > 0;
 
-  if (!streamingLabel && !hasInspectableDetails) {
+  if ((!streamingLabel || hideStreamingLabel) && !hasInspectableDetails) {
     return null;
   }
 
   return (
     <div className="mt-2 space-y-2">
-      {streamingLabel ? (
+      {streamingLabel && !hideStreamingLabel ? (
         <div className="flex items-center gap-2 px-1 text-[11px] text-[#8D877F]">
           <div className="h-3 w-3 shrink-0 rounded-full border-2 border-[rgba(126,200,227,0.18)] border-t-[#7EC8E3] animate-spin" />
           <span>{streamingLabel}</span>
@@ -213,6 +219,43 @@ function MessageOperationalDetails({ message }: { message: ChatMessage }) {
           </div>
         </details>
       ) : null}
+    </div>
+  );
+}
+
+function AgentStreamingPlaceholder({ message }: { message: ChatMessage }) {
+  const streamingLabel = getStreamingStatusLabel(message) ?? "Thinking...";
+  const thinkingPreview = message.thinking?.trim();
+
+  return (
+    <div className="min-h-[88px] rounded-[24px] border border-[rgba(126,200,227,0.16)] bg-[linear-gradient(180deg,rgba(126,200,227,0.08),rgba(255,255,255,0.015))] px-4 py-3">
+      <div className="flex items-center gap-2 text-sm text-[#DCEFF8]">
+        <div className="h-4 w-4 shrink-0 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
+        <span>{streamingLabel}</span>
+      </div>
+      <div className="mt-3 space-y-2">
+        <div className="h-2 w-24 rounded-full bg-[rgba(255,255,255,0.08)]" />
+        <div className="h-2 max-w-[28rem] rounded-full bg-[rgba(255,255,255,0.06)]" />
+        <div className="h-2 w-[72%] rounded-full bg-[rgba(255,255,255,0.05)]" />
+      </div>
+      {thinkingPreview ? (
+        <p className="mt-3 max-h-10 overflow-hidden text-xs leading-5 text-[#A9DCF3] [overflow-wrap:anywhere]">
+          {thinkingPreview}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function MessageLifecycleState({ message }: { message: ChatMessage }) {
+  if (message.clientState !== "failed_user") {
+    return null;
+  }
+
+  return (
+    <div className="mt-2 flex items-center gap-2 px-1 text-[11px] text-[#F2C0C0]">
+      <AlertTriangle size={12} className="shrink-0 text-[#EF4444]" />
+      <span>Failed to send. Your message is still here.</span>
     </div>
   );
 }
@@ -559,11 +602,13 @@ function ThreadComposer({
           </div>
         </div>
 
-        {dragActive ? (
-          <p className="text-[11px] text-[#7D7770]">Drop files to attach them to this thread.</p>
-        ) : activeAgentParticipant && activeAgentBootstrapPending ? (
-          <p className="text-[11px] text-[#7D7770]">Preparing {activeAgentParticipant.name} before input is enabled.</p>
-        ) : null}
+        <div className="min-h-[16px] px-1 text-[11px] text-[#7D7770]">
+          {dragActive
+            ? "Drop files to attach them to this thread."
+            : activeAgentParticipant && activeAgentBootstrapPending
+              ? `Preparing ${activeAgentParticipant.name} before input is enabled.`
+              : null}
+        </div>
       </div>
     </form>
   );
@@ -715,7 +760,7 @@ export function ConversationPane({
                 <div className="flex h-full items-center justify-center">
                   <div className="h-6 w-6 rounded-full border-2 border-[rgba(247,148,29,0.2)] border-t-[#F7941D] animate-spin" />
                 </div>
-              ) : activeAgentParticipant && activeAgentBootstrapPending ? (
+              ) : activeAgentParticipant && activeAgentBootstrapPending && renderedMessages.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center px-8 text-center">
                   <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(75,156,211,0.12)] text-[#7EC8E3]">
                     <Bot size={28} />
@@ -760,6 +805,8 @@ export function ConversationPane({
                     const isCurrentUser = message.sender?.id === currentUserId && message.sender?.kind === "user";
                     const isEditing = editingMessageId === message.id;
                     const speakerLabel = getSpeakerLabel(message, currentUserId, mixedAgentThread);
+                    const showAgentStreamingPlaceholder =
+                      message.sender?.kind === "agent" && message.isStreaming && !message.body;
 
                     return (
                       <div
@@ -856,6 +903,8 @@ export function ConversationPane({
                                 ) : (
                                   <div className="whitespace-pre-wrap [overflow-wrap:anywhere]">{message.body}</div>
                                 )
+                              ) : showAgentStreamingPlaceholder ? (
+                                <AgentStreamingPlaceholder message={message} />
                               ) : message.isStreaming && message.sender?.kind !== "agent" ? (
                                 <div className="flex items-center gap-2 text-[#CFC9C2]">
                                   <div className="h-3.5 w-3.5 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
@@ -863,7 +912,13 @@ export function ConversationPane({
                                 </div>
                               ) : null}
 
-                              {message.sender?.kind === "agent" ? <MessageOperationalDetails message={message} /> : null}
+                              {message.sender?.kind === "agent" ? (
+                                <MessageOperationalDetails
+                                  message={message}
+                                  hideStreamingLabel={showAgentStreamingPlaceholder}
+                                />
+                              ) : null}
+                              <MessageLifecycleState message={message} />
                             </div>
                           )}
 

@@ -147,6 +147,8 @@ export interface ToolActivity {
   result?: string;
 }
 
+export type ChatMessageClientState = "optimistic_user" | "pending_assistant" | "failed_user";
+
 export interface ChatMessage {
   id: string;
   body: string;
@@ -165,6 +167,8 @@ export interface ChatMessage {
     scope?: string;
   }>;
   createdAt: string;
+  clientRequestId?: string;
+  clientState?: ChatMessageClientState;
   sender: {
     kind: "user" | "agent";
     id: string;
@@ -441,6 +445,10 @@ export function dedupeChatMessages(messages: ChatMessage[]) {
   }
 
   return unique;
+}
+
+export function isLocalPendingChatMessage(message: ChatMessage) {
+  return message.clientState === "optimistic_user" || message.clientState === "pending_assistant";
 }
 
 export function getOnlineStatus(lastSeen: string | null): "online" | "away" | "offline" {
