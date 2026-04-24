@@ -20,6 +20,10 @@ import {
 import { resolveConversationContextBundle } from "@/lib/conversation-context";
 import { logTeamChatDetailRouteDiagnostics } from "@/lib/chat-route-diagnostics";
 import { prisma } from "@/lib/prisma";
+import {
+  getSanitizedDatabaseTarget,
+  summarizeAgentLlmConnections,
+} from "@/lib/runtime-diagnostics";
 
 export const dynamic = "force-dynamic";
 
@@ -81,6 +85,15 @@ export async function GET(
     });
 
     if (!conversation) {
+      console.warn(
+        "[chat/inspect][GET][not_found]",
+        JSON.stringify({
+          dbTarget: getSanitizedDatabaseTarget(),
+          conversationId: id,
+          sessionUserId: session.user.id,
+          sessionUserEmail: session.user.email ?? null,
+        })
+      );
       return NextResponse.json(
         { error: "Conversation not found" },
         { status: 404, headers: TEAM_CHAT_NO_STORE_HEADERS }
@@ -146,6 +159,32 @@ export async function GET(
         select: { displayName: true, name: true },
       }),
     ]);
+    const endpointConfigured = hasAgentLlmConnection(llmConfig) || Boolean(agent.llmEndpointUrl?.trim());
+
+    if (!endpointConfigured || llmHealth.llmStatus !== "online") {
+      console.warn(
+        "[chat/inspect][GET][not_ready]",
+        JSON.stringify({
+          dbTarget: getSanitizedDatabaseTarget(),
+          conversationId: conversation.id,
+          sessionUserId: session.user.id,
+          sessionUserEmail: session.user.email ?? null,
+          agentId: agent.id,
+          agentName: agent.name,
+          readiness: buildReadiness(llmHealth.llmStatus, llmHealth.llmLastError),
+          llmStatus: llmHealth.llmStatus,
+          llmModel: llmHealth.llmModel ?? agent.llmModel ?? null,
+          llmLastError: llmHealth.llmLastError,
+          llmConnections: summarizeAgentLlmConnections(agent.llmConfig, {
+            llmEndpointUrl: agent.llmEndpointUrl,
+            llmUsername: agent.llmUsername,
+            llmPassword: agent.llmPassword,
+            llmModel: agent.llmModel,
+            llmThinkingMode: agent.llmThinkingMode,
+          }),
+        })
+      );
+    }
 
     await Promise.all([
       prisma.aIAgent.update({
@@ -196,7 +235,7 @@ export async function GET(
           llmThinkingMode: agent.llmThinkingMode,
           llmLastCheckedAt: llmHealth.llmLastCheckedAt?.toISOString() ?? agent.llmLastCheckedAt?.toISOString() ?? null,
           llmLastError: llmHealth.llmLastError,
-          endpointConfigured: hasAgentLlmConnection(llmConfig) || Boolean(agent.llmEndpointUrl?.trim()),
+          endpointConfigured,
         },
         threadLlm: {
           ...getPublicConversationLlmState(threadLlmState),
@@ -235,7 +274,17 @@ export async function GET(
       );
     }
 
-    console.error("[chat/conversations/inspect][GET]", error);
+    console.error(
+      "[chat/inspect][GET]",
+      JSON.stringify({
+        dbTarget: getSanitizedDatabaseTarget(),
+        conversationId: id,
+        sessionUserId: session.user.id,
+        sessionUserEmail: session.user.email ?? null,
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      })
+    );
     return NextResponse.json(
       { error: "Failed to inspect agent chat context" },
       { status: 500, headers: TEAM_CHAT_NO_STORE_HEADERS }

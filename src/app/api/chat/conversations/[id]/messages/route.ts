@@ -29,6 +29,10 @@ import type { LlmMessage } from "@/lib/agent-llm";
 import { resolveAgentLlmRoutingPolicy } from "@/lib/agent-task-context";
 import { resolveConversationContextBundle } from "@/lib/conversation-context";
 import { logTeamChatDetailRouteDiagnostics } from "@/lib/chat-route-diagnostics";
+import {
+  getSanitizedDatabaseTarget,
+  summarizeAgentLlmConnections,
+} from "@/lib/runtime-diagnostics";
 
 export const dynamic = "force-dynamic";
 
@@ -192,6 +196,15 @@ export async function GET(
     });
 
     if (!conversation) {
+      console.warn(
+        "[chat/messages][GET][not_found]",
+        JSON.stringify({
+          dbTarget: getSanitizedDatabaseTarget(),
+          conversationId: id,
+          sessionUserId: session.user.id,
+          sessionUserEmail: session.user.email ?? null,
+        })
+      );
       return NextResponse.json(
         { error: "Conversation not found" },
         { status: 404, headers: TEAM_CHAT_NO_STORE_HEADERS }
@@ -199,6 +212,37 @@ export async function GET(
     }
 
     const messages = await listMessagesForConversation(conversation.id);
+    if (messages.length === 0) {
+      const runtimeState = resolveConversationRuntimeState(conversation);
+      const activeAgent = runtimeState.activeAgentMember?.agent ?? null;
+
+      console.warn(
+        "[chat/messages][GET][empty]",
+        JSON.stringify({
+          dbTarget: getSanitizedDatabaseTarget(),
+          conversationId: conversation.id,
+          sessionUserId: session.user.id,
+          sessionUserEmail: session.user.email ?? null,
+          activeMembershipCount: runtimeState.activeMembers.length,
+          activeUserCount: runtimeState.activeUserIds.length,
+          activeAgentCount: runtimeState.activeAgentIds.length,
+          activeAgentId: activeAgent?.id ?? null,
+          activeAgentName: activeAgent?.name ?? null,
+          activeAgentLlmConnections: activeAgent
+            ? summarizeAgentLlmConnections(activeAgent.llmConfig, {
+                llmEndpointUrl: activeAgent.llmEndpointUrl,
+                llmUsername: activeAgent.llmUsername,
+                llmPassword: activeAgent.llmPassword,
+                llmModel: activeAgent.llmModel,
+                llmThinkingMode: activeAgent.llmThinkingMode,
+              })
+            : [],
+          conversationUpdatedAt: conversation.updatedAt.toISOString(),
+          conversationCreatedAt: conversation.createdAt.toISOString(),
+          latestConversationMessageId: conversation.messages[0]?.id ?? null,
+        })
+      );
+    }
     return NextResponse.json(
       {
         conversation: serializeConversation(conversation),
@@ -214,7 +258,21 @@ export async function GET(
       );
     }
 
-    throw error;
+    console.error(
+      "[chat/messages][GET]",
+      JSON.stringify({
+        dbTarget: getSanitizedDatabaseTarget(),
+        conversationId: id,
+        sessionUserId: session.user.id,
+        sessionUserEmail: session.user.email ?? null,
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      })
+    );
+    return NextResponse.json(
+      { error: "Failed to load conversation messages" },
+      { status: 500, headers: TEAM_CHAT_NO_STORE_HEADERS }
+    );
   }
 }
 
