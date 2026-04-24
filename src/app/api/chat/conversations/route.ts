@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { logTeamChatListRouteDiagnostics } from "@/lib/chat-route-diagnostics";
 import {
   findDirectConversation,
   getConversationForUser,
@@ -11,10 +12,20 @@ import {
   serializeConversation,
 } from "@/lib/chat";
 
+export const dynamic = "force-dynamic";
+
+const TEAM_CHAT_NO_STORE_HEADERS = {
+  "Cache-Control": "no-store",
+  Vary: "Cookie",
+};
+
 export async function GET(request: Request) {
   const session = await auth();
   if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401, headers: TEAM_CHAT_NO_STORE_HEADERS }
+    );
   }
 
   try {
@@ -24,17 +35,28 @@ export async function GET(request: Request) {
       archivedParam === "only"
         ? await listConversationsForUserWithOptions(session.user.id, { archived: "only" })
         : await listConversationsForUser(session.user.id);
-    return NextResponse.json({ conversations });
+    await logTeamChatListRouteDiagnostics({
+      route: archivedParam === "only" ? "api/chat/conversations.GET:archived_only" : "api/chat/conversations.GET",
+      session: {
+        userId: session.user.id,
+        email: session.user.email ?? null,
+      },
+      conversationIds: conversations.map((conversation) => conversation.id),
+    });
+    return NextResponse.json({ conversations }, { headers: TEAM_CHAT_NO_STORE_HEADERS });
   } catch (error) {
     if (isMissingChatTablesError(error)) {
       return NextResponse.json(
         { error: "Team chat is not ready yet. The new chat tables still need to be migrated." },
-        { status: 503 }
+        { status: 503, headers: TEAM_CHAT_NO_STORE_HEADERS }
       );
     }
 
     console.error("[chat/conversations][GET]", error);
-    return NextResponse.json({ error: "Failed to load conversations" }, { status: 500 });
+    return NextResponse.json(
+      { error: "Failed to load conversations" },
+      { status: 500, headers: TEAM_CHAT_NO_STORE_HEADERS }
+    );
   }
 }
 

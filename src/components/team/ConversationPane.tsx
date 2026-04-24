@@ -5,6 +5,10 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { TOOL_LABELS } from "@/lib/agent-tools";
 import { Button } from "@/components/ui/Button";
+import {
+  TeamChatPerfBoundary,
+  useTeamChatPerfCommit,
+} from "@/components/team/team-chat-performance";
 import { type ThreadDocumentUploadState } from "@/components/team/ThreadDocumentsPanel";
 import { Textarea } from "@/components/ui/Input";
 import {
@@ -364,6 +368,15 @@ function ThreadComposer({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragDepth, setDragDepth] = useState(0);
   const dragActive = dragDepth > 0;
+  useTeamChatPerfCommit("ThreadComposer", {
+    conversationId: activeConversation.id,
+    inputLength: messageInput.length,
+    uploadCount: threadDocumentUploads.length,
+    sending,
+    dragActive,
+    activeAgentSendBlocked,
+    activeAgentBootstrapPending,
+  });
 
   function queueUploads(files: FileList | null) {
     const nextFiles = Array.from(files ?? []);
@@ -650,6 +663,17 @@ export function ConversationPane({
   onDeleteMessage: (messageId: string) => Promise<void>;
 }) {
   const mixedAgentThread = (activeConversation?.members.filter((member) => member.kind === "agent").length ?? 0) > 1;
+  useTeamChatPerfCommit("ConversationPane", {
+    conversationId: activeConversation?.id ?? null,
+    loadingMessages,
+    rawMessageCount,
+    renderedMessageCount: renderedMessages.length,
+    messageInputLength: messageInput.length,
+    threadDrawerOpen,
+    sending,
+    uploadCount: threadDocumentUploads.length,
+    agentMarkdownMessageCount: renderedMessages.filter((message) => message.sender?.kind === "agent" && Boolean(message.body)).length,
+  });
 
   return (
     <section className={cn("flex min-h-0 flex-col overflow-hidden", !activeConversation ? "hidden md:flex" : "flex")}>
@@ -670,235 +694,259 @@ export function ConversationPane({
             onToggleDrawer={onToggleDrawer}
           />
 
-          <div
-            ref={chatScrollRef}
-            onScroll={onHandleChatScroll}
-            onPointerDown={onEngageConversationArea}
-            className="chat-scroll flex-1 overflow-y-auto overflow-x-hidden bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.035),transparent_58%)] px-4 py-5 md:min-h-0 md:px-8 md:py-8"
+          <TeamChatPerfBoundary
+            id="ConversationMessageList"
+            detail={{
+              conversationId: activeConversation.id,
+              loadingMessages,
+              rawMessageCount,
+              renderedMessageCount: renderedMessages.length,
+              agentMarkdownMessageCount: renderedMessages.filter((message) => message.sender?.kind === "agent" && Boolean(message.body)).length,
+              threadDrawerOpen,
+            }}
           >
-            {loadingMessages && rawMessageCount === 0 ? (
-              <div className="flex h-full items-center justify-center">
-                <div className="h-6 w-6 rounded-full border-2 border-[rgba(247,148,29,0.2)] border-t-[#F7941D] animate-spin" />
-              </div>
-            ) : activeAgentParticipant && activeAgentBootstrapPending ? (
-              <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(75,156,211,0.12)] text-[#7EC8E3]">
-                  <Bot size={28} />
+            <div
+              ref={chatScrollRef}
+              onScroll={onHandleChatScroll}
+              onPointerDown={onEngageConversationArea}
+              className="chat-scroll flex-1 overflow-y-auto overflow-x-hidden bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.035),transparent_58%)] px-4 py-5 md:min-h-0 md:px-8 md:py-8"
+            >
+              {loadingMessages && rawMessageCount === 0 ? (
+                <div className="flex h-full items-center justify-center">
+                  <div className="h-6 w-6 rounded-full border-2 border-[rgba(247,148,29,0.2)] border-t-[#F7941D] animate-spin" />
                 </div>
-                <p className="text-lg font-semibold text-[#F6F3EE]">Initializing {activeAgentParticipant.name}</p>
-                <p className="mt-1 max-w-md text-sm leading-6 text-[#8D877F]">
-                  Checking the model connection, loading recent conversation history, and preparing the context bundle.
-                </p>
-                <div className="mt-4 flex items-center gap-2 rounded-2xl border border-[rgba(75,156,211,0.16)] bg-[rgba(75,156,211,0.08)] px-4 py-3 text-sm text-[#9FCBE0]">
-                  <div className="h-4 w-4 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                  <span>Preparing a clean start before you type</span>
+              ) : activeAgentParticipant && activeAgentBootstrapPending ? (
+                <div className="flex h-full flex-col items-center justify-center px-8 text-center">
+                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(75,156,211,0.12)] text-[#7EC8E3]">
+                    <Bot size={28} />
+                  </div>
+                  <p className="text-lg font-semibold text-[#F6F3EE]">Initializing {activeAgentParticipant.name}</p>
+                  <p className="mt-1 max-w-md text-sm leading-6 text-[#8D877F]">
+                    Checking the model connection, loading recent conversation history, and preparing the context bundle.
+                  </p>
+                  <div className="mt-4 flex items-center gap-2 rounded-2xl border border-[rgba(75,156,211,0.16)] bg-[rgba(75,156,211,0.08)] px-4 py-3 text-sm text-[#9FCBE0]">
+                    <div className="h-4 w-4 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
+                    <span>Preparing a clean start before you type</span>
+                  </div>
                 </div>
-              </div>
-            ) : activeAgentParticipant && !activeAgentReady ? (
-              <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(75,156,211,0.12)] text-[#7EC8E3]">
-                  <Bot size={28} />
+              ) : activeAgentParticipant && !activeAgentReady ? (
+                <div className="flex h-full flex-col items-center justify-center px-8 text-center">
+                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(75,156,211,0.12)] text-[#7EC8E3]">
+                    <Bot size={28} />
+                  </div>
+                  <p className="text-lg font-semibold text-[#F6F3EE]">{activeAgentParticipant.name} isn&apos;t ready to chat yet</p>
+                  <p className="mt-1 max-w-md text-sm leading-6 text-[#8D877F]">
+                    {agentInspectorError || agentInspector?.readiness.detail || "Connect this agent's LLM brain on the profile page before starting a conversation."}
+                  </p>
+                  <Button variant="secondary" size="sm" className="mt-4" onClick={onOpenActiveAgentProfile}>
+                    Open Agent Profile
+                  </Button>
                 </div>
-                <p className="text-lg font-semibold text-[#F6F3EE]">{activeAgentParticipant.name} isn&apos;t ready to chat yet</p>
-                <p className="mt-1 max-w-md text-sm leading-6 text-[#8D877F]">
-                  {agentInspectorError || agentInspector?.readiness.detail || "Connect this agent's LLM brain on the profile page before starting a conversation."}
-                </p>
-                <Button variant="secondary" size="sm" className="mt-4" onClick={onOpenActiveAgentProfile}>
-                  Open Agent Profile
-                </Button>
-              </div>
-            ) : renderedMessages.length === 0 ? (
-              <div className="flex h-full flex-col items-center justify-center text-center">
-                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(247,148,29,0.12)] text-[#F7941D]">
-                  <MessageSquare size={28} />
+              ) : renderedMessages.length === 0 ? (
+                <div className="flex h-full flex-col items-center justify-center text-center">
+                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(247,148,29,0.12)] text-[#F7941D]">
+                    <MessageSquare size={28} />
+                  </div>
+                  <p className="text-lg font-semibold text-[#F6F3EE]">Start the conversation</p>
+                  <p className="mt-1 max-w-md text-sm text-[#8D877F]">
+                    {activeConversation.type === "group"
+                      ? "Drop the first update, question, or decision into this channel."
+                      : `Send a quick message to ${getConversationLabel(activeConversation, currentUserId)}.`}
+                  </p>
                 </div>
-                <p className="text-lg font-semibold text-[#F6F3EE]">Start the conversation</p>
-                <p className="mt-1 max-w-md text-sm text-[#8D877F]">
-                  {activeConversation.type === "group"
-                    ? "Drop the first update, question, or decision into this channel."
-                    : `Send a quick message to ${getConversationLabel(activeConversation, currentUserId)}.`}
-                </p>
-              </div>
-            ) : (
-              <div className={cn(CONVERSATION_COLUMN_CLASS, "flex flex-col gap-6 pb-6")}>
-                {renderedMessages.map((message) => {
-                  const isCurrentUser = message.sender?.id === currentUserId && message.sender?.kind === "user";
-                  const isEditing = editingMessageId === message.id;
-                  const speakerLabel = getSpeakerLabel(message, currentUserId, mixedAgentThread);
+              ) : (
+                <div className={cn(CONVERSATION_COLUMN_CLASS, "flex flex-col gap-6 pb-6")}>
+                  {renderedMessages.map((message) => {
+                    const isCurrentUser = message.sender?.id === currentUserId && message.sender?.kind === "user";
+                    const isEditing = editingMessageId === message.id;
+                    const speakerLabel = getSpeakerLabel(message, currentUserId, mixedAgentThread);
 
-                  return (
-                    <div
-                      key={message.id}
-                      className={cn("group flex w-full", isCurrentUser ? "justify-end" : "justify-start")}
-                    >
+                    return (
                       <div
-                        className={cn("flex min-w-0 w-full flex-col", isCurrentUser ? "items-end" : "items-start")}
+                        key={message.id}
+                        className={cn("group flex w-full", isCurrentUser ? "justify-end" : "justify-start")}
                       >
-                        <p
-                          className={cn(
-                            "mb-0.5 px-1 text-[11px] font-medium",
-                            isCurrentUser ? "text-right text-[#A89C8C]" : "text-[#8D877F]"
-                          )}
+                        <div
+                          className={cn("flex min-w-0 w-full flex-col", isCurrentUser ? "items-end" : "items-start")}
                         >
-                          {speakerLabel}
-                        </p>
-
-                        {isEditing ? (
-                          <div
-                            className="w-full rounded-[22px] border border-[rgba(247,148,29,0.2)] bg-[rgba(255,255,255,0.04)] p-3"
-                            style={{ minWidth: "280px" }}
-                          >
-                            <Textarea
-                              value={editingDraft}
-                              onChange={(event) => onChangeEditingDraft(event.target.value)}
-                              rows={3}
-                              className="min-h-[88px] border-[rgba(255,255,255,0.08)] bg-[#191919]"
-                            />
-                            <div className="mt-2 flex justify-end gap-2">
-                              <button
-                                onClick={onCancelEditingMessage}
-                                className="flex h-8 w-8 items-center justify-center rounded-xl border border-[rgba(255,255,255,0.08)] bg-[#181818] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
-                                type="button"
-                                title="Cancel"
-                              >
-                                <X size={14} />
-                              </button>
-                              <button
-                                onClick={() => void onSaveEditedMessage(message.id)}
-                                className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#F7941D] text-[#111111] transition-opacity hover:opacity-90 disabled:opacity-50"
-                                type="button"
-                                disabled={!editingDraft.trim() || savingMessageId === message.id}
-                                title="Save"
-                              >
-                                {savingMessageId === message.id ? (
-                                  <div className="h-3.5 w-3.5 rounded-full border-2 border-[#111111]/20 border-t-[#111111] animate-spin" />
-                                ) : (
-                                  <Check size={14} />
-                                )}
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div
+                          <p
                             className={cn(
-                              "min-w-0 text-sm leading-6 [overflow-wrap:anywhere]",
-                              isCurrentUser
-                                ? cn(HUMAN_MESSAGE_WIDTH_CLASS, "rounded-[24px] px-4 py-3 shadow-sm")
-                                : message.sender?.kind === "agent"
-                                  ? "w-full px-1 py-1.5"
-                                  : cn(HUMAN_MESSAGE_WIDTH_CLASS, "rounded-[22px] px-4 py-3")
-                            )}
-                            style={
-                              isCurrentUser
-                                ? {
-                                  background: "linear-gradient(135deg, rgba(247,148,29,0.22), rgba(247,148,29,0.1))",
-                                  color: "#F6F3EE",
-                                  border: "1px solid rgba(247,148,29,0.08)",
-                                  borderBottomRightRadius: "6px",
-                                }
-                                : message.sender?.kind === "agent"
-                                  ? {
-                                    background: "transparent",
-                                    color: "#F6F3EE",
-                                    border: "none",
-                                    boxShadow: "none",
-                                  }
-                                  : {
-                                    background: "rgba(255,255,255,0.03)",
-                                    color: "#F6F3EE",
-                                    border: "1px solid rgba(255,255,255,0.05)",
-                                    borderBottomLeftRadius: "6px",
-                                  }
-                            }
-                          >
-                            {message.body ? (
-                              message.sender?.kind === "agent" ? (
-                                <div className="[overflow-wrap:anywhere] prose-chat">
-                                  <ReactMarkdown remarkPlugins={[remarkGfm]} components={chatMarkdownComponents}>
-                                    {message.body}
-                                  </ReactMarkdown>
-                                </div>
-                              ) : (
-                                <div className="whitespace-pre-wrap [overflow-wrap:anywhere]">{message.body}</div>
-                              )
-                            ) : message.isStreaming && message.sender?.kind !== "agent" ? (
-                              <div className="flex items-center gap-2 text-[#CFC9C2]">
-                                <div className="h-3.5 w-3.5 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                                <span>{getStreamingStatusLabel(message)}</span>
-                              </div>
-                            ) : null}
-
-                            {message.sender?.kind === "agent" ? <MessageOperationalDetails message={message} /> : null}
-                          </div>
-                        )}
-
-                        {!isEditing && message.body ? (
-                          <div
-                            className={cn(
-                              "mt-1 flex items-center gap-2 px-1 transition-opacity",
-                              isCurrentUser ? "opacity-0 group-hover:opacity-100" : "opacity-100 md:opacity-0 md:group-hover:opacity-100"
+                              "mb-0.5 px-1 text-[11px] font-medium",
+                              isCurrentUser ? "text-right text-[#A89C8C]" : "text-[#8D877F]"
                             )}
                           >
-                            <button
-                              onClick={() => onCopyMessage(message.body, message.id)}
-                              type="button"
-                              className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
+                            {speakerLabel}
+                          </p>
+
+                          {isEditing ? (
+                            <div
+                              className="w-full rounded-[22px] border border-[rgba(247,148,29,0.2)] bg-[rgba(255,255,255,0.04)] p-3"
+                              style={{ minWidth: "280px" }}
                             >
-                              <Copy size={12} />
-                              {copiedMessageId === message.id ? "Copied" : "Copy"}
-                            </button>
-                            {isCurrentUser ? (
-                              <>
+                              <Textarea
+                                value={editingDraft}
+                                onChange={(event) => onChangeEditingDraft(event.target.value)}
+                                rows={3}
+                                className="min-h-[88px] border-[rgba(255,255,255,0.08)] bg-[#191919]"
+                              />
+                              <div className="mt-2 flex justify-end gap-2">
                                 <button
-                                  onClick={() => onStartEditingMessage(message)}
+                                  onClick={onCancelEditingMessage}
+                                  className="flex h-8 w-8 items-center justify-center rounded-xl border border-[rgba(255,255,255,0.08)] bg-[#181818] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
                                   type="button"
-                                  className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
+                                  title="Cancel"
                                 >
-                                  <Pencil size={12} />
-                                  Edit
+                                  <X size={14} />
                                 </button>
                                 <button
-                                  onClick={() => void onDeleteMessage(message.id)}
+                                  onClick={() => void onSaveEditedMessage(message.id)}
+                                  className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#F7941D] text-[#111111] transition-opacity hover:opacity-90 disabled:opacity-50"
                                   type="button"
-                                  disabled={deletingMessageId === message.id}
-                                  className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#EF4444] disabled:opacity-50"
+                                  disabled={!editingDraft.trim() || savingMessageId === message.id}
+                                  title="Save"
                                 >
-                                  <Trash2 size={12} />
-                                  Delete
+                                  {savingMessageId === message.id ? (
+                                    <div className="h-3.5 w-3.5 rounded-full border-2 border-[#111111]/20 border-t-[#111111] animate-spin" />
+                                  ) : (
+                                    <Check size={14} />
+                                  )}
                                 </button>
-                              </>
-                            ) : null}
-                          </div>
-                        ) : null}
+                              </div>
+                            </div>
+                          ) : (
+                            <div
+                              className={cn(
+                                "min-w-0 text-sm leading-6 [overflow-wrap:anywhere]",
+                                isCurrentUser
+                                  ? cn(HUMAN_MESSAGE_WIDTH_CLASS, "rounded-[24px] px-4 py-3 shadow-sm")
+                                  : message.sender?.kind === "agent"
+                                    ? "w-full px-1 py-1.5"
+                                    : cn(HUMAN_MESSAGE_WIDTH_CLASS, "rounded-[22px] px-4 py-3")
+                              )}
+                              style={
+                                isCurrentUser
+                                  ? {
+                                    background: "linear-gradient(135deg, rgba(247,148,29,0.22), rgba(247,148,29,0.1))",
+                                    color: "#F6F3EE",
+                                    border: "1px solid rgba(247,148,29,0.08)",
+                                    borderBottomRightRadius: "6px",
+                                  }
+                                  : message.sender?.kind === "agent"
+                                    ? {
+                                      background: "transparent",
+                                      color: "#F6F3EE",
+                                      border: "none",
+                                      boxShadow: "none",
+                                    }
+                                    : {
+                                      background: "rgba(255,255,255,0.03)",
+                                      color: "#F6F3EE",
+                                      border: "1px solid rgba(255,255,255,0.05)",
+                                      borderBottomLeftRadius: "6px",
+                                    }
+                              }
+                            >
+                              {message.body ? (
+                                message.sender?.kind === "agent" ? (
+                                  <div className="[overflow-wrap:anywhere] prose-chat">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={chatMarkdownComponents}>
+                                      {message.body}
+                                    </ReactMarkdown>
+                                  </div>
+                                ) : (
+                                  <div className="whitespace-pre-wrap [overflow-wrap:anywhere]">{message.body}</div>
+                                )
+                              ) : message.isStreaming && message.sender?.kind !== "agent" ? (
+                                <div className="flex items-center gap-2 text-[#CFC9C2]">
+                                  <div className="h-3.5 w-3.5 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
+                                  <span>{getStreamingStatusLabel(message)}</span>
+                                </div>
+                              ) : null}
 
-                        <p className="mt-0.5 px-1 text-[10px] text-[#6F6A64]">{formatMessageTime(message.createdAt)}</p>
+                              {message.sender?.kind === "agent" ? <MessageOperationalDetails message={message} /> : null}
+                            </div>
+                          )}
+
+                          {!isEditing && message.body ? (
+                            <div
+                              className={cn(
+                                "mt-1 flex items-center gap-2 px-1 transition-opacity",
+                                isCurrentUser ? "opacity-0 group-hover:opacity-100" : "opacity-100 md:opacity-0 md:group-hover:opacity-100"
+                              )}
+                            >
+                              <button
+                                onClick={() => onCopyMessage(message.body, message.id)}
+                                type="button"
+                                className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
+                              >
+                                <Copy size={12} />
+                                {copiedMessageId === message.id ? "Copied" : "Copy"}
+                              </button>
+                              {isCurrentUser ? (
+                                <>
+                                  <button
+                                    onClick={() => onStartEditingMessage(message)}
+                                    type="button"
+                                    className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
+                                  >
+                                    <Pencil size={12} />
+                                    Edit
+                                  </button>
+                                  <button
+                                    onClick={() => void onDeleteMessage(message.id)}
+                                    type="button"
+                                    disabled={deletingMessageId === message.id}
+                                    className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#EF4444] disabled:opacity-50"
+                                  >
+                                    <Trash2 size={12} />
+                                    Delete
+                                  </button>
+                                </>
+                              ) : null}
+                            </div>
+                          ) : null}
+
+                          <p className="mt-0.5 px-1 text-[10px] text-[#6F6A64]">{formatMessageTime(message.createdAt)}</p>
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-                <div ref={bottomRef} />
-              </div>
-            )}
-          </div>
-          <ThreadComposer
-            currentUserId={currentUserId}
-            activeConversation={activeConversation}
-            activeAgentParticipant={activeAgentParticipant}
-            activeAgentReady={activeAgentReady}
-            activeAgentOfflineDetail={agentInspectorError || agentInspector?.readiness.detail || null}
-            activeAgentSendBlocked={activeAgentSendBlocked}
-            activeAgentBootstrapPending={activeAgentBootstrapPending}
-            threadDocumentUploads={threadDocumentUploads}
-            threadDocumentError={threadDocumentError}
-            messageInput={messageInput}
-            sending={sending}
-            onEngageConversationArea={onEngageConversationArea}
-            onChangeMessageInput={onChangeMessageInput}
-            onUploadThreadDocuments={onUploadThreadDocuments}
-            onDismissThreadUpload={onDismissThreadUpload}
-            onSubmitMessage={onSubmitMessage}
-            onSendMessage={onSendMessage}
-          />
+                    );
+                  })}
+                  <div ref={bottomRef} />
+                </div>
+              )}
+            </div>
+          </TeamChatPerfBoundary>
+          <TeamChatPerfBoundary
+            id="ConversationComposer"
+            detail={{
+              conversationId: activeConversation.id,
+              messageInputLength: messageInput.length,
+              sending,
+              uploadCount: threadDocumentUploads.length,
+              activeAgentSendBlocked,
+              activeAgentBootstrapPending,
+            }}
+          >
+            <ThreadComposer
+              currentUserId={currentUserId}
+              activeConversation={activeConversation}
+              activeAgentParticipant={activeAgentParticipant}
+              activeAgentReady={activeAgentReady}
+              activeAgentOfflineDetail={agentInspectorError || agentInspector?.readiness.detail || null}
+              activeAgentSendBlocked={activeAgentSendBlocked}
+              activeAgentBootstrapPending={activeAgentBootstrapPending}
+              threadDocumentUploads={threadDocumentUploads}
+              threadDocumentError={threadDocumentError}
+              messageInput={messageInput}
+              sending={sending}
+              onEngageConversationArea={onEngageConversationArea}
+              onChangeMessageInput={onChangeMessageInput}
+              onUploadThreadDocuments={onUploadThreadDocuments}
+              onDismissThreadUpload={onDismissThreadUpload}
+              onSubmitMessage={onSubmitMessage}
+              onSendMessage={onSendMessage}
+            />
+          </TeamChatPerfBoundary>
         </>
       ) : (
         <div className="hidden h-full flex-col items-center justify-center bg-[radial-gradient(circle_at_center,rgba(247,148,29,0.08),transparent_34%)] px-8 text-center md:flex">

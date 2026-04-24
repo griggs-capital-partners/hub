@@ -21,6 +21,7 @@ import {
   formatDocumentBytes,
   getConversationDocumentDownloadHref,
 } from "@/components/team/team-chat-shared";
+import { useTeamChatPerfCommit } from "@/components/team/team-chat-performance";
 import { CONVERSATION_DOCUMENT_ACCEPT } from "@/lib/conversation-documents";
 import { cn } from "@/lib/utils";
 
@@ -76,6 +77,15 @@ export function ThreadDocumentsPanel({
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const hasItems = uploads.length > 0 || documents.length > 0;
+  useTeamChatPerfCommit("ThreadDocumentsPanel", {
+    conversationId,
+    documentCount: documents.length,
+    uploadCount: uploads.length,
+    compact,
+    canUpload,
+    canRemove,
+    removingDocumentId: removingDocumentId ?? null,
+  });
 
   return (
     <section

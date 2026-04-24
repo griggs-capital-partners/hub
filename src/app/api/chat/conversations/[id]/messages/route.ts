@@ -28,6 +28,14 @@ import {
 import type { LlmMessage } from "@/lib/agent-llm";
 import { resolveAgentLlmRoutingPolicy } from "@/lib/agent-task-context";
 import { resolveConversationContextBundle } from "@/lib/conversation-context";
+import { logTeamChatDetailRouteDiagnostics } from "@/lib/chat-route-diagnostics";
+
+export const dynamic = "force-dynamic";
+
+const TEAM_CHAT_NO_STORE_HEADERS = {
+  "Cache-Control": "no-store",
+  Vary: "Cookie",
+};
 
 type CreatedChatMessage = Prisma.ChatMessageGetPayload<{
   include: {
@@ -162,29 +170,47 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params;
   const session = await auth();
   if (!session?.user?.id) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    return NextResponse.json(
+      { error: "Unauthorized" },
+      { status: 401, headers: TEAM_CHAT_NO_STORE_HEADERS }
+    );
   }
 
   try {
-    const { id } = await params;
     const conversation = await getConversationForUser(id, session.user.id);
+    await logTeamChatDetailRouteDiagnostics({
+      route: "api/chat/conversations/[id]/messages.GET",
+      session: {
+        userId: session.user.id,
+        email: session.user.email ?? null,
+      },
+      conversationId: id,
+      accessFound: Boolean(conversation),
+    });
 
     if (!conversation) {
-      return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+      return NextResponse.json(
+        { error: "Conversation not found" },
+        { status: 404, headers: TEAM_CHAT_NO_STORE_HEADERS }
+      );
     }
 
     const messages = await listMessagesForConversation(conversation.id);
-    return NextResponse.json({
-      conversation: serializeConversation(conversation),
-      messages,
-    });
+    return NextResponse.json(
+      {
+        conversation: serializeConversation(conversation),
+        messages,
+      },
+      { headers: TEAM_CHAT_NO_STORE_HEADERS }
+    );
   } catch (error) {
     if (isMissingChatTablesError(error)) {
       return NextResponse.json(
         { error: "Team chat is not ready yet. The new chat tables still need to be migrated." },
-        { status: 503 }
+        { status: 503, headers: TEAM_CHAT_NO_STORE_HEADERS }
       );
     }
 

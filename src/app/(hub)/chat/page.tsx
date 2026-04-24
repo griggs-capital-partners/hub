@@ -6,6 +6,8 @@ import { ensurePlaceholderUsersForInvites, inviteUserId } from "@/lib/team-invit
 import { listChatProjects, listConversationsForUser } from "@/lib/chat";
 import { redirect } from "next/navigation";
 
+export const dynamic = "force-dynamic";
+
 export default async function TeamPage() {
   const session = await auth();
   if (!session?.user) redirect("/login");

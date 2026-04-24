@@ -18,6 +18,14 @@ import { deriveInviteName } from "@/lib/team-invites";
 import { useDesktopSidebar } from "@/components/layout/DesktopSidebarContext";
 import { ConversationPane } from "@/components/team/ConversationPane";
 import { NewThreadModal } from "@/components/team/NewThreadModal";
+import {
+  TeamChatPerfBoundary,
+  finishTeamChatPerfSpan,
+  incrementTeamChatPerfCounter,
+  recordTeamChatPerfEvent,
+  startTeamChatPerfSpan,
+  useTeamChatPerfCommit,
+} from "@/components/team/team-chat-performance";
 import { TeamDiscoveryPane } from "@/components/team/TeamDiscoveryPane";
 import { type ThreadDocumentUploadState } from "@/components/team/ThreadDocumentsPanel";
 import { ThreadDrawer } from "@/components/team/ThreadDrawer";
@@ -902,6 +910,16 @@ export function TeamClient({
   const conversationsRef = useRef(conversations);
   const selectedConversationIdRef = useRef<string | null>(selectedConversationId);
   const threadUploadDismissTimersRef = useRef<Record<string, number>>({});
+  const threadSwitchMeasurementRef = useRef<{
+    conversationId: string;
+    source: string;
+    startedAt: number;
+    spanId: string | null;
+    shellPaintMeasured: boolean;
+    readyMeasured: boolean;
+  } | null>(null);
+  const threadDrawerToggleSpanRef = useRef<string | null>(null);
+  const contextInspectorToggleSpanRef = useRef<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showThreadStarter, setShowThreadStarter] = useState(initialConversations.length === 0);
   const [threadDrawerOpen, setThreadDrawerOpen] = useState(false);
@@ -948,32 +966,53 @@ export function TeamClient({
 
   const replaceMessagesForConversation = useCallback((
     conversationId: string | null,
-    nextMessages: ChatMessage[]
+    nextMessages: ChatMessage[],
+    reason = "replace"
   ) => {
     if (!isConversationStillSelected(conversationId)) {
       return;
     }
 
-    setMessages((current) => (
-      isConversationStillSelected(conversationId)
-        ? nextMessages
-        : current
-    ));
+    setMessages((current) => {
+      if (!isConversationStillSelected(conversationId)) {
+        return current;
+      }
+
+      incrementTeamChatPerfCounter(`message_list:replace:${reason}`, {
+        conversationId,
+        previousCount: current.length,
+        nextCount: nextMessages.length,
+        delta: nextMessages.length - current.length,
+      });
+
+      return nextMessages;
+    });
   }, [isConversationStillSelected]);
 
   const updateMessagesForConversation = useCallback((
     conversationId: string | null,
-    updater: (current: ChatMessage[]) => ChatMessage[] 
+    updater: (current: ChatMessage[]) => ChatMessage[],
+    reason = "update"
   ) => {
     if (!isConversationStillSelected(conversationId)) {
       return;
     }
 
-    setMessages((current) => (
-      isConversationStillSelected(conversationId)
-        ? updater(current)
-        : current
-    ));
+    setMessages((current) => {
+      if (!isConversationStillSelected(conversationId)) {
+        return current;
+      }
+
+      const nextMessages = updater(current);
+      incrementTeamChatPerfCounter(`message_list:update:${reason}`, {
+        conversationId,
+        previousCount: current.length,
+        nextCount: nextMessages.length,
+        delta: nextMessages.length - current.length,
+      });
+
+      return nextMessages;
+    });
   }, [isConversationStillSelected]);
 
   const clearConversationInspectorState = useCallback(() => {
@@ -1179,6 +1218,102 @@ export function TeamClient({
     return getThreadOriginState() ?? { kind: "rail" };
   }, [getThreadOriginState]);
 
+  const beginThreadSwitchMeasurement = useCallback((conversationId: string, source: string) => {
+    const startedAt = performance.now();
+    recordTeamChatPerfEvent("thread_switch:start", {
+      conversationId,
+      source,
+      previousConversationId: selectedConversationIdRef.current,
+    });
+    threadSwitchMeasurementRef.current = {
+      conversationId,
+      source,
+      startedAt,
+      spanId: startTeamChatPerfSpan("thread_switch", {
+        conversationId,
+        source,
+        previousConversationId: selectedConversationIdRef.current,
+      }),
+      shellPaintMeasured: false,
+      readyMeasured: false,
+    };
+  }, []);
+
+  const finishThreadSwitchMeasurement = useCallback((
+    conversationId: string,
+    status: "ready" | "error" | "not_found",
+    detail?: Record<string, unknown>
+  ) => {
+    const pendingMeasurement = threadSwitchMeasurementRef.current;
+    if (!pendingMeasurement || pendingMeasurement.conversationId !== conversationId || pendingMeasurement.readyMeasured) {
+      return;
+    }
+
+    pendingMeasurement.readyMeasured = true;
+    const durationMs = performance.now() - pendingMeasurement.startedAt;
+    recordTeamChatPerfEvent("thread_switch:ready", {
+      conversationId,
+      source: pendingMeasurement.source,
+      status,
+      durationMs,
+      ...(detail ?? {}),
+    });
+    finishTeamChatPerfSpan(pendingMeasurement.spanId, {
+      status,
+      durationMs,
+      ...(detail ?? {}),
+    });
+    if (threadSwitchMeasurementRef.current === pendingMeasurement) {
+      threadSwitchMeasurementRef.current = null;
+    }
+  }, []);
+
+  const setThreadDrawerVisibility = useCallback((nextOpen: boolean, source: string) => {
+    const conversationId = selectedConversationIdRef.current;
+    if (conversationId) {
+      recordTeamChatPerfEvent("thread_drawer_toggle:start", {
+        conversationId,
+        nextOpen,
+        source,
+      });
+      threadDrawerToggleSpanRef.current = startTeamChatPerfSpan("thread_drawer_toggle", {
+        conversationId,
+        nextOpen,
+        source,
+      });
+    }
+
+    setThreadDrawerOpen(nextOpen);
+  }, []);
+
+  const toggleThreadDrawer = useCallback(() => {
+    setThreadDrawerVisibility(!threadDrawerOpen, "header_toggle");
+  }, [setThreadDrawerVisibility, threadDrawerOpen]);
+
+  const closeThreadDrawer = useCallback(() => {
+    setThreadDrawerVisibility(false, "drawer_close");
+  }, [setThreadDrawerVisibility]);
+
+  const openContextInspector = useCallback(() => {
+    const conversationId = selectedConversationIdRef.current;
+    if (conversationId) {
+      recordTeamChatPerfEvent("context_inspector_toggle:start", {
+        conversationId,
+        nextOpen: true,
+      });
+      contextInspectorToggleSpanRef.current = startTeamChatPerfSpan("context_inspector_toggle", {
+        conversationId,
+        nextOpen: true,
+      });
+    }
+
+    setShowContextInspector(true);
+  }, []);
+
+  const closeContextInspector = useCallback(() => {
+    setShowContextInspector(false);
+  }, []);
+
   function openSearchDiscovery() {
     setSelectedConversationId(null);
     setSelectedProjectId(null);
@@ -1210,6 +1345,7 @@ export function TeamClient({
 
   function openConversationFromRail(conversationId: string) {
     const nextRouteState = getThreadRouteState(conversationId);
+    beginThreadSwitchMeasurement(conversationId, "rail");
     setSelectedConversationId(conversationId);
     if (!nextRouteState.context) {
       setSelectedProjectId(null);
@@ -1221,6 +1357,7 @@ export function TeamClient({
   }
 
   function openConversationFromDiscovery(conversationId: string) {
+    beginThreadSwitchMeasurement(conversationId, "discovery");
     setSelectedConversationId(conversationId);
     syncTeamChatRoute(getThreadRouteState(conversationId));
   }
@@ -1297,7 +1434,10 @@ export function TeamClient({
     setArchivedConversationsError(null);
 
     try {
-      const response = await fetch("/api/chat/conversations?archived=only");
+      const response = await fetch("/api/chat/conversations?archived=only", {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
       const data = await parseApiResponse(response);
 
       if (!response.ok || !Array.isArray(data.conversations)) {
@@ -1464,6 +1604,7 @@ export function TeamClient({
 
   useEffect(() => {
     function pingPresence() {
+      incrementTeamChatPerfCounter("presence:ping");
       fetch("/api/presence", { method: "PATCH" }).catch(() => { });
     }
 
@@ -1478,6 +1619,9 @@ export function TeamClient({
         const response = await fetch("/api/team");
         const data = await response.json();
         if (data.users) {
+          incrementTeamChatPerfCounter("team_refresh:interval", {
+            memberCount: Array.isArray(data.users) ? data.users.length : null,
+          });
           setMembers(data.users);
         }
       } catch {
@@ -1488,21 +1632,37 @@ export function TeamClient({
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    async function refreshConversations() {
-      try {
-        const response = await fetch("/api/chat/conversations");
-        const data = await response.json();
-        if (data.conversations) {
-          setConversations(data.conversations);
-        }
-      } catch {
-      }
-    }
+  const refreshConversations = useCallback(async (trigger: "mount" | "interval") => {
+    try {
+      const response = await fetch("/api/chat/conversations", {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
+      const data = await parseApiResponse(response);
 
-    const interval = setInterval(refreshConversations, 30_000);
+      if (!response.ok || !Array.isArray(data.conversations)) {
+        return;
+      }
+
+      incrementTeamChatPerfCounter(`conversations_refresh:${trigger}`, {
+        conversationCount: data.conversations.length,
+      });
+      setConversations(data.conversations as ConversationSummary[]);
+    } catch {
+    }
+  }, []);
+
+  useEffect(() => {
+    // Reconcile server-rendered thread state with the live access-trimmed list
+    // before the user opens a thread that detail routes would reject.
+    void refreshConversations("mount");
+
+    const interval = setInterval(() => {
+      void refreshConversations("interval");
+    }, 30_000);
+
     return () => clearInterval(interval);
-  }, [isDesktop]);
+  }, [refreshConversations]);
 
   useEffect(() => {
     void loadChatProjects({ silent: projects.length > 0 });
@@ -1578,23 +1738,43 @@ export function TeamClient({
     const resolvedConversationId = conversationId;
 
     async function loadMessages() {
-
+      incrementTeamChatPerfCounter("messages_fetch:load", {
+        conversationId: resolvedConversationId,
+      });
       setLoadingMessages(true);
       try {
-        const response = await fetch(`/api/chat/conversations/${resolvedConversationId}/messages`);
+        const response = await fetch(`/api/chat/conversations/${resolvedConversationId}/messages`, {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        });
         const data = await parseApiResponse(response);
 
         if (response.status === 404) {
+          finishThreadSwitchMeasurement(resolvedConversationId, "not_found", {
+            trigger: "thread_open",
+          });
           invalidateConversationAccessRef.current(resolvedConversationId);
           return;
         }
 
         if (!response.ok) {
+          finishThreadSwitchMeasurement(resolvedConversationId, "error", {
+            trigger: "thread_open",
+            statusCode: response.status,
+          });
           return;
         }
 
         if (Array.isArray(data.messages)) {
-          replaceMessagesForConversation(resolvedConversationId, data.messages as ChatMessage[]);
+          replaceMessagesForConversation(
+            resolvedConversationId,
+            data.messages as ChatMessage[],
+            "thread_open"
+          );
+          finishThreadSwitchMeasurement(resolvedConversationId, "ready", {
+            trigger: "thread_open",
+            messageCount: (data.messages as ChatMessage[]).length,
+          });
         }
         if (
           data.conversation
@@ -1618,7 +1798,7 @@ export function TeamClient({
     }
 
     loadMessages();
-  }, [activeConversationId, isConversationStillSelected, replaceMessagesForConversation]);
+  }, [activeConversationId, finishThreadSwitchMeasurement, isConversationStillSelected, replaceMessagesForConversation]);
 
   useEffect(() => {
     const conversationId = activeConversationId;
@@ -1628,7 +1808,13 @@ export function TeamClient({
 
     async function pollMessages() {
       try {
-        const response = await fetch(`/api/chat/conversations/${resolvedConversationId}/messages`);
+        incrementTeamChatPerfCounter("messages_fetch:poll", {
+          conversationId: resolvedConversationId,
+        });
+        const response = await fetch(`/api/chat/conversations/${resolvedConversationId}/messages`, {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        });
         const data = await parseApiResponse(response);
 
         if (response.status === 404) {
@@ -1641,7 +1827,11 @@ export function TeamClient({
         }
 
         if (Array.isArray(data.messages)) {
-          replaceMessagesForConversation(resolvedConversationId, data.messages as ChatMessage[]);
+          replaceMessagesForConversation(
+            resolvedConversationId,
+            data.messages as ChatMessage[],
+            "thread_poll"
+          );
         }
       } catch {
       }
@@ -1667,6 +1857,43 @@ export function TeamClient({
     setMessages([]);
   }, [selectedConversationId]);
 
+  useEffect(() => {
+    if (!selectedConversationId) {
+      return;
+    }
+
+    const pendingMeasurement = threadSwitchMeasurementRef.current;
+    if (!pendingMeasurement || pendingMeasurement.conversationId !== selectedConversationId || pendingMeasurement.shellPaintMeasured) {
+      return;
+    }
+
+    let firstFrame = 0;
+    let secondFrame = 0;
+
+    firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        const activeMeasurement = threadSwitchMeasurementRef.current;
+        if (!activeMeasurement || activeMeasurement.conversationId !== selectedConversationId || activeMeasurement.shellPaintMeasured) {
+          return;
+        }
+
+        activeMeasurement.shellPaintMeasured = true;
+        recordTeamChatPerfEvent("thread_switch:shell_paint", {
+          conversationId: selectedConversationId,
+          source: activeMeasurement.source,
+          durationMs: performance.now() - activeMeasurement.startedAt,
+          loadingMessages,
+          rawMessageCount: messages.length,
+        });
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, [loadingMessages, messages.length, selectedConversationId]);
+
   useLayoutEffect(() => {
     clearConversationInspectorState();
     isAtBottomRef.current = true;
@@ -1684,8 +1911,20 @@ export function TeamClient({
     setMovingProject(false);
   }, [clearConversationInspectorState, selectedConversationId]);
 
-  const refreshConversationInspector = useCallback(async (conversationId: string) => {
+  const refreshConversationInspector = useCallback(async (
+    conversationId: string,
+    trigger: "selection" | "focus" | "visibility" | "post_send" = "selection"
+  ) => {
+    incrementTeamChatPerfCounter(`inspector_refresh:${trigger}`, {
+      conversationId,
+    });
+    const inspectorSpanId = startTeamChatPerfSpan("inspector_refresh", {
+      conversationId,
+      trigger,
+    });
+
     if (!isConversationStillSelected(conversationId)) {
+      finishTeamChatPerfSpan(inspectorSpanId, { status: "stale_selection" });
       return;
     }
 
@@ -1693,6 +1932,7 @@ export function TeamClient({
     const isAgentConversation = convo?.members.some((member) => member.kind === "agent");
 
     if (!isAgentConversation) {
+      finishTeamChatPerfSpan(inspectorSpanId, { status: "skipped_no_agent" });
       if (isConversationStillSelected(conversationId)) {
         clearConversationInspectorState();
       }
@@ -1700,21 +1940,28 @@ export function TeamClient({
     }
 
     if (!startInspectorRequestForConversation(conversationId)) {
+      finishTeamChatPerfSpan(inspectorSpanId, { status: "request_not_started" });
       return;
     }
 
     try {
       const response = await fetch(`/api/chat/conversations/${conversationId}/inspect`, {
         headers: { Accept: "application/json" },
+        cache: "no-store",
       });
       const data = await parseApiResponse(response);
 
       if (response.status === 404) {
+        finishTeamChatPerfSpan(inspectorSpanId, { status: "not_found" });
         invalidateConversationAccessRef.current(conversationId);
         return;
       }
 
       if (!response.ok) {
+        finishTeamChatPerfSpan(inspectorSpanId, {
+          status: "error",
+          statusCode: response.status,
+        });
         setInspectorErrorForConversation(
           conversationId,
           getApiErrorMessage(data.error) ?? "Failed to initialize the agent"
@@ -1723,6 +1970,7 @@ export function TeamClient({
       }
 
       if (!("readiness" in data) || !("agent" in data) || !("threadLlm" in data)) {
+        finishTeamChatPerfSpan(inspectorSpanId, { status: "invalid_payload" });
         setInspectorErrorForConversation(conversationId, "Failed to initialize the agent");
         return;
       }
@@ -1730,8 +1978,17 @@ export function TeamClient({
       const inspectorData = data as unknown as AgentInspectorData;
       const appliedInspector = applyInspectorForConversation(conversationId, inspectorData);
       if (!appliedInspector) {
+        finishTeamChatPerfSpan(inspectorSpanId, { status: "stale_apply" });
         return;
       }
+
+      finishTeamChatPerfSpan(inspectorSpanId, {
+        status: "ready",
+        estimatedTokens: inspectorData.context.estimatedTokens,
+        recentHistoryCount: inspectorData.context.recentHistoryCount,
+        resolvedSourceCount: inspectorData.context.resolvedSources.length,
+        consideredSourceCount: inspectorData.context.sourceSelection.consideredSourceIds.length,
+      });
 
       setConversations((current) =>
         current.map((conversation) => {
@@ -1756,6 +2013,7 @@ export function TeamClient({
         })
       );
     } catch {
+      finishTeamChatPerfSpan(inspectorSpanId, { status: "exception" });
       setInspectorErrorForConversation(conversationId, "Unable to initialize the agent right now");
     } finally {
       finishInspectorRequestForConversation(conversationId);
@@ -1776,7 +2034,7 @@ export function TeamClient({
       return;
     }
 
-    void refreshConversationInspector(activeConversationId);
+    void refreshConversationInspector(activeConversationId, "selection");
   }, [activeConversationId, activeConversationPrimaryAgent?.id, clearConversationInspectorState, refreshConversationInspector]);
 
   useEffect(() => {
@@ -1787,12 +2045,12 @@ export function TeamClient({
     const conversationId = activeConversationId;
 
     function handleRefresh() {
-      void refreshConversationInspector(conversationId);
+      void refreshConversationInspector(conversationId, "focus");
     }
 
     function handleVisibilityChange() {
       if (document.visibilityState === "visible") {
-        handleRefresh();
+        void refreshConversationInspector(conversationId, "visibility");
       }
     }
 
@@ -2093,6 +2351,7 @@ export function TeamClient({
       if (target.agentId) {
         setBootstrappingConversationId(existingConversation.id);
       }
+      beginThreadSwitchMeasurement(existingConversation.id, "direct_shortcut_existing");
       setSelectedConversationId(existingConversation.id);
       syncTeamChatRoute({ kind: "thread", conversationId: existingConversation.id }, options?.history ?? "push");
       return existingConversation;
@@ -2118,6 +2377,7 @@ export function TeamClient({
           setBootstrappingConversationId(data.conversation.id);
         }
         upsertConversation(data.conversation);
+        beginThreadSwitchMeasurement(data.conversation.id, "direct_shortcut_created");
         setSelectedConversationId(data.conversation.id);
         syncTeamChatRoute({ kind: "thread", conversationId: data.conversation.id }, options?.history ?? "push");
         return data.conversation as ConversationSummary;
@@ -2217,6 +2477,9 @@ export function TeamClient({
         return;
       }
 
+      if (selectedConversationIdRef.current !== routeConversationId) {
+        beginThreadSwitchMeasurement(routeConversationId, "route_sync");
+      }
       setSelectedConversationId(routeConversationId);
       if (routeContext === "search") {
         const trimmedRouteQuery = routeQuery.trim();
@@ -2319,6 +2582,7 @@ export function TeamClient({
     setShowDiscoveryView(initialConversations.length === 0);
     setShowArchivedView(false);
   }, [
+    beginThreadSwitchMeasurement,
     initialConversations.length,
     routeAgentId,
     routeContext,
@@ -2439,6 +2703,7 @@ export function TeamClient({
     }
 
     upsertConversation(data.conversation);
+    beginThreadSwitchMeasurement(data.conversation.id, "new_group_thread");
     setSelectedConversationId(data.conversation.id);
     syncTeamChatRoute({ kind: "thread", conversationId: data.conversation.id });
   }
@@ -2823,13 +3088,22 @@ export function TeamClient({
     let receivedRuntimeSnapshot = false;
     let appliedRuntimeSnapshot = false;
 
+    incrementTeamChatPerfCounter("composer:send", {
+      conversationId,
+      messageLength: text.length,
+      isAgentConversation,
+    });
     setMessageInput("");
     setSending(true);
-    updateMessagesForConversation(conversationId, (current) => [
-      ...current,
-      optimisticMessage,
-      ...(optimisticAgentMessage ? [optimisticAgentMessage] : []),
-    ]);
+    updateMessagesForConversation(
+      conversationId,
+      (current) => [
+        ...current,
+        optimisticMessage,
+        ...(optimisticAgentMessage ? [optimisticAgentMessage] : []),
+      ],
+      "optimistic_send"
+    );
 
     try {
       const response = await fetch(`/api/chat/conversations/${conversationId}/messages`, {
@@ -2872,96 +3146,142 @@ export function TeamClient({
                 };
 
             if (event.type === "thinking_delta") {
-              updateMessagesForConversation(conversationId, (current) =>
-                current.map((message) =>
-                  message.id === optimisticAgentMessage.id
-                    ? {
-                      ...message,
-                      thinking: `${message.thinking ?? ""}${event.delta}`,
-                      isStreaming: true,
-                      streamState: "thinking",
-                    }
-                    : message
-                )
+              incrementTeamChatPerfCounter("stream_event:thinking_delta", {
+                conversationId,
+                deltaLength: event.delta.length,
+              });
+              updateMessagesForConversation(
+                conversationId,
+                (current) =>
+                  current.map((message) =>
+                    message.id === optimisticAgentMessage.id
+                      ? {
+                        ...message,
+                        thinking: `${message.thinking ?? ""}${event.delta}`,
+                        isStreaming: true,
+                        streamState: "thinking",
+                      }
+                      : message
+                  ),
+                "stream_thinking_delta"
               );
             }
 
             if (event.type === "meta") {
-              updateMessagesForConversation(conversationId, (current) =>
-                current.map((message) =>
-                  message.id === optimisticAgentMessage.id
-                    ? {
-                        ...message,
-                        thinkingEnabled: event.thinking,
-                      }
-                    : message
-                )
+              incrementTeamChatPerfCounter("stream_event:meta", {
+                conversationId,
+                thinkingEnabled: event.thinking,
+              });
+              updateMessagesForConversation(
+                conversationId,
+                (current) =>
+                  current.map((message) =>
+                    message.id === optimisticAgentMessage.id
+                      ? {
+                          ...message,
+                          thinkingEnabled: event.thinking,
+                        }
+                      : message
+                  ),
+                "stream_meta"
               );
             }
 
             if (event.type === "content_delta") {
-              updateMessagesForConversation(conversationId, (current) =>
-                current.map((message) =>
-                  message.id === optimisticAgentMessage.id
-                    ? {
-                      ...message,
-                      body: `${message.body}${event.delta}`,
-                      isStreaming: true,
-                      streamState: "responding",
-                    }
-                    : message
-                )
+              incrementTeamChatPerfCounter("stream_event:content_delta", {
+                conversationId,
+                deltaLength: event.delta.length,
+              });
+              updateMessagesForConversation(
+                conversationId,
+                (current) =>
+                  current.map((message) =>
+                    message.id === optimisticAgentMessage.id
+                      ? {
+                        ...message,
+                        body: `${message.body}${event.delta}`,
+                        isStreaming: true,
+                        streamState: "responding",
+                      }
+                      : message
+                  ),
+                "stream_content_delta"
               );
             }
 
             if (event.type === "retrieval") {
-              updateMessagesForConversation(conversationId, (current) =>
-                current.map((message) =>
-                  message.id === optimisticAgentMessage.id
-                    ? {
-                        ...message,
-                        retrievalSources: event.sources,
-                      }
-                    : message
-                )
+              incrementTeamChatPerfCounter("stream_event:retrieval", {
+                conversationId,
+                sourceCount: event.sources.length,
+              });
+              updateMessagesForConversation(
+                conversationId,
+                (current) =>
+                  current.map((message) =>
+                    message.id === optimisticAgentMessage.id
+                      ? {
+                          ...message,
+                          retrievalSources: event.sources,
+                        }
+                      : message
+                  ),
+                "stream_retrieval"
               );
             }
 
             if (event.type === "tool_call") {
-              updateMessagesForConversation(conversationId, (current) =>
-                current.map((message) =>
-                  message.id === optimisticAgentMessage.id
-                    ? {
-                        ...message,
-                        streamState: "using_tools",
-                        toolActivity: [
-                          ...(message.toolActivity ?? []),
-                          { id: event.id, name: event.name, args: event.args, status: "running" as const },
-                        ],
-                      }
-                    : message
-                )
+              incrementTeamChatPerfCounter("stream_event:tool_call", {
+                conversationId,
+                toolName: event.name,
+              });
+              updateMessagesForConversation(
+                conversationId,
+                (current) =>
+                  current.map((message) =>
+                    message.id === optimisticAgentMessage.id
+                      ? {
+                          ...message,
+                          streamState: "using_tools",
+                          toolActivity: [
+                            ...(message.toolActivity ?? []),
+                            { id: event.id, name: event.name, args: event.args, status: "running" as const },
+                          ],
+                        }
+                      : message
+                  ),
+                "stream_tool_call"
               );
             }
 
             if (event.type === "tool_result") {
-              updateMessagesForConversation(conversationId, (current) =>
-                current.map((message) =>
-                  message.id === optimisticAgentMessage.id
-                    ? {
-                        ...message,
-                        toolActivity: (message.toolActivity ?? []).map((t) =>
-                          t.id === event.id
-                            ? { ...t, status: "done" as const, result: event.result }
-                            : t
-                        ),
-                      }
-                    : message
-                )
+              incrementTeamChatPerfCounter("stream_event:tool_result", {
+                conversationId,
+                toolName: event.name,
+              });
+              updateMessagesForConversation(
+                conversationId,
+                (current) =>
+                  current.map((message) =>
+                    message.id === optimisticAgentMessage.id
+                      ? {
+                          ...message,
+                          toolActivity: (message.toolActivity ?? []).map((t) =>
+                            t.id === event.id
+                              ? { ...t, status: "done" as const, result: event.result }
+                              : t
+                          ),
+                        }
+                      : message
+                  ),
+                "stream_tool_result"
               );
             }
 
             if (event.type === "final_messages") {
+              incrementTeamChatPerfCounter("stream_event:final_messages", {
+                conversationId,
+                messageCount: event.messages.length,
+              });
               const runtimeSnapshot = event.runtimeSnapshot;
               if (runtimeSnapshot) {
                 receivedRuntimeSnapshot = true;
@@ -2980,21 +3300,25 @@ export function TeamClient({
                   );
                 }
               }
-              updateMessagesForConversation(conversationId, (current) => {
-                const optimisticAgent = current.find((message) => message.id === optimisticAgentMessage.id);
-                return [
-                  ...current.filter((message) => message.id !== optimisticMessage.id && message.id !== optimisticAgentMessage.id),
-                  ...event.messages.map((message) =>
-                    message.sender?.kind === "agent"
-                      ? {
-                          ...message,
-                          retrievalSources: event.retrievalSources ?? optimisticAgent?.retrievalSources,
-                          toolActivity: optimisticAgent?.toolActivity,
-                        }
-                      : message
-                  ),
-                ];
-              });
+              updateMessagesForConversation(
+                conversationId,
+                (current) => {
+                  const optimisticAgent = current.find((message) => message.id === optimisticAgentMessage.id);
+                  return [
+                    ...current.filter((message) => message.id !== optimisticMessage.id && message.id !== optimisticAgentMessage.id),
+                    ...event.messages.map((message) =>
+                      message.sender?.kind === "agent"
+                        ? {
+                            ...message,
+                            retrievalSources: event.retrievalSources ?? optimisticAgent?.retrievalSources,
+                            toolActivity: optimisticAgent?.toolActivity,
+                          }
+                        : message
+                    ),
+                  ];
+                },
+                "stream_final_messages"
+              );
             }
           }
         }
@@ -3020,29 +3344,44 @@ export function TeamClient({
         }
 
         if (data.messages) {
-          updateMessagesForConversation(conversationId, (current) => [
-            ...current.filter((message) => message.id !== optimisticMessage.id && message.id !== optimisticAgentMessage?.id),
-            ...data.messages.map((message: ChatMessage) =>
-              message.sender?.kind === "agent"
-                ? {
-                    ...message,
-                    retrievalSources: data.retrievalSources ?? [],
-                  }
-                : message
-            ),
-          ]);
+          updateMessagesForConversation(
+            conversationId,
+            (current) => [
+              ...current.filter((message) => message.id !== optimisticMessage.id && message.id !== optimisticAgentMessage?.id),
+              ...data.messages.map((message: ChatMessage) =>
+                message.sender?.kind === "agent"
+                  ? {
+                      ...message,
+                      retrievalSources: data.retrievalSources ?? [],
+                    }
+                  : message
+              ),
+            ],
+            "non_stream_send"
+          );
         }
       }
 
-      const conversationResponse = await fetch("/api/chat/conversations");
-      const conversationData = await conversationResponse.json();
-      if (conversationData.conversations) {
-        setConversations(conversationData.conversations);
+      const conversationResponse = await fetch("/api/chat/conversations", {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
+      const conversationData = await parseApiResponse(conversationResponse);
+      if (Array.isArray(conversationData.conversations)) {
+        incrementTeamChatPerfCounter("conversations_refresh:post_send", {
+          conversationId,
+          conversationCount: conversationData.conversations.length,
+        });
+        setConversations(conversationData.conversations as ConversationSummary[]);
       }
 
       if (isAgentConversation && (!receivedRuntimeSnapshot || !appliedRuntimeSnapshot)) {
+        incrementTeamChatPerfCounter("inspector_refresh:post_send", {
+          conversationId,
+        });
         fetch(`/api/chat/conversations/${conversationId}/inspect`, {
           headers: { Accept: "application/json" },
+          cache: "no-store",
         })
           .then(async (res) => ({
             status: res.status,
@@ -3067,12 +3406,15 @@ export function TeamClient({
           .catch(() => { });
       }
     } catch {
-      updateMessagesForConversation(conversationId, (current) =>
-        current.map((message) =>
-          message.id === optimisticMessage.id
-            ? { ...message, body: `${message.body}\n\n(Delivery pending)` }
-            : message
-        )
+      updateMessagesForConversation(
+        conversationId,
+        (current) =>
+          current.map((message) =>
+            message.id === optimisticMessage.id
+              ? { ...message, body: `${message.body}\n\n(Delivery pending)` }
+              : message
+          ),
+        "delivery_pending"
       );
     } finally {
       setSending(false);
@@ -3089,9 +3431,18 @@ export function TeamClient({
     if (!conversationId) return;
 
     try {
+      incrementTeamChatPerfCounter("messages_fetch:refresh", {
+        conversationId,
+      });
       const [messagesResponse, conversationsResponse] = await Promise.all([
-        fetch(`/api/chat/conversations/${conversationId}/messages`),
-        fetch("/api/chat/conversations"),
+        fetch(`/api/chat/conversations/${conversationId}/messages`, {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        }),
+        fetch("/api/chat/conversations", {
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+        }),
       ]);
       const [messagesData, conversationsData] = await Promise.all([
         parseApiResponse(messagesResponse),
@@ -3099,6 +3450,10 @@ export function TeamClient({
       ]);
 
       if (conversationsResponse.ok && Array.isArray(conversationsData.conversations)) {
+        incrementTeamChatPerfCounter("conversations_refresh:refresh", {
+          conversationId,
+          conversationCount: conversationsData.conversations.length,
+        });
         setConversations(conversationsData.conversations as ConversationSummary[]);
       }
 
@@ -3112,7 +3467,11 @@ export function TeamClient({
       }
 
       if (Array.isArray(messagesData.messages)) {
-        replaceMessagesForConversation(conversationId, messagesData.messages as ChatMessage[]);
+        replaceMessagesForConversation(
+          conversationId,
+          messagesData.messages as ChatMessage[],
+          "refresh"
+        );
       }
     } catch {
     }
@@ -3280,6 +3639,69 @@ export function TeamClient({
         ? "Initializing agent"
         : activeAgentInspector?.readiness.label || getAgentSidebarStatus(activeAgentParticipant.llmStatus).label
       : null;
+  useEffect(() => {
+    if (!activeConversationId) {
+      return;
+    }
+
+    incrementTeamChatPerfCounter("composer:input_change", {
+      conversationId: activeConversationId,
+      length: messageInput.length,
+      sending,
+      activeAgentSendBlocked,
+    });
+  }, [activeAgentSendBlocked, activeConversationId, messageInput, sending]);
+
+  useEffect(() => {
+    if (!threadDrawerToggleSpanRef.current) {
+      return;
+    }
+
+    let firstFrame = 0;
+    let secondFrame = 0;
+
+    firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        finishTeamChatPerfSpan(threadDrawerToggleSpanRef.current, {
+          open: threadDrawerOpen,
+          conversationId: activeConversationId,
+          messageCount: renderedMessages.length,
+          documentCount: activeConversation?.documents.length ?? 0,
+        });
+        threadDrawerToggleSpanRef.current = null;
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, [activeConversation?.documents.length, activeConversationId, renderedMessages.length, threadDrawerOpen]);
+
+  useEffect(() => {
+    if (!showContextInspector || !contextInspectorToggleSpanRef.current) {
+      return;
+    }
+
+    let firstFrame = 0;
+    let secondFrame = 0;
+
+    firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        finishTeamChatPerfSpan(contextInspectorToggleSpanRef.current, {
+          conversationId: activeConversationId,
+          resolvedSourceCount: activeAgentInspector?.context.resolvedSources.length ?? 0,
+          estimatedTokens: activeAgentInspector?.context.estimatedTokens ?? null,
+        });
+        contextInspectorToggleSpanRef.current = null;
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, [activeAgentInspector, activeConversationId, showContextInspector]);
   const clearThreadAvailable = Boolean(activeConversation?.type === "direct" && activeAgentParticipant);
   const activeConversationParticipantSummary = activeConversation
     ? getConversationParticipantSummary(activeConversation)
@@ -3336,6 +3758,22 @@ export function TeamClient({
     routeView,
     selectedConversationId,
   ]);
+  useTeamChatPerfCommit("TeamClient", {
+    activeConversationId,
+    selectedConversationId,
+    selectedProjectId,
+    routeView: routeView ?? null,
+    loadingMessages,
+    rawMessageCount: messages.length,
+    renderedMessageCount: renderedMessages.length,
+    messageInputLength: messageInput.length,
+    sending,
+    threadDrawerOpen,
+    contextInspectorOpen: showContextInspector,
+    agentInspectorLoading,
+    discoveryQueryLength: discoveryQuery.length,
+    activeDocumentCount: activeConversation?.documents.length ?? 0,
+  });
   const inspectorPrettyText = activeAgentInspector
     ? [
         `Agent: ${activeAgentInspector.agent.name} (${activeAgentInspector.agent.role})`,
@@ -3446,110 +3884,134 @@ export function TeamClient({
 
       <div className="flex-1 min-h-0 overflow-hidden md:rounded-[28px] border-t md:border border-[rgba(255,255,255,0.06)] bg-[radial-gradient(circle_at_top_left,rgba(247,148,29,0.08),transparent_28%),linear-gradient(180deg,#171717,#111111)] md:shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
         <div className={cn("grid h-full", sidebarCollapsed ? "md:grid-cols-[64px_minmax(0,1fr)]" : "md:grid-cols-[280px_minmax(0,1fr)]")}>
-            <ThreadRail
-              currentUserId={currentUserId}
-              members={members}
-              agents={agents}
-              pendingInvites={pendingInvites}
-              projects={chatProjects}
-              threadSections={threadSections}
-              groupConversations={groupConversations}
-              directConversationShortcutsByUserId={directConversationShortcutsByUserId}
-              directConversationShortcutsByAgentId={directConversationShortcutsByAgentId}
-              selectedConversationId={selectedConversationId}
-              selectedProjectId={selectedProjectId}
-              sidebarCollapsed={sidebarCollapsed}
-              onlineCount={onlineCount}
-              showThreadStarter={showThreadStarter}
-              openingDirectId={openingDirectId}
-              hasActiveConversation={hasMainPaneSelection}
-              onOpenInvite={() => setShowInvite(true)}
-              onOpenSearch={openSearchDiscovery}
-              onCollapseSidebar={() => setSidebarCollapsed(true)}
-              onExpandSidebar={() => setSidebarCollapsed(false)}
-              onOpenNewThreadModal={() => openNewThreadComposer(null)}
-              onSelectConversation={openConversationFromRail}
-              onSelectProject={openProjectSummary}
-              onOpenUserShortcut={(userId) => openDirectShortcut({ userId })}
-              onOpenAgentShortcut={(agentId) => openDirectShortcut({ agentId })}
-              onCreateProject={(name) => createChatProject(name)}
-              onRenameProject={(projectId, name) => renameChatProject(projectId, name)}
-              onDeleteProject={(projectId) => deleteChatProject(projectId)}
-              onRenameThread={async (conversationId, name) => {
-                await renameConversationById(conversationId, name);
+            <TeamChatPerfBoundary
+              id="ThreadRail"
+              detail={{
+                selectedConversationId,
+                selectedProjectId,
+                sidebarCollapsed,
+                activeConversationId,
+                messageInputLength: messageInput.length,
+                threadSectionCount: threadSections.length,
               }}
-              onMoveThread={async (conversationId, projectId) => {
-                await moveConversationToProjectById(conversationId, projectId);
-              }}
-              onArchiveThread={async (conversationId) => {
-                await archiveConversationById(conversationId);
-              }}
-              onDeleteThread={async (conversationId) => {
-                await deleteConversationById(conversationId);
-              }}
-              archivedThreadCount={archivedConversationsLoaded ? archivedConversations.length : null}
-              archivedViewActive={showArchivedView}
-              onOpenArchived={openArchivedThreads}
-            />
+            >
+              <ThreadRail
+                currentUserId={currentUserId}
+                members={members}
+                agents={agents}
+                pendingInvites={pendingInvites}
+                projects={chatProjects}
+                threadSections={threadSections}
+                groupConversations={groupConversations}
+                directConversationShortcutsByUserId={directConversationShortcutsByUserId}
+                directConversationShortcutsByAgentId={directConversationShortcutsByAgentId}
+                selectedConversationId={selectedConversationId}
+                selectedProjectId={selectedProjectId}
+                sidebarCollapsed={sidebarCollapsed}
+                onlineCount={onlineCount}
+                showThreadStarter={showThreadStarter}
+                openingDirectId={openingDirectId}
+                hasActiveConversation={hasMainPaneSelection}
+                onOpenInvite={() => setShowInvite(true)}
+                onOpenSearch={openSearchDiscovery}
+                onCollapseSidebar={() => setSidebarCollapsed(true)}
+                onExpandSidebar={() => setSidebarCollapsed(false)}
+                onOpenNewThreadModal={() => openNewThreadComposer(null)}
+                onSelectConversation={openConversationFromRail}
+                onSelectProject={openProjectSummary}
+                onOpenUserShortcut={(userId) => openDirectShortcut({ userId })}
+                onOpenAgentShortcut={(agentId) => openDirectShortcut({ agentId })}
+                onCreateProject={(name) => createChatProject(name)}
+                onRenameProject={(projectId, name) => renameChatProject(projectId, name)}
+                onDeleteProject={(projectId) => deleteChatProject(projectId)}
+                onRenameThread={async (conversationId, name) => {
+                  await renameConversationById(conversationId, name);
+                }}
+                onMoveThread={async (conversationId, projectId) => {
+                  await moveConversationToProjectById(conversationId, projectId);
+                }}
+                onArchiveThread={async (conversationId) => {
+                  await archiveConversationById(conversationId);
+                }}
+                onDeleteThread={async (conversationId) => {
+                  await deleteConversationById(conversationId);
+                }}
+                archivedThreadCount={archivedConversationsLoaded ? archivedConversations.length : null}
+                archivedViewActive={showArchivedView}
+                onOpenArchived={openArchivedThreads}
+              />
+            </TeamChatPerfBoundary>
 
             {activeConversation ? (
-              <ConversationPane
-                currentUserId={currentUserId}
-                activeConversation={activeConversation}
-                activeConversationParticipantSummary={activeConversationParticipantSummary}
-                activeConversationWorkspaceLabel={activeConversationWorkspaceLabel}
-                activeConversationTimestamp={activeConversationTimestamp}
-                activePartner={activePartner}
-                activeAgentParticipant={activeAgentParticipant}
-                threadDrawerOpen={threadDrawerOpen}
-                threadOriginLabel={activeThreadOriginLabel}
-                loadingMessages={loadingMessages}
-                rawMessageCount={messages.length}
-                renderedMessages={renderedMessages}
-                messageInput={messageInput}
-                sending={sending}
-                editingMessageId={editingMessageId}
-                editingDraft={editingDraft}
-                savingMessageId={savingMessageId}
-                deletingMessageId={deletingMessageId}
-                copiedMessageId={copiedMessageId}
-                chatScrollRef={chatScrollRef}
-                bottomRef={bottomRef}
-                threadDocumentUploads={activeThreadDocumentUploads}
-                threadDocumentError={threadDocumentError}
-                activeAgentReady={activeAgentReady}
-                activeAgentSendBlocked={activeAgentSendBlocked}
-                activeAgentBootstrapPending={activeAgentBootstrapPending}
-                agentInspector={activeAgentInspector}
-                agentInspectorError={activeAgentInspectorError}
-                onBack={closeActiveConversation}
-                onOpenThreadTarget={() => {
-                  if (!activePartner) return;
-                  router.push(
-                    activePartner.kind === "agent"
-                      ? `/agents/${activePartner.id}/profile`
-                      : `/profile/${activePartner.id}`
-                  );
+              <TeamChatPerfBoundary
+                id="ConversationPane"
+                detail={{
+                  activeConversationId,
+                  rawMessageCount: messages.length,
+                  renderedMessageCount: renderedMessages.length,
+                  messageInputLength: messageInput.length,
+                  threadDrawerOpen,
+                  loadingMessages,
                 }}
-                onOpenActiveAgentProfile={() => {
-                  if (!activeAgentParticipant) return;
-                  router.push(`/agents/${activeAgentParticipant.id}/profile`);
-                }}
-                onToggleDrawer={() => setThreadDrawerOpen((current) => !current)}
-                onEngageConversationArea={handleEngageConversationArea}
-                onHandleChatScroll={handleChatScroll}
-                onChangeMessageInput={setMessageInput}
-                onUploadThreadDocuments={uploadThreadDocuments}
-                onSubmitMessage={handleSendMessage}
-                onSendMessage={sendCurrentMessage}
-                onChangeEditingDraft={setEditingDraft}
-                onCancelEditingMessage={cancelEditingMessage}
-                onSaveEditedMessage={saveEditedMessage}
-                onDismissThreadUpload={dismissThreadUpload}
-                onCopyMessage={(body, messageId) => void copyToClipboard(body, "message", messageId)}
-                onStartEditingMessage={startEditingMessage}
-                onDeleteMessage={deleteMessage}
-              />
+              >
+                <ConversationPane
+                  currentUserId={currentUserId}
+                  activeConversation={activeConversation}
+                  activeConversationParticipantSummary={activeConversationParticipantSummary}
+                  activeConversationWorkspaceLabel={activeConversationWorkspaceLabel}
+                  activeConversationTimestamp={activeConversationTimestamp}
+                  activePartner={activePartner}
+                  activeAgentParticipant={activeAgentParticipant}
+                  threadDrawerOpen={threadDrawerOpen}
+                  threadOriginLabel={activeThreadOriginLabel}
+                  loadingMessages={loadingMessages}
+                  rawMessageCount={messages.length}
+                  renderedMessages={renderedMessages}
+                  messageInput={messageInput}
+                  sending={sending}
+                  editingMessageId={editingMessageId}
+                  editingDraft={editingDraft}
+                  savingMessageId={savingMessageId}
+                  deletingMessageId={deletingMessageId}
+                  copiedMessageId={copiedMessageId}
+                  chatScrollRef={chatScrollRef}
+                  bottomRef={bottomRef}
+                  threadDocumentUploads={activeThreadDocumentUploads}
+                  threadDocumentError={threadDocumentError}
+                  activeAgentReady={activeAgentReady}
+                  activeAgentSendBlocked={activeAgentSendBlocked}
+                  activeAgentBootstrapPending={activeAgentBootstrapPending}
+                  agentInspector={activeAgentInspector}
+                  agentInspectorError={activeAgentInspectorError}
+                  onBack={closeActiveConversation}
+                  onOpenThreadTarget={() => {
+                    if (!activePartner) return;
+                    router.push(
+                      activePartner.kind === "agent"
+                        ? `/agents/${activePartner.id}/profile`
+                        : `/profile/${activePartner.id}`
+                    );
+                  }}
+                  onOpenActiveAgentProfile={() => {
+                    if (!activeAgentParticipant) return;
+                    router.push(`/agents/${activeAgentParticipant.id}/profile`);
+                  }}
+                  onToggleDrawer={toggleThreadDrawer}
+                  onEngageConversationArea={handleEngageConversationArea}
+                  onHandleChatScroll={handleChatScroll}
+                  onChangeMessageInput={setMessageInput}
+                  onUploadThreadDocuments={uploadThreadDocuments}
+                  onSubmitMessage={handleSendMessage}
+                  onSendMessage={sendCurrentMessage}
+                  onChangeEditingDraft={setEditingDraft}
+                  onCancelEditingMessage={cancelEditingMessage}
+                  onSaveEditedMessage={saveEditedMessage}
+                  onDismissThreadUpload={dismissThreadUpload}
+                  onCopyMessage={(body, messageId) => void copyToClipboard(body, "message", messageId)}
+                  onStartEditingMessage={startEditingMessage}
+                  onDeleteMessage={deleteMessage}
+                />
+              </TeamChatPerfBoundary>
             ) : showDiscoveryPane ? (
               <TeamDiscoveryPane
                 currentUserId={currentUserId}
@@ -3582,46 +4044,57 @@ export function TeamClient({
         </div>
       </div>
 
-      <ThreadDrawer
-        open={Boolean(activeConversation && threadDrawerOpen)}
-        conversation={activeConversation}
-        currentUserId={currentUserId}
-        messageCount={renderedMessages.length}
-        threadModelLabel={activeThreadModelLabel}
-        agentInspector={activeAgentInspector}
-        agentInspectorLoading={agentInspectorLoading}
-        agentInspectorError={activeAgentInspectorError}
-        activeAgentParticipant={activeAgentParticipant}
-        activeAgentStatusLabel={activeAgentStatusLabel}
-        activeAgentReady={activeAgentReady}
-        activeAgentBootstrapPending={activeAgentBootstrapPending}
-        clearThreadAvailable={clearThreadAvailable}
-        clearingConversation={clearingConversation}
-        participantActionError={participantActionError}
-        projectActionError={projectActionError}
-        switchingActiveAgentId={switchingActiveAgentId}
-        clearingActiveAgentPin={clearingActiveAgentPin}
-        removingParticipantId={removingParticipantId}
-        projects={chatProjects}
-        projectsLoading={chatProjectsLoading}
-        projectsError={chatProjectsError}
-        movingProject={movingProject}
-        threadDocumentUploads={activeThreadDocumentUploads}
-        threadDocumentError={threadDocumentError}
-        removingDocumentId={removingDocumentId}
-        onOpenAddParticipants={() => setShowAddParticipantsModal(true)}
-        onOpenInspector={() => setShowContextInspector(true)}
-        onOpenClearThread={() => setShowClearContextModal(true)}
-        onSwitchActiveAgent={(agentId) => void setActiveAgentForThread(agentId)}
-        onClearActiveAgentPin={() => void clearActiveAgentPinForThread()}
-        onRemoveParticipant={(participant) => void removeParticipantFromThread(participant)}
-        onMoveProject={moveThreadToProject}
-        onCreateProject={createChatProject}
-        onRenameThread={renameThread}
-        onRemoveThreadDocument={removeThreadDocument}
-        onDismissThreadUpload={dismissThreadUpload}
-        onClose={() => setThreadDrawerOpen(false)}
-      />
+      <TeamChatPerfBoundary
+        id="ThreadDrawer"
+        detail={{
+          open: Boolean(activeConversation && threadDrawerOpen),
+          activeConversationId,
+          renderedMessageCount: renderedMessages.length,
+          documentCount: activeConversation?.documents.length ?? 0,
+          uploadCount: activeThreadDocumentUploads.length,
+        }}
+      >
+        <ThreadDrawer
+          open={Boolean(activeConversation && threadDrawerOpen)}
+          conversation={activeConversation}
+          currentUserId={currentUserId}
+          messageCount={renderedMessages.length}
+          threadModelLabel={activeThreadModelLabel}
+          agentInspector={activeAgentInspector}
+          agentInspectorLoading={agentInspectorLoading}
+          agentInspectorError={activeAgentInspectorError}
+          activeAgentParticipant={activeAgentParticipant}
+          activeAgentStatusLabel={activeAgentStatusLabel}
+          activeAgentReady={activeAgentReady}
+          activeAgentBootstrapPending={activeAgentBootstrapPending}
+          clearThreadAvailable={clearThreadAvailable}
+          clearingConversation={clearingConversation}
+          participantActionError={participantActionError}
+          projectActionError={projectActionError}
+          switchingActiveAgentId={switchingActiveAgentId}
+          clearingActiveAgentPin={clearingActiveAgentPin}
+          removingParticipantId={removingParticipantId}
+          projects={chatProjects}
+          projectsLoading={chatProjectsLoading}
+          projectsError={chatProjectsError}
+          movingProject={movingProject}
+          threadDocumentUploads={activeThreadDocumentUploads}
+          threadDocumentError={threadDocumentError}
+          removingDocumentId={removingDocumentId}
+          onOpenAddParticipants={() => setShowAddParticipantsModal(true)}
+          onOpenInspector={openContextInspector}
+          onOpenClearThread={() => setShowClearContextModal(true)}
+          onSwitchActiveAgent={(agentId) => void setActiveAgentForThread(agentId)}
+          onClearActiveAgentPin={() => void clearActiveAgentPinForThread()}
+          onRemoveParticipant={(participant) => void removeParticipantFromThread(participant)}
+          onMoveProject={moveThreadToProject}
+          onCreateProject={createChatProject}
+          onRenameThread={renameThread}
+          onRemoveThreadDocument={removeThreadDocument}
+          onDismissThreadUpload={dismissThreadUpload}
+          onClose={closeThreadDrawer}
+        />
+      </TeamChatPerfBoundary>
 
       {showInvite ? (
         <InviteMemberDialog
@@ -3672,13 +4145,22 @@ export function TeamClient({
       ) : null}
 
       {showContextInspector && activeAgentInspector ? (
-        <ContextInspectorDialog
-          data={activeAgentInspector}
-          copiedView={copiedInspectorView}
-          onClose={() => setShowContextInspector(false)}
-          onCopyPretty={() => void copyToClipboard(inspectorPrettyText, "pretty")}
-          onCopyJson={() => void copyToClipboard(JSON.stringify(activeAgentInspector, null, 2), "json")}
-        />
+        <TeamChatPerfBoundary
+          id="ContextInspectorDialog"
+          detail={{
+            activeConversationId,
+            estimatedTokens: activeAgentInspector.context.estimatedTokens,
+            resolvedSourceCount: activeAgentInspector.context.resolvedSources.length,
+          }}
+        >
+          <ContextInspectorDialog
+            data={activeAgentInspector}
+            copiedView={copiedInspectorView}
+            onClose={closeContextInspector}
+            onCopyPretty={() => void copyToClipboard(inspectorPrettyText, "pretty")}
+            onCopyJson={() => void copyToClipboard(JSON.stringify(activeAgentInspector, null, 2), "json")}
+          />
+        </TeamChatPerfBoundary>
       ) : null}
     </div>
   );
