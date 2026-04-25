@@ -21,7 +21,9 @@ import {
   CHAT_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS,
   CHAT_THREAD_DOCUMENT_CONTEXT_CHARS,
 } from "./chat-runtime-budgets";
+import { buildConversationContextDebugTrace } from "./context-debug-trace";
 import { joinMarkdownSections } from "./context-formatting";
+import type { ContextDebugTrace } from "./context-seams";
 import { prisma } from "./prisma";
 
 export type ConversationContextSourceStatus = "used" | "unsupported" | "failed" | "unavailable";
@@ -179,6 +181,7 @@ export type ConversationContextBundle = {
   sourceSelection: ConversationContextSourceSelection;
   sourceDecisions: ConversationContextSourceDecision[];
   documentChunking: ConversationContextDocumentChunkingDebug;
+  debugTrace?: ContextDebugTrace | null;
 };
 
 export type ConversationContextDocumentChunkingDocument = {
@@ -2336,7 +2339,7 @@ export async function resolveConversationContextBundle(params: {
     })
   );
 
-  return {
+  const bundle = {
     text: joinMarkdownSections([
       sections.length > 0
         ? joinMarkdownSections([
@@ -2364,5 +2367,15 @@ export async function resolveConversationContextBundle(params: {
       strategy: DEFAULT_DOCUMENT_CHUNK_STRATEGY,
       documents: documentChunkingDocuments,
     },
+  };
+
+  return {
+    ...bundle,
+    debugTrace: buildConversationContextDebugTrace({
+      conversationId: params.conversationId,
+      authority: params.authority,
+      currentUserPrompt: params.currentUserPrompt ?? null,
+      bundle,
+    }),
   };
 }

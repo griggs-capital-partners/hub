@@ -294,6 +294,28 @@ await runTest("uses supported thread documents and preserves the higher-authorit
   assert.ok(bundle.text.indexOf("Recent thread messages") < bundle.text.indexOf("## Thread Document: notes.md"));
 });
 
+await runTest("adds a parallel debug trace without changing the resolver-owned document chunking payload", async () => {
+  const bundle = await resolveConversationContextBundle(
+    { conversationId: "thread-1", currentUserPrompt: "Summarize the cooling loop note." },
+    {
+      listDocuments: async () => [makeDocument()],
+      readTextFile: async () => "# Incident Notes\n\nKeep the cooling loop under 60 psi.",
+    }
+  );
+
+  assert.ok(bundle.debugTrace);
+  assert.equal(bundle.debugTrace.conversationId, "thread-1");
+  assert.equal(bundle.debugTrace.documents.length, bundle.documentChunking.documents.length);
+  assert.deepEqual(
+    bundle.debugTrace.documents[0]?.selectedChunkIds,
+    bundle.documentChunking.documents[0]?.selectedChunkIndexes.map(
+      (chunkIndex) => `${bundle.documentChunking.documents[0]?.sourceId}:${chunkIndex}`
+    )
+  );
+  assert.equal(bundle.debugTrace.renderedContext.text, null);
+  assert.match(bundle.text, /Keep the cooling loop under 60 psi\./);
+});
+
 await runTest("accepts core image attachments in upload metadata", async () => {
   assert.match(CONVERSATION_DOCUMENT_ACCEPT, /\.png/);
   assert.match(CONVERSATION_DOCUMENT_ACCEPT, /\.jpg/);
