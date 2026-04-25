@@ -7,6 +7,23 @@ export async function GET() {
   const session = await auth();
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+  const existingRepos = await prisma.repo.findMany({
+    orderBy: [
+      { connected: "desc" },
+      { pushedAt: "desc" },
+      { name: "asc" }
+    ],
+  });
+
+  if (!process.env.GITHUB_TOKEN?.trim()) {
+    return NextResponse.json({
+      repos: existingRepos,
+      synced: 0,
+      disabled: true,
+      reason: "GitHub sync is not configured for this workspace.",
+    });
+  }
+
   let repos;
   try {
     repos = await getOrgRepos();
@@ -15,9 +32,6 @@ export async function GET() {
     return NextResponse.json({ error: message }, { status: 500 });
   }
 
-  const existingRepos = await prisma.repo.findMany({
-    select: { githubId: true },
-  });
   const existingIds = new Set(existingRepos.map((repo) => repo.githubId));
 
   // Refresh metadata only for repos that already exist in the workspace DB.

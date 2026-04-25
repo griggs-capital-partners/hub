@@ -1,0 +1,197 @@
+import type {
+  AgentLlmConnectionProtocol,
+  AgentLlmProvider,
+} from "./agent-llm-config";
+import { type ContextBudgetMode } from "./context-token-budget";
+import { CHAT_REPLY_MAX_OUTPUT_TOKENS } from "./chat-runtime-budgets";
+
+type BudgetProfileProvider = AgentLlmProvider | "unknown";
+
+export type ModelBudgetProfileLookup = {
+  provider?: string | null;
+  protocol?: string | null;
+  model?: string | null;
+};
+
+export type ModelBudgetProfile = {
+  id: string;
+  label: string;
+  matchDescription: string;
+  providers?: BudgetProfileProvider[];
+  protocols?: AgentLlmConnectionProtocol[];
+  modelPattern?: RegExp;
+  maxContextTokens: number;
+  maxOutputTokens: number;
+  reservedSystemPromptTokens: number;
+  reservedResponseTokens: number;
+  standardContextBudgetTokens: number;
+  deepContextBudgetTokens: number;
+  notes: string;
+};
+
+function normalizeProvider(value: string | null | undefined): BudgetProfileProvider {
+  if (value === "local" || value === "openai" || value === "anthropic" || value === "bedrock") {
+    return value;
+  }
+
+  return "unknown";
+}
+
+function normalizeProtocol(value: string | null | undefined) {
+  if (value === "auto" || value === "ollama" || value === "openai-compatible") {
+    return value;
+  }
+
+  return null;
+}
+
+function normalizeModel(value: string | null | undefined) {
+  return value?.trim().toLowerCase() ?? "";
+}
+
+function buildProfile(
+  profile: Omit<ModelBudgetProfile, "maxOutputTokens" | "reservedResponseTokens"> & {
+    maxOutputTokens?: number;
+    reservedResponseTokens?: number;
+  }
+) {
+  return {
+    ...profile,
+    maxOutputTokens: profile.maxOutputTokens ?? CHAT_REPLY_MAX_OUTPUT_TOKENS,
+    reservedResponseTokens:
+      profile.reservedResponseTokens ?? profile.maxOutputTokens ?? CHAT_REPLY_MAX_OUTPUT_TOKENS,
+  } satisfies ModelBudgetProfile;
+}
+
+export const MODEL_BUDGET_PROFILES = [
+  buildProfile({
+    id: "bedrock-anthropic-style-conservative",
+    label: "Bedrock Anthropic-style conservative profile",
+    matchDescription: "provider=bedrock",
+    providers: ["bedrock"],
+    maxContextTokens: 32_768,
+    reservedSystemPromptTokens: 4_096,
+    standardContextBudgetTokens: 12_000,
+    deepContextBudgetTokens: 20_000,
+    notes:
+      "Current Bedrock runtime uses the Converse API with Anthropic-style message shaping. Budgets stay conservative until exact per-model tokenizer support is wired.",
+  }),
+  buildProfile({
+    id: "anthropic-direct-conservative",
+    label: "Anthropic direct conservative profile",
+    matchDescription: "provider=anthropic",
+    providers: ["anthropic"],
+    maxContextTokens: 32_768,
+    reservedSystemPromptTokens: 4_096,
+    standardContextBudgetTokens: 12_000,
+    deepContextBudgetTokens: 20_000,
+    notes:
+      "Direct Anthropic calls can support larger windows, but this profile intentionally stays below the largest documented limits so A-03a remains safe and reversible.",
+  }),
+  buildProfile({
+    id: "openai-direct-chat-conservative",
+    label: "OpenAI chat completions conservative profile",
+    matchDescription: "provider=openai",
+    providers: ["openai"],
+    maxContextTokens: 16_384,
+    reservedSystemPromptTokens: 2_048,
+    standardContextBudgetTokens: 6_000,
+    deepContextBudgetTokens: 8_000,
+    notes:
+      "Used for the direct OpenAI chat-completions path. Limits are conservative because exact per-model context windows vary by selected model.",
+  }),
+  buildProfile({
+    id: "openai-compatible-chat-conservative",
+    label: "OpenAI-compatible chat conservative profile",
+    matchDescription: "protocol=openai-compatible",
+    protocols: ["openai-compatible"],
+    maxContextTokens: 16_384,
+    reservedSystemPromptTokens: 2_048,
+    standardContextBudgetTokens: 6_000,
+    deepContextBudgetTokens: 8_000,
+    notes:
+      "Used for custom endpoints speaking the chat-completions protocol. Budgets stay below common 16K-class windows because exact backend limits are not discoverable yet.",
+  }),
+  buildProfile({
+    id: "fallback-default-conservative",
+    label: "Fallback default conservative profile",
+    matchDescription: "provider=local|unknown fallback",
+    providers: ["local", "unknown"],
+    maxContextTokens: 8_192,
+    reservedSystemPromptTokens: 1_024,
+    standardContextBudgetTokens: 1_500,
+    deepContextBudgetTokens: 2_500,
+    notes:
+      "Fallback for unresolved or local custom runtimes where the real context window is unknown. This is intentionally small to prevent uncontrolled prompt growth.",
+  }),
+] as const satisfies ReadonlyArray<ModelBudgetProfile>;
+
+export const DEFAULT_MODEL_BUDGET_PROFILE =
+  MODEL_BUDGET_PROFILES[MODEL_BUDGET_PROFILES.length - 1];
+
+function matchesProfile(
+  profile: ModelBudgetProfile,
+  lookup: Required<Pick<ModelBudgetProfileLookup, "provider" | "protocol" | "model">>
+) {
+  const provider = normalizeProvider(lookup.provider);
+  const protocol = normalizeProtocol(lookup.protocol);
+  const model = normalizeModel(lookup.model);
+
+  if (profile.providers && !profile.providers.includes(provider)) {
+    return false;
+  }
+
+  if (profile.protocols && (!protocol || !profile.protocols.includes(protocol))) {
+    return false;
+  }
+
+  if (profile.modelPattern && !profile.modelPattern.test(model)) {
+    return false;
+  }
+
+  return true;
+}
+
+export function resolveModelBudgetProfile(
+  lookup: ModelBudgetProfileLookup
+): ModelBudgetProfile {
+  const normalizedLookup = {
+    provider: lookup.provider ?? null,
+    protocol: lookup.protocol ?? null,
+    model: lookup.model ?? null,
+  };
+
+  return (
+    MODEL_BUDGET_PROFILES.find((profile) => matchesProfile(profile, normalizedLookup)) ??
+    DEFAULT_MODEL_BUDGET_PROFILE
+  );
+}
+
+export function resolveContextBudgetTokens(
+  profile: ModelBudgetProfile,
+  mode: ContextBudgetMode = "standard"
+) {
+  const requestedBudget =
+    mode === "deep" ? profile.deepContextBudgetTokens : profile.standardContextBudgetTokens;
+  const safeCeiling = Math.max(
+    0,
+    profile.maxContextTokens -
+      profile.reservedSystemPromptTokens -
+      profile.reservedResponseTokens
+  );
+
+  return Math.min(requestedBudget, safeCeiling);
+}
+
+export function resolveModelContextBudget(params: {
+  lookup: ModelBudgetProfileLookup;
+  mode?: ContextBudgetMode;
+}) {
+  const profile = resolveModelBudgetProfile(params.lookup);
+
+  return {
+    profile,
+    mode: params.mode ?? "standard",
+    contextBudgetTokens: resolveContextBudgetTokens(profile, params.mode),
+  };
+}

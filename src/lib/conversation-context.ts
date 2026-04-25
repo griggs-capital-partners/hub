@@ -4,9 +4,24 @@ import mammoth from "mammoth";
 import { parseOffice, type OfficeContentNode, type SlideMetadata } from "officeparser";
 import * as XLSX from "xlsx";
 import {
+  buildDocumentChunkCandidates,
+  DEFAULT_DOCUMENT_CHUNK_STRATEGY,
+  DEFAULT_DOCUMENT_CHUNK_RANKING_STRATEGY,
+  rankDocumentChunks,
+  selectDocumentChunksInOrder,
+  type ContextDocumentChunk,
+  type ContextDocumentChunkRankingFallbackReason,
+  type ContextDocumentChunkRankingResult,
+  type ContextDocumentChunkRankingStrategy,
+  type ContextDocumentChunkSelectionMode,
+  type ContextDocumentChunkSelectionResult,
+  type ContextDocumentChunkSourceType,
+} from "./context-document-chunks";
+import {
   CHAT_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS,
   CHAT_THREAD_DOCUMENT_CONTEXT_CHARS,
 } from "./chat-runtime-budgets";
+import { joinMarkdownSections } from "./context-formatting";
 import { prisma } from "./prisma";
 
 export type ConversationContextSourceStatus = "used" | "unsupported" | "failed" | "unavailable";
@@ -163,7 +178,91 @@ export type ConversationContextBundle = {
   summarySources: ConversationContextSummarySource[];
   sourceSelection: ConversationContextSourceSelection;
   sourceDecisions: ConversationContextSourceDecision[];
+  documentChunking: ConversationContextDocumentChunkingDebug;
 };
+
+export type ConversationContextDocumentChunkingDocument = {
+  sourceId: string;
+  attachmentId: string;
+  fileId: string;
+  filename: string;
+  sourceType: string;
+  parentSourceStatus: ConversationContextSourceStatus;
+  extractionStatus: "unsupported" | "failed" | "unavailable" | "extracted";
+  totalChunks: number;
+  selectedChunkIndexes: number[];
+  skippedChunkIndexes: number[];
+  selectedApproxTokenCount: number;
+  totalApproxTokenCount: number;
+  selectedCharCount: number;
+  totalCharCount: number;
+  selectionMode: ContextDocumentChunkSelectionMode | null;
+  usedBudgetClamp: boolean;
+  coverageSelectionApplied: boolean;
+  rankingEnabled: boolean;
+  rankingQueryTokenCount: number;
+  rankingStrategy: ContextDocumentChunkRankingStrategy | null;
+  rankingFallbackReason: ContextDocumentChunkRankingFallbackReason;
+  occurrenceIntentDetected: boolean;
+  occurrenceTargetPhrase: string | null;
+  chunkCharRanges: Array<{
+    chunkIndex: number;
+    charStart: number;
+    charEnd: number;
+    approxTokenCount: number;
+    textPreview: string;
+    safeProvenanceLabel: string;
+    sectionLabel: string | null;
+    sectionPath: string[];
+    sourceBodyLocationLabel: string;
+    referencedLocationLabels: string[];
+    sheetName: string | null;
+    slideNumber: number | null;
+    rankingScore: number;
+    rankingSignals: string[];
+    rankingOrder: number;
+    exactPhraseMatchCount: number;
+    definitionBoostApplied: boolean;
+    coverageGroupKey: string | null;
+    selectedDueToCoverage: boolean;
+  }>;
+};
+
+export type ConversationContextDocumentChunkingDebug = {
+  strategy: string;
+  documents: ConversationContextDocumentChunkingDocument[];
+};
+
+function buildThreadDocumentSourceBodyLocationLabel(params: {
+  filename: string;
+  chunk: Pick<ContextDocumentChunk, "sectionPath" | "sectionLabel" | "safeProvenanceLabel">;
+}) {
+  const sectionPath = Array.from(
+    new Set(
+      (params.chunk.sectionPath ?? []).filter(
+        (entry): entry is string => typeof entry === "string" && entry.trim().length > 0
+      )
+    )
+  );
+  if (sectionPath.length > 0) {
+    return [params.filename, ...sectionPath].join(" — ");
+  }
+
+  if (params.chunk.sectionLabel?.trim()) {
+    return [params.filename, params.chunk.sectionLabel.trim()].join(" — ");
+  }
+
+  return `${params.filename} — location unclear in excerpt provenance`;
+}
+
+function buildChunkTextPreview(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 80) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, 77)}...`;
+}
 
 type ConversationContextDocumentRecord = {
   id: string;
@@ -395,12 +494,15 @@ function buildExtractionFailureDetail(contextKind: "pdf" | "docx" | "pptx" | "sp
     : "Attached to this thread, but the DOCX parser failed before usable text could be extracted.";
 }
 
-function buildUsedThreadDocumentDetail(charCount: number, truncated: boolean) {
-  const readableChars = charCount.toLocaleString("en-US");
+function buildUsedThreadDocumentDetail(params: {
+  charCount: number;
+  fullyIncluded: boolean;
+}) {
+  const readableChars = params.charCount.toLocaleString("en-US");
 
-  return truncated
-    ? `Read ${readableChars} readable characters from this thread attachment and truncated it to fit the active runtime context budget.`
-    : `Read ${readableChars} readable characters from this thread attachment and included it in the active runtime context.`;
+  return params.fullyIncluded
+    ? `Read ${readableChars} readable characters from this thread attachment and included the extracted text in the active runtime context.`
+    : `Read ${readableChars} readable characters from this thread attachment and included selected excerpts in the active runtime context to stay within the thread-document context budget.`;
 }
 
 function normalizeDocumentText(value: string) {
@@ -903,20 +1005,19 @@ function parseSpreadsheetWorkbook(
   });
 }
 
-function truncateDocumentText(value: string, max = MAX_THREAD_DOCUMENT_CONTEXT_CHARS) {
-  if (value.length <= max) return value;
-
-  const suffix = `\n... [truncated ${value.length - Math.max(0, max - 32)} chars]`;
-  if (suffix.length >= max) {
-    return value.slice(0, max);
-  }
-
-  const sliceLength = max - suffix.length;
-  return `${value.slice(0, sliceLength)}\n... [truncated ${value.length - sliceLength} chars]`;
-}
-
 function resolveExtension(filename: string) {
   return filename.trim().split(".").pop()?.toLowerCase() ?? "";
+}
+
+function resolveDocumentChunkSourceType(
+  document: Pick<ConversationContextDocumentRecord, "filename">,
+  contextKind: "text" | "pdf" | "docx" | "pptx" | "spreadsheet"
+): ContextDocumentChunkSourceType {
+  if (contextKind !== "text") {
+    return contextKind;
+  }
+
+  return resolveExtension(document.filename) === "md" ? "markdown" : "text";
 }
 
 function isUploadPath(storagePath: string) {
@@ -1260,6 +1361,143 @@ function buildContextSource(
     domain: "thread_documents",
     scope: "thread",
   };
+}
+
+function buildThreadDocumentChunkingDebugDocument(params: {
+  document: Pick<ConversationContextDocumentRecord, "id" | "filename" | "fileType">;
+  sourceType: string;
+  parentSourceStatus: ConversationContextSourceStatus;
+  extractionStatus: ConversationContextDocumentChunkingDocument["extractionStatus"];
+  chunks?: ContextDocumentChunk[];
+  ranking?: ContextDocumentChunkRankingResult | null;
+  selection?: ContextDocumentChunkSelectionResult | null;
+}): ConversationContextDocumentChunkingDocument {
+  const chunks = params.chunks ?? [];
+  const ranking = params.ranking ?? null;
+  const selection = params.selection ?? null;
+  const rankingDetails = new Map(
+    (ranking?.details ?? []).map((detail) => [
+      `${detail.sourceId}:${detail.chunkIndex}`,
+      detail,
+    ])
+  );
+  const selectedDueToCoverageChunkKeys = new Set(
+    selection?.selectedDueToCoverageChunkKeys ?? []
+  );
+
+  return {
+    sourceId: params.document.id,
+    attachmentId: params.document.id,
+    fileId: params.document.id,
+    filename: params.document.filename,
+    sourceType: params.sourceType || params.document.fileType || "unknown",
+    parentSourceStatus: params.parentSourceStatus,
+    extractionStatus: params.extractionStatus,
+    totalChunks: chunks.length,
+    selectedChunkIndexes: selection?.selectedChunks.map((chunk) => chunk.chunkIndex) ?? [],
+    skippedChunkIndexes: selection?.skippedChunks.map((chunk) => chunk.chunkIndex) ?? [],
+    selectedApproxTokenCount: selection?.selectedApproxTokenCount ?? 0,
+    totalApproxTokenCount:
+      selection?.totalApproxTokenCount ??
+      chunks.reduce((sum, chunk) => sum + chunk.approxTokenCount, 0),
+    selectedCharCount: selection?.selectedCharCount ?? 0,
+    totalCharCount:
+      selection?.totalCharCount ?? chunks.reduce((sum, chunk) => sum + chunk.text.length, 0),
+    selectionMode: selection?.selectionMode ?? null,
+    usedBudgetClamp: selection?.usedBudgetClamp ?? false,
+    coverageSelectionApplied: selection?.coverageSelectionApplied ?? false,
+    rankingEnabled: ranking?.rankingEnabled ?? false,
+    rankingQueryTokenCount: ranking?.queryTokenCount ?? 0,
+    rankingStrategy: ranking?.rankingStrategy ?? DEFAULT_DOCUMENT_CHUNK_RANKING_STRATEGY,
+    rankingFallbackReason: ranking?.fallbackReason ?? null,
+    occurrenceIntentDetected: ranking?.occurrenceIntentDetected ?? false,
+    occurrenceTargetPhrase: ranking?.occurrenceTargetPhrase ?? null,
+    chunkCharRanges: chunks.map((chunk) => {
+      const rankingDetail = rankingDetails.get(`${chunk.sourceId}:${chunk.chunkIndex}`);
+
+      return {
+        chunkIndex: chunk.chunkIndex,
+        charStart: chunk.charStart,
+        charEnd: chunk.charEnd,
+        approxTokenCount: chunk.approxTokenCount,
+        textPreview: buildChunkTextPreview(chunk.text),
+        safeProvenanceLabel: chunk.safeProvenanceLabel,
+        sectionLabel: chunk.sectionLabel,
+        sectionPath: (chunk.sectionPath ?? []).filter(
+          (entry): entry is string => typeof entry === "string" && entry.trim().length > 0
+        ),
+        sourceBodyLocationLabel: buildThreadDocumentSourceBodyLocationLabel({
+          filename: params.document.filename,
+          chunk,
+        }),
+        referencedLocationLabels: chunk.referencedLocationLabels,
+        sheetName: chunk.sheetName,
+        slideNumber: chunk.slideNumber,
+        rankingScore: rankingDetail?.score ?? 0,
+        rankingSignals: rankingDetail?.signalLabels ?? [],
+        rankingOrder: rankingDetail?.rankingOrder ?? chunk.chunkIndex,
+        exactPhraseMatchCount: rankingDetail?.exactPhraseMatchCount ?? 0,
+        definitionBoostApplied: rankingDetail?.definitionBoostApplied ?? false,
+        coverageGroupKey: rankingDetail?.coverageGroupKey ?? null,
+        selectedDueToCoverage: selectedDueToCoverageChunkKeys.has(
+          `${chunk.sourceId}:${chunk.chunkIndex}`
+        ),
+      };
+    }),
+  };
+}
+
+function buildThreadDocumentSection(params: {
+  filename: string;
+  selection: ContextDocumentChunkSelectionResult;
+  ranking?: ContextDocumentChunkRankingResult | null;
+}) {
+  const displayChunks = [...params.selection.selectedChunks].sort(
+    (left, right) => left.charStart - right.charStart || left.chunkIndex - right.chunkIndex
+  );
+  const occurrenceListingHint =
+    params.ranking?.occurrenceIntentDetected && params.ranking.occurrenceTargetPhrase
+      ? `For this occurrence/listing request, answer as a list of SOURCE BODY LOCATION labels where "${params.ranking.occurrenceTargetPhrase}" appears. Use the provided SOURCE BODY LOCATION labels only. Do not substitute referenced exhibits, schedules, articles, or sections as locations.`
+      : params.ranking?.occurrenceIntentDetected
+        ? "For this occurrence/listing request, answer as a list of SOURCE BODY LOCATION labels where the requested term appears. Use the provided SOURCE BODY LOCATION labels only. Do not substitute referenced exhibits, schedules, articles, or sections as locations."
+        : null;
+
+  if (
+    params.selection.selectedChunks.length === 1 &&
+    params.selection.skippedChunks.length === 0 &&
+    !params.selection.usedBudgetClamp
+  ) {
+    return joinMarkdownSections([
+      `## Thread Document: ${params.filename}`,
+      displayChunks[0]?.text ?? "",
+    ]);
+  }
+
+  return joinMarkdownSections([
+    `## Thread Document: ${params.filename}`,
+    "Selected excerpts from this attachment are included below in document order. Use the excerpt provenance labels for exact article, section, exhibit, or schedule references. Treat each provenance header as the body location where the excerpt appears; references mentioned inside the excerpt do not change that location.",
+    occurrenceListingHint,
+    ...displayChunks.map((chunk) =>
+      joinMarkdownSections([
+        `### Excerpt ${chunk.chunkIndex + 1}`,
+        `SOURCE BODY LOCATION: ${buildThreadDocumentSourceBodyLocationLabel({
+          filename: params.filename,
+          chunk,
+        })}`,
+        chunk.referencedLocationLabels.length > 0
+          ? `REFERENCES MENTIONED IN TEXT (referenced only; not the body location): ${chunk.referencedLocationLabels.join(", ")}`
+          : null,
+        chunk.sectionPath.length === 0
+          ? `EXCERPT PROVENANCE NOTE: ${chunk.safeProvenanceLabel}`
+          : null,
+        "TEXT:",
+        chunk.text,
+      ])
+    ),
+    params.selection.skippedChunks.length > 0
+      ? `... [${params.selection.skippedChunks.length} additional chunk candidates not included in this runtime]`
+      : null,
+  ]);
 }
 
 type ConversationContextRequestedSource = {
@@ -1765,6 +2003,7 @@ export async function resolveConversationContextBundle(params: {
   conversationId: string;
   authority: ConversationContextSourceAuthority;
   sourcePlan?: ConversationContextAcquisitionPlan | null;
+  currentUserPrompt?: string | null;
 }, dependencies: ConversationContextResolverDependencies = {}): Promise<ConversationContextBundle> {
   const listDocuments = dependencies.listDocuments ?? (async (conversationId: string) => prisma.conversationDocument.findMany({
     where: { conversationId },
@@ -1802,6 +2041,7 @@ export async function resolveConversationContextBundle(params: {
   const sources: ConversationContextSource[] = [];
   const sections: string[] = [];
   const availabilityNotes: string[] = [];
+  const documentChunkingDocuments: ConversationContextDocumentChunkingDocument[] = [];
   let remainingDocumentChars = MAX_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS;
   let usedCount = 0;
   let unsupportedCount = 0;
@@ -1809,7 +2049,7 @@ export async function resolveConversationContextBundle(params: {
   let unavailableCount = 0;
   const threadDocumentExcludedCategories = new Set<ConversationContextSourceExclusionCategory>();
 
-  for (const document of documents) {
+  for (const [documentIndex, document] of documents.entries()) {
     const contextKind = resolveThreadDocumentContextKind(document);
 
     if (!contextKind) {
@@ -1818,6 +2058,14 @@ export async function resolveConversationContextBundle(params: {
       const detail = `Attached to this thread, but thread-document context currently supports only ${THREAD_DOCUMENT_SUPPORT_DETAIL}.`;
       availabilityNotes.push(`- ${document.filename}: ${detail}`);
       sources.push(buildContextSource("unsupported", document.filename, detail));
+      documentChunkingDocuments.push(
+        buildThreadDocumentChunkingDebugDocument({
+          document,
+          sourceType: document.fileType || "unknown",
+          parentSourceStatus: "unsupported",
+          extractionStatus: "unsupported",
+        })
+      );
       continue;
     }
 
@@ -1826,6 +2074,14 @@ export async function resolveConversationContextBundle(params: {
       const detail = "Attached to this thread, but the stored file path is invalid and could not be loaded safely.";
       availabilityNotes.push(`- ${document.filename}: ${detail}`);
       sources.push(buildContextSource("failed", document.filename, detail));
+      documentChunkingDocuments.push(
+        buildThreadDocumentChunkingDebugDocument({
+          document,
+          sourceType: contextKind,
+          parentSourceStatus: "failed",
+          extractionStatus: "failed",
+        })
+      );
       continue;
     }
 
@@ -1835,6 +2091,14 @@ export async function resolveConversationContextBundle(params: {
       const detail = buildImageRuntimeUnavailableDetail();
       availabilityNotes.push(`- ${document.filename}: ${detail}`);
       sources.push(buildContextSource("unavailable", document.filename, detail));
+      documentChunkingDocuments.push(
+        buildThreadDocumentChunkingDebugDocument({
+          document,
+          sourceType: contextKind,
+          parentSourceStatus: "unavailable",
+          extractionStatus: "unavailable",
+        })
+      );
       continue;
     }
 
@@ -1845,6 +2109,14 @@ export async function resolveConversationContextBundle(params: {
         "Attached to this thread, but not included in this runtime because the thread-document context budget was already used by earlier attachments.";
       availabilityNotes.push(`- ${document.filename}: ${detail}`);
       sources.push(buildContextSource("unavailable", document.filename, detail));
+      documentChunkingDocuments.push(
+        buildThreadDocumentChunkingDebugDocument({
+          document,
+          sourceType: contextKind,
+          parentSourceStatus: "unavailable",
+          extractionStatus: "unavailable",
+        })
+      );
       continue;
     }
 
@@ -1859,6 +2131,14 @@ export async function resolveConversationContextBundle(params: {
         const detail = `Attached to this thread, but ${resolveStorageReadFailureReason(error)}.`;
         availabilityNotes.push(`- ${document.filename}: ${detail}`);
         sources.push(buildContextSource("failed", document.filename, detail));
+        documentChunkingDocuments.push(
+          buildThreadDocumentChunkingDebugDocument({
+            document,
+            sourceType: contextKind,
+            parentSourceStatus: "failed",
+            extractionStatus: "failed",
+          })
+        );
         continue;
       }
 
@@ -1878,6 +2158,14 @@ export async function resolveConversationContextBundle(params: {
         const detail = buildExtractionFailureDetail(contextKind, error);
         availabilityNotes.push(`- ${document.filename}: ${detail}`);
         sources.push(buildContextSource("failed", document.filename, detail));
+        documentChunkingDocuments.push(
+          buildThreadDocumentChunkingDebugDocument({
+            document,
+            sourceType: contextKind,
+            parentSourceStatus: "failed",
+            extractionStatus: "failed",
+          })
+        );
         continue;
       }
     } else {
@@ -1888,6 +2176,14 @@ export async function resolveConversationContextBundle(params: {
         const detail = `Attached to this thread, but ${resolveStorageReadFailureReason(error)}.`;
         availabilityNotes.push(`- ${document.filename}: ${detail}`);
         sources.push(buildContextSource("failed", document.filename, detail));
+        documentChunkingDocuments.push(
+          buildThreadDocumentChunkingDebugDocument({
+            document,
+            sourceType: contextKind,
+            parentSourceStatus: "failed",
+            extractionStatus: "failed",
+          })
+        );
         continue;
       }
     }
@@ -1906,22 +2202,106 @@ export async function resolveConversationContextBundle(params: {
         : "Attached to this thread, but no readable text could be extracted from the stored file.";
       availabilityNotes.push(`- ${document.filename}: ${detail}`);
       sources.push(buildContextSource("failed", document.filename, detail));
+      documentChunkingDocuments.push(
+        buildThreadDocumentChunkingDebugDocument({
+          document,
+          sourceType: contextKind,
+          parentSourceStatus: "failed",
+          extractionStatus: "failed",
+        })
+      );
       continue;
     }
 
-    const excerpt = truncateDocumentText(
-      normalizedText,
-      Math.min(MAX_THREAD_DOCUMENT_CONTEXT_CHARS, remainingDocumentChars)
-    );
-    const truncated = excerpt.length < normalizedText.length;
+    const chunkCandidates = buildDocumentChunkCandidates({
+      sourceId: document.id,
+      attachmentId: document.id,
+      fileId: document.id,
+      sourceOrderIndex: documentIndex,
+      filename: document.filename,
+      sourceType: resolveDocumentChunkSourceType(document, contextKind),
+      text: normalizedText,
+    });
+    if (chunkCandidates.length === 0) {
+      failedCount += 1;
+      const detail =
+        "Attached to this thread, but the extracted text could not be split into usable document chunks for this runtime.";
+      availabilityNotes.push(`- ${document.filename}: ${detail}`);
+      sources.push(buildContextSource("failed", document.filename, detail));
+      documentChunkingDocuments.push(
+        buildThreadDocumentChunkingDebugDocument({
+          document,
+          sourceType: contextKind,
+          parentSourceStatus: "failed",
+          extractionStatus: "failed",
+        })
+      );
+      continue;
+    }
+
+    const ranking = rankDocumentChunks({
+      chunks: chunkCandidates,
+      query: params.currentUserPrompt,
+    });
+    const selection = selectDocumentChunksInOrder({
+      chunks: ranking.rankedChunks,
+      maxChars: Math.min(MAX_THREAD_DOCUMENT_CONTEXT_CHARS, remainingDocumentChars),
+      selectionMode: ranking.rankingEnabled ? "ranked-order" : "document-order",
+      ranking,
+    });
+    if (selection.selectedChunks.length === 0) {
+      unavailableCount += 1;
+      threadDocumentExcludedCategories.add("budget");
+      const detail =
+        "Attached to this thread, but not included in this runtime because the remaining thread-document context budget could not fit a useful excerpt after earlier attachments.";
+      availabilityNotes.push(`- ${document.filename}: ${detail}`);
+      sources.push(buildContextSource("unavailable", document.filename, detail));
+      documentChunkingDocuments.push(
+        buildThreadDocumentChunkingDebugDocument({
+          document,
+          sourceType: contextKind,
+          parentSourceStatus: "unavailable",
+          extractionStatus: "extracted",
+          chunks: chunkCandidates,
+          ranking,
+          selection,
+        })
+      );
+      continue;
+    }
+
+    const fullyIncluded =
+      selection.selectedChunks.length === chunkCandidates.length &&
+      selection.skippedChunks.length === 0 &&
+      !selection.usedBudgetClamp;
     usedCount += 1;
-    remainingDocumentChars -= excerpt.length;
-    sections.push(`## Thread Document: ${document.filename}\n${excerpt}`);
+    remainingDocumentChars -= selection.selectedCharCount;
+    sections.push(
+      buildThreadDocumentSection({
+        filename: document.filename,
+        selection,
+        ranking,
+      })
+    );
     sources.push(buildContextSource(
       "used",
       document.filename,
-      buildUsedThreadDocumentDetail(normalizedText.length, truncated)
+      buildUsedThreadDocumentDetail({
+        charCount: normalizedText.length,
+        fullyIncluded,
+      })
     ));
+    documentChunkingDocuments.push(
+        buildThreadDocumentChunkingDebugDocument({
+          document,
+          sourceType: contextKind,
+          parentSourceStatus: "used",
+          extractionStatus: "extracted",
+          chunks: chunkCandidates,
+          ranking,
+          selection,
+        })
+      );
   }
 
   const summarySources: ConversationContextSummarySource[] = [];
@@ -1957,22 +2337,22 @@ export async function resolveConversationContextBundle(params: {
   );
 
   return {
-    text: [
+    text: joinMarkdownSections([
       sections.length > 0
-        ? [
+        ? joinMarkdownSections([
           "## Thread-Attached Documents (Current Conversation Only)",
           "Use these files as supporting thread context. Recent thread messages and the user's current request remain higher authority.",
-          sections.join("\n\n"),
-        ].join("\n\n")
+          ...sections,
+        ])
         : null,
       availabilityNotes.length > 0
-        ? [
+        ? joinMarkdownSections([
             "## Thread Document Availability",
             "These attachments are present on the current thread but were not loaded into this runtime context:",
             availabilityNotes.join("\n"),
-          ].join("\n\n")
+          ])
         : null,
-    ].filter((section): section is string => Boolean(section)).join("\n\n"),
+    ]),
     sources,
     summarySources,
     sourceSelection: buildConversationContextSourceSelection({
@@ -1980,5 +2360,9 @@ export async function resolveConversationContextBundle(params: {
       sourceDecisions: finalizedSourceDecisions,
     }),
     sourceDecisions: finalizedSourceDecisions,
+    documentChunking: {
+      strategy: DEFAULT_DOCUMENT_CHUNK_STRATEGY,
+      documents: documentChunkingDocuments,
+    },
   };
 }

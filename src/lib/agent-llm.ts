@@ -5,6 +5,14 @@ import {
   CHAT_REPLY_REQUEST_TIMEOUT_MS,
   CHAT_REPLY_STREAM_TIMEOUT_MS,
 } from "./chat-runtime-budgets";
+import {
+  joinMarkdownFragments,
+  joinMarkdownSections,
+} from "./context-formatting";
+import {
+  estimateTextTokens,
+  estimateThreadMessagesTokens,
+} from "./context-token-budget";
 
 type LlmEndpointKind = "ollama" | "openai";
 
@@ -483,14 +491,11 @@ async function fetchBedrockJson(
 
 function extractAnthropicText(payload: Record<string, unknown>) {
   const content = Array.isArray(payload.content) ? payload.content : [];
-  return content
-    .map((item) => {
-      if (!item || typeof item !== "object") return "";
-      const block = item as Record<string, unknown>;
-      return block.type === "text" && typeof block.text === "string" ? block.text : "";
-    })
-    .join("")
-    .trim();
+  return joinMarkdownFragments(content.map((item) => {
+    if (!item || typeof item !== "object") return "";
+    const block = item as Record<string, unknown>;
+    return block.type === "text" && typeof block.text === "string" ? block.text : "";
+  }));
 }
 
 function extractBedrockText(payload: Record<string, unknown>) {
@@ -502,14 +507,11 @@ function extractBedrockText(payload: Record<string, unknown>) {
     : null;
   const content = Array.isArray(message?.content) ? message.content : [];
 
-  return content
-    .map((item) => {
-      if (!item || typeof item !== "object") return "";
-      const block = item as Record<string, unknown>;
-      return typeof block.text === "string" ? block.text : "";
-    })
-    .join("")
-    .trim();
+  return joinMarkdownFragments(content.map((item) => {
+    if (!item || typeof item !== "object") return "";
+    const block = item as Record<string, unknown>;
+    return typeof block.text === "string" ? block.text : "";
+  }));
 }
 
 function parseDuties(raw: string | null | undefined) {
@@ -591,7 +593,12 @@ export function buildSystemPrompt(config: AgentLlmConfig) {
     "- If this prompt includes a `## Thread Document:` section, that attachment was successfully read into the active runtime context and is available to use.\n" +
     "- Treat the `Thread attachment resolution` lines as authoritative status for each attached file.\n" +
     "- Only say a thread attachment could not be read, did not load, or was unavailable when the prompt explicitly says so in a status or availability note.\n" +
-    "- When a thread attachment was read and is relevant, use its contents directly instead of claiming you do not have access to it."
+    "- When a thread attachment was read and is relevant, use its contents directly instead of claiming you do not have access to it.\n" +
+    "- When excerpt provenance headers name an article, section, exhibit, or schedule, use those exact labels for where/which-section answers and do not invent article titles. If the provenance label is incomplete, say that rather than fabricating one.\n" +
+    "- Treat excerpt provenance headers as the document-body location where the excerpt appears. Do not relabel an excerpt as a different article, section, exhibit, or schedule merely because the excerpt references that location in its text.\n" +
+    "- For legal or contract questions about where a term appears, answer from SOURCE BODY LOCATION labels only. Do not use standard industry framing or background assumptions to infer article, section, exhibit, or schedule locations.\n" +
+    "- Distinguish 'located in' from 'references.' If an excerpt references Exhibit C, Exhibit D, or another provision, that does not make the excerpt located there.\n" +
+    "- If a legal excerpt's body location is unclear, say the location is unclear rather than inventing an article title or exhibit location."
   );
   sections.push(
     "Task and tool routing rules:\n" +
@@ -608,7 +615,7 @@ export function buildSystemPrompt(config: AgentLlmConfig) {
     "- Avoid filler phrases like 'Certainly!', 'Great question!', or 'Of course!'.\n" +
     "- When referencing tasks, teammates, customers, or repos, use their actual names from the org context."
   );
-  return sections.join("\n\n");
+  return joinMarkdownSections(sections);
 }
 
 function hasTaskSignal(value: string) {
@@ -650,24 +657,21 @@ function shouldEnterToolLoop(history: LlmMessage[]) {
   return hasTaskSignal(recentText) || hasCustomerSignal(recentText);
 }
 
-function estimateTokenCount(value: string) {
-  return Math.max(1, Math.ceil(value.trim().length / 4));
-}
-
 export function buildAgentRuntimePreview(
   config: AgentLlmConfig & { history: ChatMessageInput[] }
 ): AgentRuntimePreview {
   const systemPrompt = buildSystemPrompt(config);
   const history = config.history;
-  const historyText = history.map((entry) => `${entry.role}: ${entry.content}`).join("\n");
   const contextSources = config.contextSources ?? [];
+  const estimatedSystemPromptTokens = estimateTextTokens(systemPrompt);
+  const estimatedHistoryTokens = estimateThreadMessagesTokens(history);
 
   return {
     systemPrompt,
     history,
-    estimatedSystemPromptTokens: estimateTokenCount(systemPrompt),
-    estimatedHistoryTokens: historyText ? estimateTokenCount(historyText) : 0,
-    estimatedTokens: estimateTokenCount(systemPrompt) + (historyText ? estimateTokenCount(historyText) : 0),
+    estimatedSystemPromptTokens,
+    estimatedHistoryTokens,
+    estimatedTokens: estimatedSystemPromptTokens + estimatedHistoryTokens,
     recentHistoryCount: history.length,
     knowledgeSources: [
       {
@@ -742,11 +746,10 @@ function buildBedrockConversationBody(messages: LlmMessage[], systemPrompt: stri
 
 function pushUniqueNonEmpty(target: string[], values: string[]) {
   for (const value of values) {
-    const trimmed = value.trim();
-    if (!trimmed || target.includes(trimmed)) {
+    if (!value.trim() || target.includes(value)) {
       continue;
     }
-    target.push(trimmed);
+    target.push(value);
   }
 }
 
@@ -1101,13 +1104,19 @@ async function* streamBedrockReply(
         );
       }
 
-      for (const segment of textSegments) {
+      const joinedTextDelta = joinMarkdownFragments(textSegments, {
+        trimOuterWhitespace: false,
+      });
+      if (joinedTextDelta) {
         diagnostics.contentTextDeltaCount += 1;
-        yield { type: "content_delta", delta: segment };
+        yield { type: "content_delta", delta: joinedTextDelta };
       }
 
-      for (const segment of thinkingSegments) {
-        yield { type: "thinking_delta", delta: segment };
+      const joinedThinkingDelta = joinMarkdownFragments(thinkingSegments, {
+        trimOuterWhitespace: false,
+      });
+      if (joinedThinkingDelta) {
+        yield { type: "thinking_delta", delta: joinedThinkingDelta };
       }
 
       if (event.messageStop) {

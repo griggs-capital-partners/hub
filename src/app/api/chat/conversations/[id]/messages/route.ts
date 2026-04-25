@@ -119,6 +119,7 @@ type RuntimeSnapshot = {
     sourceSelection: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceSelection"];
     sourceDecisions: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceDecisions"];
     resolvedSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"];
+    documentChunking: Awaited<ReturnType<typeof resolveConversationContextBundle>>["documentChunking"];
   };
   payload: {
     currentUserName: string | null;
@@ -144,6 +145,7 @@ function buildRuntimeSnapshot(params: {
   sourceSelection: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceSelection"];
   sourceDecisions: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceDecisions"];
   resolvedSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"];
+  documentChunking: Awaited<ReturnType<typeof resolveConversationContextBundle>>["documentChunking"];
   currentUserName: string | null;
   history: LlmMessage[];
   orgContext: string;
@@ -160,6 +162,7 @@ function buildRuntimeSnapshot(params: {
       sourceSelection: params.sourceSelection,
       sourceDecisions: params.sourceDecisions,
       resolvedSources: params.resolvedSources,
+      documentChunking: params.documentChunking,
     },
     payload: {
       currentUserName: params.currentUserName,
@@ -382,6 +385,7 @@ export async function POST(
                   activeAgentId: runtimeState.activeAgentMember?.agent.id ?? null,
                   activeAgentIds: runtimeState.activeAgentIds,
                 },
+                currentUserPrompt: message,
               }),
               prisma.user.findUnique({
                 where: { id: session.user.id },
@@ -490,6 +494,7 @@ export async function POST(
               sourceSelection: contextBundle.sourceSelection,
               sourceDecisions: contextBundle.sourceDecisions,
               resolvedSources: contextBundle.sources,
+              documentChunking: contextBundle.documentChunking,
               currentUserName,
               history,
               orgContext,
@@ -732,6 +737,7 @@ export async function POST(
               activeAgentId: runtimeState.activeAgentMember?.agent.id ?? null,
               activeAgentIds: runtimeState.activeAgentIds,
             },
+            currentUserPrompt: message,
           }),
           prisma.user.findUnique({
             where: { id: session.user.id },
@@ -769,6 +775,7 @@ export async function POST(
           sourceSelection: contextBundle.sourceSelection,
           sourceDecisions: contextBundle.sourceDecisions,
           resolvedSources: contextBundle.sources,
+          documentChunking: contextBundle.documentChunking,
           currentUserName,
           history,
           orgContext,

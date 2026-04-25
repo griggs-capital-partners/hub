@@ -10,6 +10,10 @@ const __dirname = path.dirname(__filename);
 
 const jiti = createJiti(import.meta.url, { moduleCache: false });
 const {
+  DEFAULT_DOCUMENT_CHUNK_STRATEGY,
+  DEFAULT_DOCUMENT_CHUNK_RANKING_STRATEGY,
+} = jiti(path.join(__dirname, "..", "src", "lib", "context-document-chunks.ts"));
+const {
   MAX_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS,
   resolveConversationContextBundle: resolveConversationContextBundleBase,
 } = jiti(path.join(__dirname, "..", "src", "lib", "conversation-context.ts"));
@@ -326,6 +330,32 @@ await runTest("marks unsupported files explicitly", async () => {
 
   assert.equal(bundle.sources.length, 1);
   assert.equal(bundle.sources[0].status, "unsupported");
+  assert.deepEqual(bundle.documentChunking.documents[0], {
+    sourceId: "doc-1",
+    attachmentId: "doc-1",
+    fileId: "doc-1",
+    filename: "drawing.doc",
+    sourceType: "document",
+    parentSourceStatus: "unsupported",
+    extractionStatus: "unsupported",
+    totalChunks: 0,
+    selectedChunkIndexes: [],
+    skippedChunkIndexes: [],
+    selectedApproxTokenCount: 0,
+    totalApproxTokenCount: 0,
+    selectedCharCount: 0,
+    totalCharCount: 0,
+    selectionMode: null,
+    usedBudgetClamp: false,
+    coverageSelectionApplied: false,
+    rankingEnabled: false,
+    rankingQueryTokenCount: 0,
+    rankingStrategy: DEFAULT_DOCUMENT_CHUNK_RANKING_STRATEGY,
+    rankingFallbackReason: null,
+    occurrenceIntentDetected: false,
+    occurrenceTargetPhrase: null,
+    chunkCharRanges: [],
+  });
   assert.match(bundle.text, /Thread Document Availability/);
   assert.match(bundle.text, /supports only plain text, markdown, PDF, DOCX, PPTX, XLSX, CSV, TSV, and baseline PNG\/JPG\/JPEG\/WEBP image attachment handling/i);
 });
@@ -348,6 +378,8 @@ await runTest("marks image attachments as unavailable when the current runtime c
 
   assert.equal(bundle.sources.length, 1);
   assert.equal(bundle.sources[0].status, "unavailable");
+  assert.equal(bundle.documentChunking.documents[0]?.parentSourceStatus, "unavailable");
+  assert.equal(bundle.documentChunking.documents[0]?.extractionStatus, "unavailable");
   assert.match(bundle.sources[0].detail, /does not yet load image attachments into the active model context/i);
   assert.match(bundle.text, /inspection\.png: Attached to this thread, but the current Team Chat runtime does not yet load image attachments into the active model context\./i);
   assert.match(bundle.summarySources[0].description, /1 unavailable/);
@@ -435,6 +467,8 @@ await runTest("marks failed PDF extraction explicitly", async () => {
 
   assert.equal(bundle.sources.length, 1);
   assert.equal(bundle.sources[0].status, "failed");
+  assert.equal(bundle.documentChunking.documents[0]?.parentSourceStatus, "failed");
+  assert.equal(bundle.documentChunking.documents[0]?.extractionStatus, "failed");
   assert.match(bundle.sources[0].detail, /PDF parser failed before usable text could be extracted/);
   assert.match(bundle.text, /PDF parser failed before usable text could be extracted/);
 });
@@ -482,6 +516,310 @@ await runTest("uses supported DOCX attachments when extraction succeeds", async 
   assert.equal(bundle.sources[0].status, "used");
   assert.match(bundle.text, /Thread Document: manual\.docx/);
   assert.match(bundle.text, /DOCX operating context\./);
+});
+
+await runTest("splits long thread documents into ordered chunk excerpts with debug metadata", async () => {
+  const repeatedSection = Array.from(
+    { length: 48 },
+    (_, index) => `Cooling loop ${index + 1} stayed stable overnight but still needs inspection before restart.`
+  ).join(" ");
+  const bundle = await resolveConversationContextBundle(
+    { conversationId: "thread-1" },
+    {
+      listDocuments: async () => [makeDocument()],
+      readTextFile: async () =>
+        [
+          "# Incident Overview",
+          repeatedSection,
+          "## Root Cause",
+          repeatedSection,
+          "## Mitigation",
+          repeatedSection,
+        ].join("\n\n"),
+    }
+  );
+
+  assert.equal(bundle.sources[0].status, "used");
+  assert.match(bundle.sources[0].detail, /included selected excerpts/i);
+  assert.match(bundle.text, /Selected excerpts from this attachment are included below in document order\./);
+  assert.match(bundle.text, /### Excerpt 1/);
+  assert.match(bundle.text, /SOURCE BODY LOCATION: notes\.md — Incident Overview/);
+  assert.match(bundle.text, /TEXT:/);
+  assert.equal(bundle.documentChunking.strategy, DEFAULT_DOCUMENT_CHUNK_STRATEGY);
+  assert.ok(bundle.documentChunking.documents[0].totalChunks > 1);
+  assert.equal(bundle.documentChunking.documents[0].rankingEnabled, false);
+  assert.equal(bundle.documentChunking.documents[0].rankingFallbackReason, "empty_query");
+  assert.equal(bundle.documentChunking.documents[0].selectionMode, "document-order");
+  assert.deepEqual(
+    bundle.documentChunking.documents[0].selectedChunkIndexes,
+    [...bundle.documentChunking.documents[0].selectedChunkIndexes].sort((left, right) => left - right)
+  );
+  assert.ok(
+    bundle.documentChunking.documents[0].chunkCharRanges.every((chunk, index, all) =>
+      index === 0 || chunk.charStart >= all[index - 1].charEnd
+    )
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(bundle.documentChunking.documents[0].chunkCharRanges[0], "text"),
+    false
+  );
+});
+
+await runTest("uses location unclear only when a selected excerpt has no detected body heading metadata", async () => {
+  const repeatedParagraph = Array.from(
+    { length: 60 },
+    (_, index) => `Plain paragraph ${index + 1} references the joint account but provides no explicit article or section heading.`
+  ).join(" ");
+  const bundle = await resolveConversationContextBundle(
+    { conversationId: "thread-1" },
+    {
+      listDocuments: async () => [makeDocument({ filename: "plain-notes.txt", mimeType: "text/plain", fileType: "text" })],
+      readTextFile: async () => repeatedParagraph,
+    }
+  );
+
+  assert.match(bundle.text, /SOURCE BODY LOCATION: plain-notes\.txt — location unclear in excerpt provenance/);
+  assert.ok(
+    bundle.documentChunking.documents[0].chunkCharRanges.every((chunk) =>
+      chunk.sectionPath.length === 0 ? /location unclear/i.test(chunk.sourceBodyLocationLabel) : true
+    )
+  );
+});
+
+await runTest("ranks a later relevant section ahead of earlier filler when the current user prompt has signal", async () => {
+  const filler = Array.from(
+    { length: 70 },
+    (_, index) => `General operations note ${index + 1} covers staffing rotations, startup checks, and shift handoff detail.`
+  ).join(" ");
+  const relevant = Array.from(
+    { length: 36 },
+    (_, index) => `Relief assembly root cause note ${index + 1} links the compressor trip to maintenance backlog and valve scoring.`
+  ).join(" ");
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "root cause relief assembly maintenance backlog",
+    },
+    {
+      listDocuments: async () => [makeDocument()],
+      readTextFile: async () =>
+        [
+          "# Overview",
+          filler,
+          "## Root Cause",
+          relevant,
+          "## Follow-up",
+          filler,
+        ].join("\n\n"),
+    }
+  );
+
+  assert.equal(bundle.sources[0].status, "used");
+  assert.match(bundle.text, /Relief assembly root cause note/i);
+  assert.equal(bundle.documentChunking.documents[0].rankingEnabled, true);
+  assert.equal(bundle.documentChunking.documents[0].rankingStrategy, DEFAULT_DOCUMENT_CHUNK_RANKING_STRATEGY);
+  assert.equal(bundle.documentChunking.documents[0].rankingFallbackReason, null);
+  assert.equal(bundle.documentChunking.documents[0].selectionMode, "ranked-order");
+  assert.ok(bundle.documentChunking.documents[0].rankingQueryTokenCount > 0);
+  assert.ok(bundle.documentChunking.documents[0].selectedChunkIndexes[0] > 0);
+  assert.ok(
+    bundle.documentChunking.documents[0].chunkCharRanges.some((chunk) =>
+      chunk.rankingSignals.includes("section_match") || chunk.rankingSignals.includes("phrase_overlap")
+    )
+  );
+});
+
+await runTest("keeps late article definition and audit excerpts for occurrence-style prompts", async () => {
+  const articleVd = Array.from(
+    { length: 3 },
+    () => "The Operator shall discharge Joint Account obligations in accordance with Exhibit C and provide monthly support."
+  ).join(" ");
+  const articleViif = Array.from(
+    { length: 3 },
+    () => "Taxes charged through the Joint Account shall be allocated as provided in Exhibit C and supported through Joint Account records."
+  ).join(" ");
+  const articleXviOne = Array.from(
+    { length: 4 },
+    () => "Existing Operator-owned equipment shall not be charged to the Joint Account unless agreed in writing."
+  ).join(" ");
+  const articleXviDefinition = Array.from(
+    { length: 4 },
+    () => "The term Joint Account means the shared project cost ledger, and the Joint Account records charge allocations."
+  ).join(" ");
+  const articleXviFees = Array.from(
+    { length: 4 },
+    () => "Project Fees shall be charged to the Joint Account in the amount of $20,000 per month unless revised in writing."
+  ).join(" ");
+  const articleXviAudit = Array.from(
+    { length: 4 },
+    () => "Each Non-Operator may audit the Joint Account and inspect Joint Account entries, support, and project fee backup."
+  ).join(" ");
+  const realisticLegalAgreementContextText = [
+    "TABLE OF CONTENTS",
+    "Article V — Operator & Managing Partner ........ 9",
+    "Article VII — Expenditures and Liability of Parties ........ 13",
+    "Article XV — Miscellaneous ........ 17",
+    "Article XVI — Other Provisions ........ 18",
+    "Exhibit C — Accounting Procedure ........ 25",
+    "Exhibit D — Insurance ........ 26",
+    "ARTICLE V.",
+    "OPERATOR & MANAGING PARTNER",
+    "D. Rights and Duties of Operator",
+    "1. Competitive Rates and Use of Affiliates: Operator may use affiliates at competitive rates.",
+    `2. Discharge of Joint Account Obligations: ${articleVd}`,
+    "3. Protection from Liens: Operations shall be protected from liens incurred during operations.",
+    "5. Access to Contract Area and Records: Each Non-Operator may inspect support concerning Contract Area access and records.",
+    "8. Cost Estimates: Upon written request, Operator shall furnish estimates of current and cumulative costs incurred for the joint account.",
+    "9. Insurance: Operator shall maintain insurance and may charge insurance premiums to the joint account where allowed.",
+    "ARTICLE VII.",
+    "EXPENDITURES AND LIABILITY OF PARTIES",
+    "F. Taxes",
+    articleViif,
+    "-- 15 of 22 --",
+    "-13-",
+    "ARTICLE XV.",
+    "MISCELLANEOUS",
+    "This article covers unrelated general provisions only and does not define the joint account.",
+    "ARTICLE XVI.",
+    "OTHER PROVISIONS",
+    `1. ${articleXviOne}`,
+    `2. ${articleXviDefinition}`,
+    `4. ${articleXviFees}`,
+    `5. ${articleXviAudit}`,
+  ].join("\n");
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "Summarize what articles the joint account appears in",
+    },
+    {
+      listDocuments: async () => [
+        makeDocument({
+          filename: "Incendium - Joint Operating Agreement [Final].pdf",
+          mimeType: "application/pdf",
+          fileType: "pdf",
+          storagePath: "C:\\GitHub\\hub\\uploads\\thread-1\\joa.pdf",
+        }),
+      ],
+      readTextFile: async () => "",
+      readBinaryFile: async () => Buffer.from("joa fixture", "utf8"),
+      extractPdfText: async () => realisticLegalAgreementContextText,
+    }
+  );
+
+  assert.equal(bundle.sources[0].status, "used");
+  assert.match(bundle.text, /SOURCE BODY LOCATION: Incendium - Joint Operating Agreement \[Final\]\.pdf — Article V — OPERATOR & MANAGING PARTNER — Article V\.D — Rights and Duties of Operator — Article V\.D\.2/i);
+  assert.match(bundle.text, /SOURCE BODY LOCATION: Incendium - Joint Operating Agreement \[Final\]\.pdf — Article V — OPERATOR & MANAGING PARTNER — Article V\.D — Rights and Duties of Operator — Article V\.D\.8/i);
+  assert.match(bundle.text, /SOURCE BODY LOCATION: Incendium - Joint Operating Agreement \[Final\]\.pdf — Article V — OPERATOR & MANAGING PARTNER — Article V\.D — Rights and Duties of Operator — Article V\.D\.9/i);
+  assert.match(bundle.text, /SOURCE BODY LOCATION: Incendium - Joint Operating Agreement \[Final\]\.pdf — Article VII — EXPENDITURES AND LIABILITY OF PARTIES — Article VII\.F/i);
+  assert.match(bundle.text, /SOURCE BODY LOCATION: Incendium - Joint Operating Agreement \[Final\]\.pdf — Article XVI/i);
+  assert.match(bundle.text, /Article XVI — OTHER PROVISIONS/i);
+  assert.match(bundle.text, /Article XVI\.1/i);
+  assert.match(bundle.text, /Article XVI\.2/i);
+  assert.match(bundle.text, /Article XVI\.4/i);
+  assert.match(bundle.text, /Article XVI\.5/i);
+  assert.match(bundle.text, /For this occurrence\/listing request, answer as a list of SOURCE BODY LOCATION labels/i);
+  assert.match(bundle.text, /REFERENCES MENTIONED IN TEXT \(referenced only; not the body location\): Exhibit C/i);
+  assert.doesNotMatch(bundle.text, /SOURCE BODY LOCATION: .*location unclear/i);
+  assert.doesNotMatch(bundle.text, /SOURCE BODY LOCATION: .*Article V\.B/i);
+  assert.doesNotMatch(bundle.text, /SOURCE BODY LOCATION: .*Article VII\.B/i);
+  assert.doesNotMatch(bundle.text, /SOURCE BODY LOCATION: .*Article VII\.D/i);
+  assert.doesNotMatch(bundle.text, /SOURCE BODY LOCATION: .*Article XV\b/i);
+  assert.doesNotMatch(bundle.text, /SOURCE BODY LOCATION: Incendium - Joint Operating Agreement \[Final\]\.pdf — Exhibit C/i);
+  assert.doesNotMatch(bundle.text, /SOURCE BODY LOCATION: Incendium - Joint Operating Agreement \[Final\]\.pdf — Exhibit D/i);
+  assert.doesNotMatch(bundle.text, /SOURCE BODY LOCATION: .*Article IV/i);
+  assert.ok(bundle.text.indexOf("Article XVI.1") < bundle.text.indexOf("Article XVI.2"));
+  assert.ok(bundle.text.indexOf("Article XVI.2") < bundle.text.indexOf("Article XVI.4"));
+  assert.ok(bundle.text.indexOf("Article XVI.4") < bundle.text.indexOf("Article XVI.5"));
+  assert.equal(bundle.documentChunking.documents[0].rankingEnabled, true);
+  assert.equal(bundle.documentChunking.documents[0].occurrenceIntentDetected, true);
+  assert.equal(bundle.documentChunking.documents[0].occurrenceTargetPhrase, "joint account");
+  assert.equal(bundle.documentChunking.documents[0].coverageSelectionApplied, true);
+  assert.ok(
+    bundle.documentChunking.documents[0].chunkCharRanges.some((chunk) =>
+      /Article V\.D\.2/i.test(chunk.sectionLabel ?? "") &&
+      chunk.referencedLocationLabels.includes("Exhibit C")
+    )
+  );
+  assert.ok(
+    bundle.documentChunking.documents[0].chunkCharRanges.some((chunk) =>
+      /Article V\.D\.8/i.test(chunk.sourceBodyLocationLabel)
+    )
+  );
+  assert.ok(
+    bundle.documentChunking.documents[0].chunkCharRanges.some((chunk) =>
+      /Article V\.D\.9/i.test(chunk.sourceBodyLocationLabel)
+    )
+  );
+  assert.ok(
+    bundle.documentChunking.documents[0].chunkCharRanges.some((chunk) =>
+      /Article VII\.F/i.test(chunk.sectionLabel ?? "") &&
+      chunk.referencedLocationLabels.includes("Exhibit C")
+    )
+  );
+  assert.ok(
+    bundle.documentChunking.documents[0].chunkCharRanges.some((chunk) =>
+      /Article XVI\.2/i.test(chunk.sectionLabel ?? "") &&
+      chunk.exactPhraseMatchCount >= 3 &&
+      chunk.definitionBoostApplied &&
+      /section:xvi\.2/i.test(chunk.coverageGroupKey ?? "")
+    )
+  );
+  assert.ok(
+    bundle.documentChunking.documents[0].chunkCharRanges.some((chunk) =>
+      chunk.selectedDueToCoverage &&
+      /section:xvi\.(1|4|5)/i.test(chunk.coverageGroupKey ?? "")
+    )
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(bundle.documentChunking.documents[0].chunkCharRanges[0], "text"),
+    false
+  );
+  assert.ok(
+    bundle.documentChunking.documents[0].chunkCharRanges.some((chunk) =>
+      /Article XVI\.2/i.test(chunk.sourceBodyLocationLabel) &&
+      Array.isArray(chunk.sectionPath) &&
+      chunk.sectionPath.length > 0
+    )
+  );
+  assert.ok(
+    bundle.documentChunking.documents[0].chunkCharRanges.every((chunk) =>
+      typeof chunk.textPreview === "string" && chunk.textPreview.length <= 80
+    )
+  );
+});
+
+await runTest("falls back to document-order chunk selection for low-signal prompts", async () => {
+  const repeatedSection = Array.from(
+    { length: 48 },
+    (_, index) => `Cooling loop ${index + 1} stayed stable overnight but still needs inspection before restart.`
+  ).join(" ");
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "please help",
+    },
+    {
+      listDocuments: async () => [makeDocument()],
+      readTextFile: async () =>
+        [
+          "# Incident Overview",
+          repeatedSection,
+          "## Root Cause",
+          repeatedSection,
+          "## Mitigation",
+          repeatedSection,
+        ].join("\n\n"),
+    }
+  );
+
+  assert.equal(bundle.documentChunking.documents[0].rankingEnabled, false);
+  assert.equal(bundle.documentChunking.documents[0].rankingFallbackReason, "low_signal_query");
+  assert.equal(bundle.documentChunking.documents[0].selectionMode, "document-order");
+  assert.deepEqual(
+    bundle.documentChunking.documents[0].selectedChunkIndexes,
+    [...bundle.documentChunking.documents[0].selectedChunkIndexes].sort((left, right) => left - right)
+  );
 });
 
 await runTest("uses supported PPTX attachments when extraction succeeds", async () => {

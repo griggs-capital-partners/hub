@@ -1573,11 +1573,17 @@ export function TeamClient({
     setChatProjectsError(null);
 
     try {
-      const response = await fetch("/api/chat/projects");
-      const data = await response.json();
+      const response = await fetch("/api/chat/projects", {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
+      const data = await parseApiResponse(response) as {
+        error?: unknown;
+        projects?: unknown;
+      };
 
       if (!response.ok || !Array.isArray(data.projects)) {
-        throw new Error(data.error ?? "Unable to load chat projects right now.");
+        throw new Error(getApiErrorMessage(data.error) ?? "Unable to load chat projects right now.");
       }
 
       setChatProjects((current) => mergeChatProjects(current, data.projects as ChatProjectOption[]));
@@ -1600,13 +1606,24 @@ export function TeamClient({
 
     const response = await fetch("/api/chat/projects", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({ name: projectName }),
     });
-    const data = await response.json();
+    const data = await parseApiResponse(response) as {
+      error?: unknown;
+      project?: unknown;
+    };
 
-    if (!response.ok || !data.project || typeof data.project.id !== "string") {
-      throw new Error(data.error ?? "Unable to create that chat project right now.");
+    if (
+      !response.ok ||
+      !data.project ||
+      typeof data.project !== "object" ||
+      typeof (data.project as { id?: unknown }).id !== "string"
+    ) {
+      throw new Error(getApiErrorMessage(data.error) ?? "Unable to create that chat project right now.");
     }
 
     const project = data.project as ChatProjectOption;
@@ -2480,7 +2497,10 @@ export function TeamClient({
     try {
       const response = await fetch("/api/chat/conversations", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           type: "direct",
           ...(shouldForceNew ? { forceNew: true } : {}),
@@ -2490,22 +2510,31 @@ export function TeamClient({
           ...(target.agentId ? { agentId: target.agentId } : {}),
         }),
       });
-      const data = await response.json();
-      if (data.conversation) {
+      const data = await parseApiResponse(response) as {
+        error?: unknown;
+        conversation?: unknown;
+      };
+      if (
+        response.ok &&
+        data.conversation &&
+        typeof data.conversation === "object" &&
+        typeof (data.conversation as { id?: unknown }).id === "string"
+      ) {
         if (target.agentId) {
-          setBootstrappingConversationId(data.conversation.id);
+          setBootstrappingConversationId((data.conversation as ConversationSummary).id);
         }
-        upsertConversation(data.conversation);
-        beginThreadSwitchMeasurement(data.conversation.id, "direct_shortcut_created");
-        setSelectedConversationId(data.conversation.id);
-        syncTeamChatRoute({ kind: "thread", conversationId: data.conversation.id }, options?.history ?? "push");
-        return data.conversation as ConversationSummary;
+        const conversation = data.conversation as ConversationSummary;
+        upsertConversation(conversation);
+        beginThreadSwitchMeasurement(conversation.id, "direct_shortcut_created");
+        setSelectedConversationId(conversation.id);
+        syncTeamChatRoute({ kind: "thread", conversationId: conversation.id }, options?.history ?? "push");
+        return conversation;
       }
+
+      throw new Error(getApiErrorMessage(data.error) ?? "Unable to create a fresh thread right now.");
     } finally {
       setOpeningDirectId(null);
     }
-
-    return null;
   }
 
   function openDirectShortcut(target: { userId?: string; agentId?: string }) {
@@ -2806,7 +2835,10 @@ export function TeamClient({
 
     const response = await fetch("/api/chat/conversations", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
         type: "group",
         ...(selection.name.trim() ? { name: selection.name.trim() } : {}),
@@ -2815,16 +2847,25 @@ export function TeamClient({
         memberAgentIds: agentIds,
       }),
     });
-    const data = await response.json();
+    const data = await parseApiResponse(response) as {
+      error?: unknown;
+      conversation?: unknown;
+    };
 
-    if (!response.ok || !data.conversation) {
-      throw new Error(data.error ?? "Unable to create the thread right now.");
+    if (
+      !response.ok ||
+      !data.conversation ||
+      typeof data.conversation !== "object" ||
+      typeof (data.conversation as { id?: unknown }).id !== "string"
+    ) {
+      throw new Error(getApiErrorMessage(data.error) ?? "Unable to create the thread right now.");
     }
 
-    upsertConversation(data.conversation);
-    beginThreadSwitchMeasurement(data.conversation.id, "new_group_thread");
-    setSelectedConversationId(data.conversation.id);
-    syncTeamChatRoute({ kind: "thread", conversationId: data.conversation.id });
+    const conversation = data.conversation as ConversationSummary;
+    upsertConversation(conversation);
+    beginThreadSwitchMeasurement(conversation.id, "new_group_thread");
+    setSelectedConversationId(conversation.id);
+    syncTeamChatRoute({ kind: "thread", conversationId: conversation.id });
   }
 
   async function addParticipantsToThread(selection: NewThreadSelection) {

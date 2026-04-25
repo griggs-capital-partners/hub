@@ -142,6 +142,7 @@ export async function GET(
     const threadExecutionTarget = resolveThreadExecutionTarget(llmConfig, threadLlmState);
     const shouldPersistThreadLlmState =
       serializeConversationLlmThreadState(threadLlmState) !== serializeConversationLlmThreadState(storedThreadLlmState);
+    const latestUserPrompt = recentMessages.find((entry) => !entry.senderAgentId)?.body ?? null;
 
     const [llmHealth, orgContext, contextBundle, senderUser] = await Promise.all([
       probeAgentLlm(threadExecutionTarget ? buildExecutionTargetRuntimeConfig(threadExecutionTarget) : agent),
@@ -154,6 +155,7 @@ export async function GET(
           activeAgentId: runtimeState.activeAgentMember?.agent.id ?? null,
           activeAgentIds: runtimeState.activeAgentIds,
         },
+        currentUserPrompt: latestUserPrompt,
       }),
       prisma.user.findUnique({
         where: { id: session.user.id },
@@ -256,6 +258,7 @@ export async function GET(
           sourceSelection: contextBundle.sourceSelection,
           sourceDecisions: contextBundle.sourceDecisions,
           resolvedSources: contextBundle.sources,
+          documentChunking: contextBundle.documentChunking,
         },
         payload: {
           currentUserName,
