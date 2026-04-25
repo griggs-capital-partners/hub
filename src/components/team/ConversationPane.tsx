@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, type ChangeEvent, type DragEvent, type FormEvent, type KeyboardEvent, type RefObject } from "react";
+import { memo, useRef, useState, type ChangeEvent, type DragEvent, type FormEvent, type KeyboardEvent, type RefObject } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { TOOL_LABELS } from "@/lib/agent-tools";
@@ -55,12 +55,20 @@ function getStreamingStatusLabel(message: ChatMessage) {
     return null;
   }
 
+  if (message.streamState === "preparing") {
+    return "Preparing response...";
+  }
+
+  if (message.streamState === "reading_context") {
+    return "Reading thread context...";
+  }
+
   if (message.streamState === "using_tools") {
     return "Working with tools...";
   }
 
   if (message.streamState === "responding") {
-    return message.body ? "Streaming reply..." : "Drafting reply...";
+    return message.body ? "Generating response..." : "Drafting response...";
   }
 
   if (message.thinkingEnabled === false) {
@@ -88,6 +96,11 @@ function getSpeakerLabel(
   }
 
   return message.sender?.name || "Unknown";
+}
+
+function getMessageRenderKey(message: ChatMessage) {
+  const senderKind = message.sender?.kind ?? "message";
+  return message.clientRequestId ? `${senderKind}:${message.clientRequestId}` : message.id;
 }
 
 function MessageOperationalDetails({
@@ -223,26 +236,46 @@ function MessageOperationalDetails({
   );
 }
 
-function AgentStreamingPlaceholder({ message }: { message: ChatMessage }) {
-  const streamingLabel = getStreamingStatusLabel(message) ?? "Thinking...";
+function AgentStatusCard({ message }: { message: ChatMessage }) {
+  const failed = message.clientState === "failed_assistant";
+  const streamingLabel = failed ? "Response failed" : (getStreamingStatusLabel(message) ?? "Thinking...");
   const thinkingPreview = message.thinking?.trim();
 
   return (
-    <div className="min-h-[88px] rounded-[24px] border border-[rgba(126,200,227,0.16)] bg-[linear-gradient(180deg,rgba(126,200,227,0.08),rgba(255,255,255,0.015))] px-4 py-3">
-      <div className="flex items-center gap-2 text-sm text-[#DCEFF8]">
-        <div className="h-4 w-4 shrink-0 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
+    <div
+      className={cn(
+        "min-h-[88px] rounded-[24px] border px-4 py-3",
+        failed
+          ? "border-[rgba(239,68,68,0.16)] bg-[linear-gradient(180deg,rgba(239,68,68,0.08),rgba(255,255,255,0.015))]"
+          : "border-[rgba(126,200,227,0.16)] bg-[linear-gradient(180deg,rgba(126,200,227,0.08),rgba(255,255,255,0.015))]"
+      )}
+    >
+      <div className={cn("flex items-center gap-2 text-sm", failed ? "text-[#F3C1C1]" : "text-[#DCEFF8]")}>
+        {failed ? (
+          <AlertTriangle size={15} className="shrink-0 text-[#EF4444]" />
+        ) : (
+          <div className="h-4 w-4 shrink-0 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
+        )}
         <span>{streamingLabel}</span>
       </div>
-      <div className="mt-3 space-y-2">
-        <div className="h-2 w-24 rounded-full bg-[rgba(255,255,255,0.08)]" />
-        <div className="h-2 max-w-[28rem] rounded-full bg-[rgba(255,255,255,0.06)]" />
-        <div className="h-2 w-[72%] rounded-full bg-[rgba(255,255,255,0.05)]" />
-      </div>
-      {thinkingPreview ? (
-        <p className="mt-3 max-h-10 overflow-hidden text-xs leading-5 text-[#A9DCF3] [overflow-wrap:anywhere]">
-          {thinkingPreview}
+      {failed ? (
+        <p className="mt-3 text-xs leading-5 text-[#F2C0C0]">
+          The assistant could not finish this response. The thread stayed intact, and you can retry.
         </p>
-      ) : null}
+      ) : (
+        <>
+          <div className="mt-3 space-y-2">
+            <div className="h-2 w-24 rounded-full bg-[rgba(255,255,255,0.08)]" />
+            <div className="h-2 max-w-[28rem] rounded-full bg-[rgba(255,255,255,0.06)]" />
+            <div className="h-2 w-[72%] rounded-full bg-[rgba(255,255,255,0.05)]" />
+          </div>
+          {thinkingPreview ? (
+            <p className="mt-3 max-h-10 overflow-hidden text-xs leading-5 text-[#A9DCF3] [overflow-wrap:anywhere]">
+              {thinkingPreview}
+            </p>
+          ) : null}
+        </>
+      )}
     </div>
   );
 }
@@ -614,6 +647,413 @@ function ThreadComposer({
   );
 }
 
+const MemoizedThreadComposer = memo(
+  ThreadComposer,
+  (previousProps, nextProps) =>
+    previousProps.currentUserId === nextProps.currentUserId
+    && previousProps.activeConversation.id === nextProps.activeConversation.id
+    && previousProps.activeAgentParticipant?.id === nextProps.activeAgentParticipant?.id
+    && previousProps.activeAgentReady === nextProps.activeAgentReady
+    && previousProps.activeAgentOfflineDetail === nextProps.activeAgentOfflineDetail
+    && previousProps.activeAgentSendBlocked === nextProps.activeAgentSendBlocked
+    && previousProps.activeAgentBootstrapPending === nextProps.activeAgentBootstrapPending
+    && previousProps.threadDocumentUploads === nextProps.threadDocumentUploads
+    && previousProps.threadDocumentError === nextProps.threadDocumentError
+    && previousProps.messageInput === nextProps.messageInput
+    && previousProps.sending === nextProps.sending
+);
+
+type ConversationMessageRowProps = {
+  message: ChatMessage;
+  currentUserId: string;
+  mixedAgentThread: boolean;
+  isEditing: boolean;
+  editingDraft: string;
+  isSaving: boolean;
+  isDeleting: boolean;
+  isCopied: boolean;
+  onChangeEditingDraft: (value: string) => void;
+  onCancelEditingMessage: () => void;
+  onSaveEditedMessage: (messageId: string) => Promise<void>;
+  onCopyMessage: (body: string, messageId: string) => void;
+  onStartEditingMessage: (message: ChatMessage) => void;
+  onDeleteMessage: (messageId: string) => Promise<void>;
+};
+
+const ConversationMessageRow = memo(
+  function ConversationMessageRow({
+    message,
+    currentUserId,
+    mixedAgentThread,
+    isEditing,
+    editingDraft,
+    isSaving,
+    isDeleting,
+    isCopied,
+    onChangeEditingDraft,
+    onCancelEditingMessage,
+    onSaveEditedMessage,
+    onCopyMessage,
+    onStartEditingMessage,
+    onDeleteMessage,
+  }: ConversationMessageRowProps) {
+    const isCurrentUser = message.sender?.id === currentUserId && message.sender?.kind === "user";
+    const speakerLabel = getSpeakerLabel(message, currentUserId, mixedAgentThread);
+    const showAgentStatusCard =
+      message.sender?.kind === "agent"
+      && !message.body
+      && (message.isStreaming || message.clientState === "failed_assistant");
+
+    return (
+      <div className={cn("group flex w-full", isCurrentUser ? "justify-end" : "justify-start")}>
+        <div
+          className={cn("flex min-w-0 w-full flex-col", isCurrentUser ? "items-end" : "items-start")}
+        >
+          <p
+            className={cn(
+              "mb-0.5 px-1 text-[11px] font-medium",
+              isCurrentUser ? "text-right text-[#A89C8C]" : "text-[#8D877F]"
+            )}
+          >
+            {speakerLabel}
+          </p>
+
+          {isEditing ? (
+            <div
+              className="w-full rounded-[22px] border border-[rgba(247,148,29,0.2)] bg-[rgba(255,255,255,0.04)] p-3"
+              style={{ minWidth: "280px" }}
+            >
+              <Textarea
+                value={editingDraft}
+                onChange={(event) => onChangeEditingDraft(event.target.value)}
+                rows={3}
+                className="min-h-[88px] border-[rgba(255,255,255,0.08)] bg-[#191919]"
+              />
+              <div className="mt-2 flex justify-end gap-2">
+                <button
+                  onClick={onCancelEditingMessage}
+                  className="flex h-8 w-8 items-center justify-center rounded-xl border border-[rgba(255,255,255,0.08)] bg-[#181818] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
+                  type="button"
+                  title="Cancel"
+                >
+                  <X size={14} />
+                </button>
+                <button
+                  onClick={() => void onSaveEditedMessage(message.id)}
+                  className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#F7941D] text-[#111111] transition-opacity hover:opacity-90 disabled:opacity-50"
+                  type="button"
+                  disabled={!editingDraft.trim() || isSaving}
+                  title="Save"
+                >
+                  {isSaving ? (
+                    <div className="h-3.5 w-3.5 rounded-full border-2 border-[#111111]/20 border-t-[#111111] animate-spin" />
+                  ) : (
+                    <Check size={14} />
+                  )}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div
+              className={cn(
+                "min-w-0 text-sm leading-6 [overflow-wrap:anywhere]",
+                isCurrentUser
+                  ? cn(HUMAN_MESSAGE_WIDTH_CLASS, "rounded-[24px] px-4 py-3 shadow-sm")
+                  : message.sender?.kind === "agent"
+                    ? "w-full px-1 py-1.5"
+                    : cn(HUMAN_MESSAGE_WIDTH_CLASS, "rounded-[22px] px-4 py-3")
+              )}
+              style={
+                isCurrentUser
+                  ? {
+                      background: "linear-gradient(135deg, rgba(247,148,29,0.22), rgba(247,148,29,0.1))",
+                      color: "#F6F3EE",
+                      border: "1px solid rgba(247,148,29,0.08)",
+                      borderBottomRightRadius: "6px",
+                    }
+                  : message.sender?.kind === "agent"
+                    ? {
+                        background: "transparent",
+                        color: "#F6F3EE",
+                        border: "none",
+                        boxShadow: "none",
+                      }
+                    : {
+                        background: "rgba(255,255,255,0.03)",
+                        color: "#F6F3EE",
+                        border: "1px solid rgba(255,255,255,0.05)",
+                        borderBottomLeftRadius: "6px",
+                      }
+              }
+            >
+              {message.body ? (
+                message.sender?.kind === "agent" ? (
+                  <div className="[overflow-wrap:anywhere] prose-chat">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={chatMarkdownComponents}>
+                      {message.body}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  <div className="whitespace-pre-wrap [overflow-wrap:anywhere]">{message.body}</div>
+                )
+              ) : showAgentStatusCard ? (
+                <AgentStatusCard message={message} />
+              ) : message.isStreaming && message.sender?.kind !== "agent" ? (
+                <div className="flex items-center gap-2 text-[#CFC9C2]">
+                  <div className="h-3.5 w-3.5 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
+                  <span>{getStreamingStatusLabel(message)}</span>
+                </div>
+              ) : null}
+
+              {message.sender?.kind === "agent" ? (
+                <MessageOperationalDetails
+                  message={message}
+                  hideStreamingLabel={showAgentStatusCard}
+                />
+              ) : null}
+              <MessageLifecycleState message={message} />
+            </div>
+          )}
+
+          {!isEditing && message.body ? (
+            <div
+              className={cn(
+                "mt-1 flex items-center gap-2 px-1 transition-opacity",
+                isCurrentUser ? "opacity-0 group-hover:opacity-100" : "opacity-100 md:opacity-0 md:group-hover:opacity-100"
+              )}
+            >
+              <button
+                onClick={() => onCopyMessage(message.body, message.id)}
+                type="button"
+                className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
+              >
+                <Copy size={12} />
+                {isCopied ? "Copied" : "Copy"}
+              </button>
+              {isCurrentUser ? (
+                <>
+                  <button
+                    onClick={() => onStartEditingMessage(message)}
+                    type="button"
+                    className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
+                  >
+                    <Pencil size={12} />
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => void onDeleteMessage(message.id)}
+                    type="button"
+                    disabled={isDeleting}
+                    className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#EF4444] disabled:opacity-50"
+                  >
+                    <Trash2 size={12} />
+                    Delete
+                  </button>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+
+          <p className="mt-0.5 px-1 text-[10px] text-[#6F6A64]">{formatMessageTime(message.createdAt)}</p>
+        </div>
+      </div>
+    );
+  },
+  (previousProps, nextProps) =>
+    previousProps.message === nextProps.message
+    && previousProps.currentUserId === nextProps.currentUserId
+    && previousProps.mixedAgentThread === nextProps.mixedAgentThread
+    && previousProps.isEditing === nextProps.isEditing
+    && (
+      (!previousProps.isEditing && !nextProps.isEditing)
+      || previousProps.editingDraft === nextProps.editingDraft
+    )
+    && previousProps.isSaving === nextProps.isSaving
+    && previousProps.isDeleting === nextProps.isDeleting
+    && previousProps.isCopied === nextProps.isCopied
+);
+
+type ConversationTranscriptProps = {
+  conversationId: string;
+  currentUserId: string;
+  conversationType: ConversationSummary["type"];
+  emptyConversationLabel: string;
+  loadingMessages: boolean;
+  rawMessageCount: number;
+  renderedMessages: ChatMessage[];
+  mixedAgentThread: boolean;
+  activeAgentParticipantName: string | null;
+  activeAgentReady: boolean;
+  activeAgentBootstrapPending: boolean;
+  agentUnavailableDetail: string | null;
+  chatScrollRef: RefObject<HTMLDivElement | null>;
+  bottomRef: RefObject<HTMLDivElement | null>;
+  editingMessageId: string | null;
+  editingDraft: string;
+  savingMessageId: string | null;
+  deletingMessageId: string | null;
+  copiedMessageId: string | null;
+  onOpenActiveAgentProfile: () => void;
+  onEngageConversationArea: () => void;
+  onHandleChatScroll: () => void;
+  onChangeEditingDraft: (value: string) => void;
+  onCancelEditingMessage: () => void;
+  onSaveEditedMessage: (messageId: string) => Promise<void>;
+  onCopyMessage: (body: string, messageId: string) => void;
+  onStartEditingMessage: (message: ChatMessage) => void;
+  onDeleteMessage: (messageId: string) => Promise<void>;
+};
+
+const ConversationTranscript = memo(
+  function ConversationTranscript({
+    conversationId,
+    currentUserId,
+    conversationType,
+    emptyConversationLabel,
+    loadingMessages,
+    rawMessageCount,
+    renderedMessages,
+    mixedAgentThread,
+    activeAgentParticipantName,
+    activeAgentReady,
+    activeAgentBootstrapPending,
+    agentUnavailableDetail,
+    chatScrollRef,
+    bottomRef,
+    editingMessageId,
+    editingDraft,
+    savingMessageId,
+    deletingMessageId,
+    copiedMessageId,
+    onOpenActiveAgentProfile,
+    onEngageConversationArea,
+    onHandleChatScroll,
+    onChangeEditingDraft,
+    onCancelEditingMessage,
+    onSaveEditedMessage,
+    onCopyMessage,
+    onStartEditingMessage,
+    onDeleteMessage,
+  }: ConversationTranscriptProps) {
+    useTeamChatPerfCommit("ConversationTranscript", {
+      conversationId,
+      loadingMessages,
+      rawMessageCount,
+      renderedMessageCount: renderedMessages.length,
+      activeAgentBootstrapPending,
+      activeAgentReady,
+    });
+
+    return (
+      <div
+        ref={chatScrollRef}
+        onScroll={onHandleChatScroll}
+        onPointerDown={onEngageConversationArea}
+        className="chat-scroll flex-1 overflow-y-auto overflow-x-hidden bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.035),transparent_58%)] px-4 py-5 md:min-h-0 md:px-8 md:py-8"
+      >
+        {loadingMessages && rawMessageCount === 0 ? (
+          <div className="flex h-full items-center justify-center">
+            <div className="h-6 w-6 rounded-full border-2 border-[rgba(247,148,29,0.2)] border-t-[#F7941D] animate-spin" />
+          </div>
+        ) : activeAgentParticipantName && activeAgentBootstrapPending && renderedMessages.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center px-8 text-center">
+            <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(75,156,211,0.12)] text-[#7EC8E3]">
+              <Bot size={28} />
+            </div>
+            <p className="text-lg font-semibold text-[#F6F3EE]">Initializing {activeAgentParticipantName}</p>
+            <p className="mt-1 max-w-md text-sm leading-6 text-[#8D877F]">
+              Checking the model connection, loading recent conversation history, and preparing the context bundle.
+            </p>
+            <div className="mt-4 flex items-center gap-2 rounded-2xl border border-[rgba(75,156,211,0.16)] bg-[rgba(75,156,211,0.08)] px-4 py-3 text-sm text-[#9FCBE0]">
+              <div className="h-4 w-4 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
+              <span>Preparing a clean start before you type</span>
+            </div>
+          </div>
+        ) : activeAgentParticipantName && !activeAgentReady && renderedMessages.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center px-8 text-center">
+            <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(75,156,211,0.12)] text-[#7EC8E3]">
+              <Bot size={28} />
+            </div>
+            <p className="text-lg font-semibold text-[#F6F3EE]">{activeAgentParticipantName} isn&apos;t ready to chat yet</p>
+            <p className="mt-1 max-w-md text-sm leading-6 text-[#8D877F]">
+              {agentUnavailableDetail || "Connect this agent's LLM brain on the profile page before starting a conversation."}
+            </p>
+            <Button variant="secondary" size="sm" className="mt-4" onClick={onOpenActiveAgentProfile}>
+              Open Agent Profile
+            </Button>
+          </div>
+        ) : renderedMessages.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center text-center">
+            <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(247,148,29,0.12)] text-[#F7941D]">
+              <MessageSquare size={28} />
+            </div>
+            <p className="text-lg font-semibold text-[#F6F3EE]">Start the conversation</p>
+            <p className="mt-1 max-w-md text-sm text-[#8D877F]">
+              {conversationType === "group"
+                ? "Drop the first update, question, or decision into this channel."
+                : `Send a quick message to ${emptyConversationLabel}.`}
+            </p>
+          </div>
+        ) : (
+          <div className={cn(CONVERSATION_COLUMN_CLASS, "flex flex-col gap-6 pb-6")}>
+            {renderedMessages.map((message) => (
+              <ConversationMessageRow
+                key={getMessageRenderKey(message)}
+                message={message}
+                currentUserId={currentUserId}
+                mixedAgentThread={mixedAgentThread}
+                isEditing={editingMessageId === message.id}
+                editingDraft={editingDraft}
+                isSaving={savingMessageId === message.id}
+                isDeleting={deletingMessageId === message.id}
+                isCopied={copiedMessageId === message.id}
+                onChangeEditingDraft={onChangeEditingDraft}
+                onCancelEditingMessage={onCancelEditingMessage}
+                onSaveEditedMessage={onSaveEditedMessage}
+                onCopyMessage={onCopyMessage}
+                onStartEditingMessage={onStartEditingMessage}
+                onDeleteMessage={onDeleteMessage}
+              />
+            ))}
+            <div ref={bottomRef} />
+          </div>
+        )}
+      </div>
+    );
+  },
+  (previousProps, nextProps) => {
+    const previousShowsEmptyState = previousProps.renderedMessages.length === 0;
+    const nextShowsEmptyState = nextProps.renderedMessages.length === 0;
+    const compareEmptyStateProps = previousShowsEmptyState || nextShowsEmptyState;
+
+    return previousProps.conversationId === nextProps.conversationId
+      && previousProps.currentUserId === nextProps.currentUserId
+      && previousProps.renderedMessages === nextProps.renderedMessages
+      && previousProps.rawMessageCount === nextProps.rawMessageCount
+      && previousProps.loadingMessages === nextProps.loadingMessages
+      && previousProps.mixedAgentThread === nextProps.mixedAgentThread
+      && previousProps.editingMessageId === nextProps.editingMessageId
+      && (
+        (!previousProps.editingMessageId && !nextProps.editingMessageId)
+        || previousProps.editingDraft === nextProps.editingDraft
+      )
+      && previousProps.savingMessageId === nextProps.savingMessageId
+      && previousProps.deletingMessageId === nextProps.deletingMessageId
+      && previousProps.copiedMessageId === nextProps.copiedMessageId
+      && (
+        !compareEmptyStateProps
+        || (
+          previousProps.conversationType === nextProps.conversationType
+          && previousProps.emptyConversationLabel === nextProps.emptyConversationLabel
+          && previousProps.activeAgentParticipantName === nextProps.activeAgentParticipantName
+          && previousProps.activeAgentReady === nextProps.activeAgentReady
+          && previousProps.activeAgentBootstrapPending === nextProps.activeAgentBootstrapPending
+          && previousProps.agentUnavailableDetail === nextProps.agentUnavailableDetail
+        )
+      );
+  }
+);
+
 export function ConversationPane({
   currentUserId,
   activeConversation,
@@ -750,226 +1190,36 @@ export function ConversationPane({
               threadDrawerOpen,
             }}
           >
-            <div
-              ref={chatScrollRef}
-              onScroll={onHandleChatScroll}
-              onPointerDown={onEngageConversationArea}
-              className="chat-scroll flex-1 overflow-y-auto overflow-x-hidden bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.035),transparent_58%)] px-4 py-5 md:min-h-0 md:px-8 md:py-8"
-            >
-              {loadingMessages && rawMessageCount === 0 ? (
-                <div className="flex h-full items-center justify-center">
-                  <div className="h-6 w-6 rounded-full border-2 border-[rgba(247,148,29,0.2)] border-t-[#F7941D] animate-spin" />
-                </div>
-              ) : activeAgentParticipant && activeAgentBootstrapPending && renderedMessages.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(75,156,211,0.12)] text-[#7EC8E3]">
-                    <Bot size={28} />
-                  </div>
-                  <p className="text-lg font-semibold text-[#F6F3EE]">Initializing {activeAgentParticipant.name}</p>
-                  <p className="mt-1 max-w-md text-sm leading-6 text-[#8D877F]">
-                    Checking the model connection, loading recent conversation history, and preparing the context bundle.
-                  </p>
-                  <div className="mt-4 flex items-center gap-2 rounded-2xl border border-[rgba(75,156,211,0.16)] bg-[rgba(75,156,211,0.08)] px-4 py-3 text-sm text-[#9FCBE0]">
-                    <div className="h-4 w-4 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                    <span>Preparing a clean start before you type</span>
-                  </div>
-                </div>
-              ) : activeAgentParticipant && !activeAgentReady ? (
-                <div className="flex h-full flex-col items-center justify-center px-8 text-center">
-                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(75,156,211,0.12)] text-[#7EC8E3]">
-                    <Bot size={28} />
-                  </div>
-                  <p className="text-lg font-semibold text-[#F6F3EE]">{activeAgentParticipant.name} isn&apos;t ready to chat yet</p>
-                  <p className="mt-1 max-w-md text-sm leading-6 text-[#8D877F]">
-                    {agentInspectorError || agentInspector?.readiness.detail || "Connect this agent's LLM brain on the profile page before starting a conversation."}
-                  </p>
-                  <Button variant="secondary" size="sm" className="mt-4" onClick={onOpenActiveAgentProfile}>
-                    Open Agent Profile
-                  </Button>
-                </div>
-              ) : renderedMessages.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center text-center">
-                  <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(247,148,29,0.12)] text-[#F7941D]">
-                    <MessageSquare size={28} />
-                  </div>
-                  <p className="text-lg font-semibold text-[#F6F3EE]">Start the conversation</p>
-                  <p className="mt-1 max-w-md text-sm text-[#8D877F]">
-                    {activeConversation.type === "group"
-                      ? "Drop the first update, question, or decision into this channel."
-                      : `Send a quick message to ${getConversationLabel(activeConversation, currentUserId)}.`}
-                  </p>
-                </div>
-              ) : (
-                <div className={cn(CONVERSATION_COLUMN_CLASS, "flex flex-col gap-6 pb-6")}>
-                  {renderedMessages.map((message) => {
-                    const isCurrentUser = message.sender?.id === currentUserId && message.sender?.kind === "user";
-                    const isEditing = editingMessageId === message.id;
-                    const speakerLabel = getSpeakerLabel(message, currentUserId, mixedAgentThread);
-                    const showAgentStreamingPlaceholder =
-                      message.sender?.kind === "agent" && message.isStreaming && !message.body;
-
-                    return (
-                      <div
-                        key={message.id}
-                        className={cn("group flex w-full", isCurrentUser ? "justify-end" : "justify-start")}
-                      >
-                        <div
-                          className={cn("flex min-w-0 w-full flex-col", isCurrentUser ? "items-end" : "items-start")}
-                        >
-                          <p
-                            className={cn(
-                              "mb-0.5 px-1 text-[11px] font-medium",
-                              isCurrentUser ? "text-right text-[#A89C8C]" : "text-[#8D877F]"
-                            )}
-                          >
-                            {speakerLabel}
-                          </p>
-
-                          {isEditing ? (
-                            <div
-                              className="w-full rounded-[22px] border border-[rgba(247,148,29,0.2)] bg-[rgba(255,255,255,0.04)] p-3"
-                              style={{ minWidth: "280px" }}
-                            >
-                              <Textarea
-                                value={editingDraft}
-                                onChange={(event) => onChangeEditingDraft(event.target.value)}
-                                rows={3}
-                                className="min-h-[88px] border-[rgba(255,255,255,0.08)] bg-[#191919]"
-                              />
-                              <div className="mt-2 flex justify-end gap-2">
-                                <button
-                                  onClick={onCancelEditingMessage}
-                                  className="flex h-8 w-8 items-center justify-center rounded-xl border border-[rgba(255,255,255,0.08)] bg-[#181818] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
-                                  type="button"
-                                  title="Cancel"
-                                >
-                                  <X size={14} />
-                                </button>
-                                <button
-                                  onClick={() => void onSaveEditedMessage(message.id)}
-                                  className="flex h-8 w-8 items-center justify-center rounded-xl bg-[#F7941D] text-[#111111] transition-opacity hover:opacity-90 disabled:opacity-50"
-                                  type="button"
-                                  disabled={!editingDraft.trim() || savingMessageId === message.id}
-                                  title="Save"
-                                >
-                                  {savingMessageId === message.id ? (
-                                    <div className="h-3.5 w-3.5 rounded-full border-2 border-[#111111]/20 border-t-[#111111] animate-spin" />
-                                  ) : (
-                                    <Check size={14} />
-                                  )}
-                                </button>
-                              </div>
-                            </div>
-                          ) : (
-                            <div
-                              className={cn(
-                                "min-w-0 text-sm leading-6 [overflow-wrap:anywhere]",
-                                isCurrentUser
-                                  ? cn(HUMAN_MESSAGE_WIDTH_CLASS, "rounded-[24px] px-4 py-3 shadow-sm")
-                                  : message.sender?.kind === "agent"
-                                    ? "w-full px-1 py-1.5"
-                                    : cn(HUMAN_MESSAGE_WIDTH_CLASS, "rounded-[22px] px-4 py-3")
-                              )}
-                              style={
-                                isCurrentUser
-                                  ? {
-                                    background: "linear-gradient(135deg, rgba(247,148,29,0.22), rgba(247,148,29,0.1))",
-                                    color: "#F6F3EE",
-                                    border: "1px solid rgba(247,148,29,0.08)",
-                                    borderBottomRightRadius: "6px",
-                                  }
-                                  : message.sender?.kind === "agent"
-                                    ? {
-                                      background: "transparent",
-                                      color: "#F6F3EE",
-                                      border: "none",
-                                      boxShadow: "none",
-                                    }
-                                    : {
-                                      background: "rgba(255,255,255,0.03)",
-                                      color: "#F6F3EE",
-                                      border: "1px solid rgba(255,255,255,0.05)",
-                                      borderBottomLeftRadius: "6px",
-                                    }
-                              }
-                            >
-                              {message.body ? (
-                                message.sender?.kind === "agent" ? (
-                                  <div className="[overflow-wrap:anywhere] prose-chat">
-                                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={chatMarkdownComponents}>
-                                      {message.body}
-                                    </ReactMarkdown>
-                                  </div>
-                                ) : (
-                                  <div className="whitespace-pre-wrap [overflow-wrap:anywhere]">{message.body}</div>
-                                )
-                              ) : showAgentStreamingPlaceholder ? (
-                                <AgentStreamingPlaceholder message={message} />
-                              ) : message.isStreaming && message.sender?.kind !== "agent" ? (
-                                <div className="flex items-center gap-2 text-[#CFC9C2]">
-                                  <div className="h-3.5 w-3.5 rounded-full border-2 border-[rgba(126,200,227,0.2)] border-t-[#7EC8E3] animate-spin" />
-                                  <span>{getStreamingStatusLabel(message)}</span>
-                                </div>
-                              ) : null}
-
-                              {message.sender?.kind === "agent" ? (
-                                <MessageOperationalDetails
-                                  message={message}
-                                  hideStreamingLabel={showAgentStreamingPlaceholder}
-                                />
-                              ) : null}
-                              <MessageLifecycleState message={message} />
-                            </div>
-                          )}
-
-                          {!isEditing && message.body ? (
-                            <div
-                              className={cn(
-                                "mt-1 flex items-center gap-2 px-1 transition-opacity",
-                                isCurrentUser ? "opacity-0 group-hover:opacity-100" : "opacity-100 md:opacity-0 md:group-hover:opacity-100"
-                              )}
-                            >
-                              <button
-                                onClick={() => onCopyMessage(message.body, message.id)}
-                                type="button"
-                                className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
-                              >
-                                <Copy size={12} />
-                                {copiedMessageId === message.id ? "Copied" : "Copy"}
-                              </button>
-                              {isCurrentUser ? (
-                                <>
-                                  <button
-                                    onClick={() => onStartEditingMessage(message)}
-                                    type="button"
-                                    className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#F6F3EE]"
-                                  >
-                                    <Pencil size={12} />
-                                    Edit
-                                  </button>
-                                  <button
-                                    onClick={() => void onDeleteMessage(message.id)}
-                                    type="button"
-                                    disabled={deletingMessageId === message.id}
-                                    className="flex items-center gap-1 text-[11px] text-[#8D877F] transition-colors hover:text-[#EF4444] disabled:opacity-50"
-                                  >
-                                    <Trash2 size={12} />
-                                    Delete
-                                  </button>
-                                </>
-                              ) : null}
-                            </div>
-                          ) : null}
-
-                          <p className="mt-0.5 px-1 text-[10px] text-[#6F6A64]">{formatMessageTime(message.createdAt)}</p>
-                        </div>
-                      </div>
-                    );
-                  })}
-                  <div ref={bottomRef} />
-                </div>
-              )}
-            </div>
+            <ConversationTranscript
+              conversationId={activeConversation.id}
+              currentUserId={currentUserId}
+              conversationType={activeConversation.type}
+              emptyConversationLabel={getConversationLabel(activeConversation, currentUserId)}
+              loadingMessages={loadingMessages}
+              rawMessageCount={rawMessageCount}
+              renderedMessages={renderedMessages}
+              mixedAgentThread={mixedAgentThread}
+              activeAgentParticipantName={activeAgentParticipant?.name ?? null}
+              activeAgentReady={activeAgentReady}
+              activeAgentBootstrapPending={activeAgentBootstrapPending}
+              agentUnavailableDetail={agentInspectorError || agentInspector?.readiness.detail || null}
+              chatScrollRef={chatScrollRef}
+              bottomRef={bottomRef}
+              editingMessageId={editingMessageId}
+              editingDraft={editingDraft}
+              savingMessageId={savingMessageId}
+              deletingMessageId={deletingMessageId}
+              copiedMessageId={copiedMessageId}
+              onOpenActiveAgentProfile={onOpenActiveAgentProfile}
+              onEngageConversationArea={onEngageConversationArea}
+              onHandleChatScroll={onHandleChatScroll}
+              onChangeEditingDraft={onChangeEditingDraft}
+              onCancelEditingMessage={onCancelEditingMessage}
+              onSaveEditedMessage={onSaveEditedMessage}
+              onCopyMessage={onCopyMessage}
+              onStartEditingMessage={onStartEditingMessage}
+              onDeleteMessage={onDeleteMessage}
+            />
           </TeamChatPerfBoundary>
           <TeamChatPerfBoundary
             id="ConversationComposer"
@@ -982,7 +1232,7 @@ export function ConversationPane({
               activeAgentBootstrapPending,
             }}
           >
-            <ThreadComposer
+            <MemoizedThreadComposer
               currentUserId={currentUserId}
               activeConversation={activeConversation}
               activeAgentParticipant={activeAgentParticipant}

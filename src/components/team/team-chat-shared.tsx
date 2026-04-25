@@ -147,7 +147,11 @@ export interface ToolActivity {
   result?: string;
 }
 
-export type ChatMessageClientState = "optimistic_user" | "pending_assistant" | "failed_user";
+export type ChatMessageClientState =
+  | "optimistic_user"
+  | "pending_assistant"
+  | "failed_user"
+  | "failed_assistant";
 
 export interface ChatMessage {
   id: string;
@@ -155,7 +159,7 @@ export interface ChatMessage {
   thinking?: string | null;
   thinkingEnabled?: boolean;
   isStreaming?: boolean;
-  streamState?: "thinking" | "responding" | "using_tools";
+  streamState?: "preparing" | "reading_context" | "thinking" | "responding" | "using_tools";
   toolActivity?: ToolActivity[];
   retrievalSources?: Array<{
     kind: string;

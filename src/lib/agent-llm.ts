@@ -202,7 +202,10 @@ function buildAnthropicMessagesUrl(rawUrl?: string | null) {
   return `${baseUrl}/v1/messages`;
 }
 
-function buildBedrockRuntimeUrl(config: Pick<AgentLlmConfig, "llmEndpointUrl" | "llmRegion" | "llmModel">) {
+function buildBedrockRuntimeUrl(
+  config: Pick<AgentLlmConfig, "llmEndpointUrl" | "llmRegion" | "llmModel">,
+  operation: "converse" | "converse-stream" = "converse"
+) {
   const region = config.llmRegion?.trim() || "us-east-1";
   const baseUrl = buildProviderBaseUrl(config.llmEndpointUrl, `https://bedrock-runtime.${region}.amazonaws.com`);
   const model = config.llmModel?.trim();
@@ -211,7 +214,7 @@ function buildBedrockRuntimeUrl(config: Pick<AgentLlmConfig, "llmEndpointUrl" | 
     throw new Error("A Bedrock model is required");
   }
 
-  return `${baseUrl}/model/${encodeURIComponent(model)}/converse`;
+  return `${baseUrl}/model/${encodeURIComponent(model)}/${operation}`;
 }
 
 function buildAnthropicHeaders(config: Pick<AgentLlmConfig, "llmApiKey">) {
@@ -292,6 +295,44 @@ function logLlmInvocationFailure(
       ...buildLlmDiagnosticContext(config),
       errorName: error instanceof Error ? error.name : "UnknownError",
       errorMessage: error instanceof Error ? error.message : String(error),
+    })
+  );
+}
+
+function logBedrockStreamingFallback(config: AgentLlmConfig, reason: string) {
+  console.warn(
+    "[agent-llm][bedrock-stream-fallback]",
+    JSON.stringify({
+      ...buildLlmDiagnosticContext(config),
+      reason,
+    })
+  );
+}
+
+type BedrockStreamDiagnostics = {
+  httpStatus: number | null;
+  contentType: string | null;
+  bedrockContentType: string | null;
+  hasBody: boolean;
+  rawChunkCount: number;
+  decodedEventCount: number;
+  eventTypeNames: string[];
+  eventKeyShapes: string[];
+  deltaKinds: string[];
+  deltaObjectKeys: string[];
+  textFieldNames: string[];
+  contentTextDeltaCount: number;
+  messageStopCount: number;
+  stopReasonCount: number;
+  fallbackReason: string | null;
+};
+
+function logBedrockStreamDiagnostics(config: AgentLlmConfig, diagnostics: BedrockStreamDiagnostics) {
+  console.info(
+    "[agent-llm][bedrock-stream]",
+    JSON.stringify({
+      ...buildLlmDiagnosticContext(config),
+      ...diagnostics,
     })
   );
 }
@@ -411,7 +452,7 @@ async function fetchBedrockJson(
     throw new Error("Bedrock access key ID and secret access key are required");
   }
 
-  const url = buildBedrockRuntimeUrl(config);
+  const url = buildBedrockRuntimeUrl(config, "converse");
   const serializedBody = JSON.stringify(body);
   const response = await fetch(url, {
     method: "POST",
@@ -681,6 +722,444 @@ async function fetchJson(url: string, init: RequestInit) {
   }
 
   return response.json();
+}
+
+function buildBedrockConversationBody(messages: LlmMessage[], systemPrompt: string) {
+  return {
+    system: [{ text: systemPrompt }],
+    messages: toAnthropicMessages(messages).map((message) => ({
+      role: message.role,
+      content: [{ text: message.content }],
+    })),
+    inferenceConfig: { maxTokens: 2048 },
+  };
+}
+
+function pushUniqueNonEmpty(target: string[], values: string[]) {
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed || target.includes(trimmed)) {
+      continue;
+    }
+    target.push(trimmed);
+  }
+}
+
+function extractTextSegmentsFromBedrockNode(
+  value: unknown,
+  fieldPath: string,
+  textFieldNames: Set<string>
+): string[] {
+  if (typeof value === "string") {
+    if (!value.trim()) {
+      return [];
+    }
+    textFieldNames.add(fieldPath);
+    return [value];
+  }
+
+  if (Array.isArray(value)) {
+    const segments: string[] = [];
+    for (const item of value) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const record = item as Record<string, unknown>;
+      pushUniqueNonEmpty(segments, extractTextSegmentsFromBedrockNode(record.text, `${fieldPath}[].text`, textFieldNames));
+      pushUniqueNonEmpty(segments, extractTextSegmentsFromBedrockNode(record.content, `${fieldPath}[].content`, textFieldNames));
+      const message = record.message && typeof record.message === "object"
+        ? record.message as Record<string, unknown>
+        : null;
+      pushUniqueNonEmpty(
+        segments,
+        extractTextSegmentsFromBedrockNode(message?.content, `${fieldPath}[].message.content`, textFieldNames)
+      );
+    }
+    return segments;
+  }
+
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  const record = value as Record<string, unknown>;
+  const segments: string[] = [];
+  pushUniqueNonEmpty(segments, extractTextSegmentsFromBedrockNode(record.text, `${fieldPath}.text`, textFieldNames));
+  pushUniqueNonEmpty(segments, extractTextSegmentsFromBedrockNode(record.content, `${fieldPath}.content`, textFieldNames));
+  const message = record.message && typeof record.message === "object"
+    ? record.message as Record<string, unknown>
+    : null;
+  pushUniqueNonEmpty(segments, extractTextSegmentsFromBedrockNode(message?.content, `${fieldPath}.message.content`, textFieldNames));
+  return segments;
+}
+
+function extractThinkingSegmentsFromBedrockNode(
+  value: unknown,
+  fieldPath: string,
+  textFieldNames: Set<string>
+): string[] {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  const record = value as Record<string, unknown>;
+  const reasoningContent = record.reasoningContent && typeof record.reasoningContent === "object"
+    ? record.reasoningContent as Record<string, unknown>
+    : null;
+  const segments: string[] = [];
+  pushUniqueNonEmpty(
+    segments,
+    extractTextSegmentsFromBedrockNode(reasoningContent?.text, `${fieldPath}.reasoningContent.text`, textFieldNames)
+  );
+  pushUniqueNonEmpty(
+    segments,
+    extractTextSegmentsFromBedrockNode(record.reasoning_content, `${fieldPath}.reasoning_content`, textFieldNames)
+  );
+  return segments;
+}
+
+function extractBedrockStreamFrames(buffer: Buffer) {
+  const payloads: Buffer[] = [];
+  let offset = 0;
+
+  while (buffer.length - offset >= 12) {
+    const totalLength = buffer.readUInt32BE(offset);
+    if (totalLength < 16) {
+      throw new Error("Bedrock stream frame was malformed");
+    }
+    if (buffer.length - offset < totalLength) {
+      break;
+    }
+
+    const headersLength = buffer.readUInt32BE(offset + 4);
+    const payloadStart = offset + 12 + headersLength;
+    const payloadEnd = offset + totalLength - 4;
+
+    if (payloadStart > payloadEnd) {
+      throw new Error("Bedrock stream frame had an invalid header length");
+    }
+
+    payloads.push(Buffer.from(buffer.subarray(payloadStart, payloadEnd)));
+    offset += totalLength;
+  }
+
+  return {
+    payloads,
+    remainder: Buffer.from(buffer.subarray(offset)),
+  };
+}
+
+function extractBedrockStreamError(event: Record<string, unknown>) {
+  const exceptionEntry = Object.entries(event).find(
+    ([key, value]) => key.endsWith("Exception") && value && typeof value === "object"
+  );
+
+  if (!exceptionEntry) {
+    return null;
+  }
+
+  const [exceptionName, details] = exceptionEntry;
+  const detailRecord = details as Record<string, unknown>;
+  const detailMessage =
+    typeof detailRecord.message === "string"
+      ? detailRecord.message
+      : typeof detailRecord.Message === "string"
+        ? detailRecord.Message
+        : exceptionName;
+
+  return `${exceptionName}: ${detailMessage}`;
+}
+
+function isBedrockStreamingUnsupported(details: string) {
+  const normalized = details.toLowerCase();
+  return normalized.includes("responsestreamingsupported")
+    || normalized.includes("response streaming is not supported")
+    || normalized.includes("response streaming isn't supported")
+    || normalized.includes("streaming is not supported")
+    || normalized.includes("conversestream is not supported")
+    || (normalized.includes("converse-stream") && normalized.includes("not supported"));
+}
+
+async function* streamBedrockReply(
+  config: AgentLlmConfig,
+  messages: LlmMessage[],
+  systemPrompt: string
+): AsyncGenerator<AgentReplyStreamEvent> {
+  const accessKeyId = config.llmAccessKeyId?.trim();
+  const secretAccessKey = config.llmSecretAccessKey?.trim();
+  const region = config.llmRegion?.trim() || "us-east-1";
+  const model = config.llmModel?.trim() || "";
+
+  if (!accessKeyId || !secretAccessKey) {
+    throw new Error("Bedrock access key ID and secret access key are required");
+  }
+
+  const eventTypeNames = new Set<string>();
+  const eventKeyShapes = new Set<string>();
+  const deltaKinds = new Set<string>();
+  const deltaObjectKeys = new Set<string>();
+  const textFieldNames = new Set<string>();
+  const diagnostics: Omit<
+    BedrockStreamDiagnostics,
+    "eventTypeNames" | "eventKeyShapes" | "deltaKinds" | "deltaObjectKeys" | "textFieldNames"
+  > & {
+    eventTypeNames: Set<string>;
+    eventKeyShapes: Set<string>;
+    deltaKinds: Set<string>;
+    deltaObjectKeys: Set<string>;
+    textFieldNames: Set<string>;
+  } = {
+    httpStatus: null,
+    contentType: null,
+    bedrockContentType: null,
+    hasBody: false,
+    rawChunkCount: 0,
+    decodedEventCount: 0,
+    eventTypeNames,
+    eventKeyShapes,
+    deltaKinds,
+    deltaObjectKeys,
+    textFieldNames,
+    contentTextDeltaCount: 0,
+    messageStopCount: 0,
+    stopReasonCount: 0,
+    fallbackReason: null,
+  };
+  let diagnosticsLogged = false;
+
+  const flushDiagnostics = (reason?: string) => {
+    if (reason && !diagnostics.fallbackReason) {
+      diagnostics.fallbackReason = reason;
+    }
+    if (diagnosticsLogged) {
+      return;
+    }
+    diagnosticsLogged = true;
+    logBedrockStreamDiagnostics(config, {
+      httpStatus: diagnostics.httpStatus,
+      contentType: diagnostics.contentType,
+      bedrockContentType: diagnostics.bedrockContentType,
+      hasBody: diagnostics.hasBody,
+      rawChunkCount: diagnostics.rawChunkCount,
+      decodedEventCount: diagnostics.decodedEventCount,
+      eventTypeNames: [...diagnostics.eventTypeNames].sort(),
+      eventKeyShapes: [...diagnostics.eventKeyShapes].sort(),
+      deltaKinds: [...diagnostics.deltaKinds].sort(),
+      deltaObjectKeys: [...diagnostics.deltaObjectKeys].sort(),
+      textFieldNames: [...diagnostics.textFieldNames].sort(),
+      contentTextDeltaCount: diagnostics.contentTextDeltaCount,
+      messageStopCount: diagnostics.messageStopCount,
+      stopReasonCount: diagnostics.stopReasonCount,
+      fallbackReason: diagnostics.fallbackReason,
+    });
+  };
+
+  const fallbackToOneShot = async function* (reason: string): AsyncGenerator<AgentReplyStreamEvent> {
+    diagnostics.fallbackReason = reason;
+    flushDiagnostics(reason);
+    logBedrockStreamingFallback(config, reason);
+    const fallback = await generateBedrockReply(config, messages, systemPrompt);
+    yield { type: "content_delta", delta: fallback.content };
+    yield { type: "done", model: fallback.model };
+  };
+
+  const url = buildBedrockRuntimeUrl(config, "converse-stream");
+  const body = buildBedrockConversationBody(messages, systemPrompt);
+  const serializedBody = JSON.stringify(body);
+  const response = await fetch(url, {
+    method: "POST",
+    headers: signAwsRequest({
+      method: "POST",
+      url,
+      region,
+      accessKeyId,
+      secretAccessKey,
+      body: serializedBody,
+    }),
+    body: serializedBody,
+    signal: AbortSignal.timeout(300000),
+  });
+  diagnostics.httpStatus = response.status;
+  diagnostics.contentType = response.headers.get("content-type");
+  diagnostics.bedrockContentType = response.headers.get("x-amzn-bedrock-content-type");
+  diagnostics.hasBody = Boolean(response.body);
+
+  if (!response.ok) {
+    const details = await response.text().catch(() => "");
+    if (details && isBedrockStreamingUnsupported(details)) {
+      yield* fallbackToOneShot(`stream_http_${response.status}:${details}`);
+      return;
+    }
+
+    flushDiagnostics(`stream_http_${response.status}`);
+    throw new Error(details || `Bedrock stream request failed (${response.status})`);
+  }
+
+  if (!response.body) {
+    yield* fallbackToOneShot("stream_body_missing");
+    return;
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = Buffer.alloc(0);
+  let doneEmitted = false;
+
+  async function* processPayloads(payloads: Buffer[]): AsyncGenerator<AgentReplyStreamEvent> {
+    for (const payload of payloads) {
+      const trimmed = decoder.decode(payload).trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(trimmed) as Record<string, unknown>;
+      } catch (error) {
+        throw new Error(
+          `bedrock_stream_json_parse_failed:${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+      diagnostics.decodedEventCount += 1;
+      const eventKeys = Object.keys(event);
+      for (const eventTypeName of eventKeys) {
+        diagnostics.eventTypeNames.add(eventTypeName);
+      }
+      diagnostics.eventKeyShapes.add(eventKeys.slice().sort().join("|"));
+      const streamError = extractBedrockStreamError(event);
+      if (streamError) {
+        throw new Error(streamError);
+      }
+
+      const contentBlockDelta =
+        event.contentBlockDelta && typeof event.contentBlockDelta === "object"
+          ? event.contentBlockDelta as Record<string, unknown>
+          : null;
+      const topLevelDelta = Object.prototype.hasOwnProperty.call(event, "delta") ? event.delta : undefined;
+
+      const recordDeltaDiagnostics = (deltaValue: unknown) => {
+        if (typeof deltaValue === "string") {
+          diagnostics.deltaKinds.add("string");
+          return;
+        }
+        if (Array.isArray(deltaValue)) {
+          diagnostics.deltaKinds.add("array");
+          return;
+        }
+        if (deltaValue && typeof deltaValue === "object") {
+          diagnostics.deltaKinds.add("object");
+          for (const key of Object.keys(deltaValue as Record<string, unknown>)) {
+            diagnostics.deltaObjectKeys.add(key);
+          }
+          return;
+        }
+        diagnostics.deltaKinds.add(deltaValue === null ? "null" : typeof deltaValue);
+      };
+
+      if (contentBlockDelta && Object.prototype.hasOwnProperty.call(contentBlockDelta, "delta")) {
+        recordDeltaDiagnostics(contentBlockDelta.delta);
+      }
+      if (Object.prototype.hasOwnProperty.call(event, "delta")) {
+        recordDeltaDiagnostics(topLevelDelta);
+      }
+
+      const textSegments: string[] = [];
+      const thinkingSegments: string[] = [];
+      pushUniqueNonEmpty(
+        textSegments,
+        extractTextSegmentsFromBedrockNode(contentBlockDelta?.delta, "contentBlockDelta.delta", diagnostics.textFieldNames)
+      );
+      pushUniqueNonEmpty(
+        thinkingSegments,
+        extractThinkingSegmentsFromBedrockNode(contentBlockDelta?.delta, "contentBlockDelta.delta", diagnostics.textFieldNames)
+      );
+      if (textSegments.length === 0) {
+        pushUniqueNonEmpty(
+          textSegments,
+          extractTextSegmentsFromBedrockNode(topLevelDelta, "delta", diagnostics.textFieldNames)
+        );
+        pushUniqueNonEmpty(
+          thinkingSegments,
+          extractThinkingSegmentsFromBedrockNode(topLevelDelta, "delta", diagnostics.textFieldNames)
+        );
+      }
+      if (textSegments.length === 0) {
+        pushUniqueNonEmpty(
+          textSegments,
+          extractTextSegmentsFromBedrockNode(event.message, "message", diagnostics.textFieldNames)
+        );
+      }
+      if (textSegments.length === 0) {
+        pushUniqueNonEmpty(
+          textSegments,
+          extractTextSegmentsFromBedrockNode(event.content, "content", diagnostics.textFieldNames)
+        );
+      }
+
+      for (const segment of textSegments) {
+        diagnostics.contentTextDeltaCount += 1;
+        yield { type: "content_delta", delta: segment };
+      }
+
+      for (const segment of thinkingSegments) {
+        yield { type: "thinking_delta", delta: segment };
+      }
+
+      if (event.messageStop) {
+        diagnostics.messageStopCount += 1;
+      }
+      if (typeof event.stopReason === "string" && event.stopReason.length > 0) {
+        diagnostics.stopReasonCount += 1;
+        if (diagnostics.contentTextDeltaCount > 0 && !doneEmitted) {
+          doneEmitted = true;
+          yield { type: "done", model };
+        }
+      }
+    }
+  }
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      diagnostics.rawChunkCount += 1;
+      buffer = Buffer.concat([buffer, Buffer.from(value)]);
+      const { payloads, remainder } = extractBedrockStreamFrames(buffer);
+      buffer = remainder;
+
+      yield* processPayloads(payloads);
+    }
+
+    if (buffer.length > 0) {
+      const { payloads, remainder } = extractBedrockStreamFrames(buffer);
+      if (remainder.length > 0) {
+        throw new Error("bedrock_stream_incomplete_frame");
+      }
+      yield* processPayloads(payloads);
+    }
+
+    if (diagnostics.contentTextDeltaCount === 0) {
+      yield* fallbackToOneShot("stream_completed_without_text_deltas");
+      return;
+    }
+
+    if (!doneEmitted) {
+      doneEmitted = true;
+      yield { type: "done", model };
+    }
+    flushDiagnostics();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    if (diagnostics.contentTextDeltaCount === 0) {
+      yield* fallbackToOneShot(`stream_error:${reason}`);
+      return;
+    }
+    flushDiagnostics(`stream_error:${reason}`);
+    throw error;
+  }
 }
 
 async function probeResolvedEndpoint(
@@ -996,14 +1475,7 @@ async function generateBedrockReply(
   messages: LlmMessage[],
   systemPrompt: string
 ) {
-  const payload = await fetchBedrockJson(config, {
-    system: [{ text: systemPrompt }],
-    messages: toAnthropicMessages(messages).map((message) => ({
-      role: message.role,
-      content: [{ text: message.content }],
-    })),
-    inferenceConfig: { maxTokens: 2048 },
-  });
+  const payload = await fetchBedrockJson(config, buildBedrockConversationBody(messages, systemPrompt));
   const content = extractBedrockText(payload as Record<string, unknown>);
 
   if (!content) {
@@ -1118,9 +1590,7 @@ export async function* streamAgentReply(
   }
 
   if (provider === "bedrock") {
-    const response = await generateBedrockReply(config, messages, systemPrompt);
-    yield { type: "content_delta", delta: response.content };
-    yield { type: "done", model: response.model };
+    yield* streamBedrockReply(config, messages, systemPrompt);
     return;
   }
 
@@ -1131,17 +1601,11 @@ export async function* streamAgentReply(
   // (max 5 rounds to prevent runaway loops). Each round yields tool_call and
   // tool_result events so the UI can show real-time progress.
   //
-  // When the model stops calling tools it produces its final answer in that
-  // same non-streaming response. We capture it here and emit it directly so
-  // we skip the redundant second streaming LLM call.
-  //
   // We skip the tool loop entirely when the message has no signal that tools
   // are needed — routing those straight to streaming so the user gets fast
   // first-token response instead of waiting for a full non-streaming round.
   const messageNeedsTools = shouldEnterToolLoop(config.history);
 
-  let finalAnswerFromToolLoop: string | null = null;
-  let usedToolsInLoop = false;
   // Track tool interaction messages so they can be persisted and re-injected
   // as history in subsequent turns, giving the model continuity across turns.
   const toolStartIdx = messages.length;
@@ -1206,13 +1670,9 @@ export async function* streamAgentReply(
       }
 
       if (!rawToolCalls.length) {
-        // Only reuse the non-streaming answer when we've actually executed
-        // tools in a previous round. If the model decides to answer directly,
-        // fall through to the normal streaming path so the UI can render a
-        // typed-out reply instead of receiving the whole message at once.
-        if (usedToolsInLoop && assistantContent.trim()) {
-          finalAnswerFromToolLoop = assistantContent;
-        }
+        // Even when the model already has a final answer after using tools,
+        // continue into the normal streaming path so the UI can render the
+        // answer progressively in the anchored assistant row.
         break;
       }
 
@@ -1225,7 +1685,6 @@ export async function* streamAgentReply(
 
       // Execute each tool call sequentially and yield progress events.
       for (let i = 0; i < rawToolCalls.length; i++) {
-        usedToolsInLoop = true;
         const tc = rawToolCalls[i];
         const callId = String(tc.id ?? `call_${round}_${i}`);
         const toolName = String(tc.function?.name ?? "");
@@ -1266,14 +1725,6 @@ export async function* streamAgentReply(
   const toolContextMessages = messages.slice(toolStartIdx);
   if (toolContextMessages.length > 0) {
     yield { type: "tool_context", messages: toolContextMessages };
-  }
-
-  // If the tool loop already produced the final answer, emit it and stop.
-  // This avoids a redundant third LLM call to regenerate the same response.
-  if (finalAnswerFromToolLoop !== null) {
-    yield { type: "content_delta", delta: finalAnswerFromToolLoop };
-    yield { type: "done", model: resolved.model };
-    return;
   }
 
   if (resolved.kind === "openai") {

@@ -982,7 +982,22 @@ export function TeamClient({
     currentMessages: ChatMessage[],
     incomingMessages: ChatMessage[]
   ) => {
-    const serverMessages = sortChatMessagesChronologically(incomingMessages);
+    const currentMessagesById = new Map(currentMessages.map((message) => [message.id, message]));
+    const serverMessages = sortChatMessagesChronologically(
+      incomingMessages.map((message) => {
+        const currentMessage = currentMessagesById.get(message.id);
+        if (!currentMessage) {
+          return message;
+        }
+
+        return {
+          ...message,
+          clientRequestId: currentMessage.clientRequestId ?? message.clientRequestId,
+          retrievalSources: message.retrievalSources ?? currentMessage.retrievalSources,
+          toolActivity: message.toolActivity ?? currentMessage.toolActivity,
+        };
+      })
+    );
     const pendingMessages = currentMessages.filter((message) => message.clientState);
 
     if (pendingMessages.length === 0) {
@@ -1021,7 +1036,7 @@ export function TeamClient({
     const mergedMessages = [...serverMessages];
 
     for (const pendingMessage of pendingMessages) {
-      if (pendingMessage.clientState === "failed_user") {
+      if (pendingMessage.clientState === "failed_user" || pendingMessage.clientState === "failed_assistant") {
         mergedMessages.push(pendingMessage);
         continue;
       }
@@ -1209,13 +1224,9 @@ export function TeamClient({
     const el = chatScrollRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    const atBottom = distanceFromBottom < 10;
-    isAtBottomRef.current = distanceFromBottom < 120;
-    if (atBottom) {
-      userScrolledUpRef.current = false;
-    } else {
-      userScrolledUpRef.current = true;
-    }
+    const nearBottom = distanceFromBottom < 120;
+    isAtBottomRef.current = nearBottom;
+    userScrolledUpRef.current = !nearBottom;
   }
 
   const currentUser = members.find((member) => member.id === currentUserId);
@@ -3187,7 +3198,7 @@ export function TeamClient({
           body: "",
           thinking: "",
           isStreaming: true,
-          streamState: "thinking",
+          streamState: "preparing",
           createdAt: new Date().toISOString(),
           clientRequestId,
           clientState: "pending_assistant",
@@ -3336,6 +3347,7 @@ export function TeamClient({
                       ? {
                           ...message,
                           retrievalSources: event.sources,
+                          streamState: message.body ? message.streamState : "reading_context",
                         }
                       : message
                   ),
@@ -3424,10 +3436,14 @@ export function TeamClient({
                       message.sender?.kind === "agent"
                         ? {
                             ...message,
+                            clientRequestId,
                             retrievalSources: event.retrievalSources ?? optimisticAgent?.retrievalSources,
                             toolActivity: optimisticAgent?.toolActivity,
                           }
-                        : message
+                        : {
+                            ...message,
+                            clientRequestId,
+                          }
                     ),
                   ];
                 },
@@ -3466,9 +3482,13 @@ export function TeamClient({
                 message.sender?.kind === "agent"
                   ? {
                       ...message,
+                      clientRequestId,
                       retrievalSources: data.retrievalSources ?? [],
                     }
-                  : message
+                  : {
+                      ...message,
+                      clientRequestId,
+                    }
               ),
             ],
             "non_stream_send"
@@ -3523,12 +3543,23 @@ export function TeamClient({
       updateMessagesForConversation(
         conversationId,
         (current) =>
-          current
-            .filter((message) => message.id !== optimisticAgentMessage?.id)
-            .map((message) =>
-            message.id === optimisticMessage.id
-              ? { ...message, clientState: "failed_user" as const }
-              : message
+          current.map((message) => {
+            if (message.id === optimisticMessage.id) {
+              return { ...message, clientState: "failed_user" as const };
+            }
+
+            if (message.id === optimisticAgentMessage?.id) {
+              return {
+                ...message,
+                body: "",
+                isStreaming: false,
+                streamState: undefined,
+                clientState: "failed_assistant" as const,
+              };
+            }
+
+            return message;
+          }
             ),
         "delivery_failed"
       );
