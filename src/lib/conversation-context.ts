@@ -5,14 +5,17 @@ import { parseOffice, type OfficeContentNode, type SlideMetadata } from "officep
 import * as XLSX from "xlsx";
 import {
   buildDocumentChunkCandidates,
+  analyzeDocumentOccurrenceQuery,
   DEFAULT_DOCUMENT_CHUNK_STRATEGY,
   DEFAULT_DOCUMENT_CHUNK_RANKING_STRATEGY,
+  buildDocumentChunkOccurrenceInventory,
   rankDocumentChunks,
-  selectDocumentChunksInOrder,
+  selectRankedDocumentChunksWithinBudget,
   type ContextDocumentChunk,
   type ContextDocumentChunkRankingFallbackReason,
   type ContextDocumentChunkRankingResult,
   type ContextDocumentChunkRankingStrategy,
+  type ContextDocumentChunkSelectionBudgetKind,
   type ContextDocumentChunkSelectionMode,
   type ContextDocumentChunkSelectionResult,
   type ContextDocumentChunkSourceType,
@@ -23,7 +26,14 @@ import {
 } from "./chat-runtime-budgets";
 import { buildConversationContextDebugTrace } from "./context-debug-trace";
 import { joinMarkdownSections } from "./context-formatting";
-import type { ContextDebugTrace } from "./context-seams";
+import { DEFAULT_APPROX_CHARS_PER_TOKEN } from "./context-token-budget";
+import {
+  DEFAULT_MODEL_BUDGET_PROFILE,
+  type ModelBudgetProfile,
+  type ModelBudgetProfileLookup,
+  resolveModelContextBudget,
+} from "./model-budget-profiles";
+import type { ContextBudgetMode, ContextDebugTrace } from "./context-seams";
 import { prisma } from "./prisma";
 
 export type ConversationContextSourceStatus = "used" | "unsupported" | "failed" | "unavailable";
@@ -184,6 +194,49 @@ export type ConversationContextBundle = {
   debugTrace?: ContextDebugTrace | null;
 };
 
+export type ConversationContextBudgetInput = {
+  mode?: ContextBudgetMode | null;
+  lookup?: ModelBudgetProfileLookup | null;
+  resolvedContextBudget?: ReturnType<typeof resolveModelContextBudget> | null;
+  documentContextBudgetTokens?: number | null;
+};
+
+type ConversationContextDocumentOccurrenceLocation = {
+  chunkIndex: number;
+  chunkIndexes: number[];
+  sourceBodyLocationLabel: string;
+  exactPhraseMatchCount: number;
+  coverageGroupKey: string | null;
+  referencedLocationLabels: string[];
+};
+
+type ConversationContextDocumentOccurrenceDebug = {
+  searchStatus: "not_requested" | "searched" | "not_searchable";
+  targetPhrase: string | null;
+  scannedChunkCount: number;
+  exactMatchChunkCount: number;
+  exactMatchLocationCount: number;
+  exactMatchChunkIndexes: number[];
+  selectedRepresentativeChunkIndexes: number[];
+  skippedDueToBudgetChunkIndexes: number[];
+  locations: ConversationContextDocumentOccurrenceLocation[];
+  detail: string | null;
+};
+
+type ConversationContextDocumentBudgetDebug = {
+  budgetInputProvided: boolean;
+  mode: ContextBudgetMode | null;
+  modelProfileId: string | null;
+  provider: string | null;
+  protocol: string | null;
+  model: string | null;
+  documentContextBudgetTokens: number | null;
+  fallbackProfileUsed: boolean | null;
+  selectedChunkTokenTotal: number;
+  skippedDueToBudgetCount: number;
+  detail: string;
+};
+
 export type ConversationContextDocumentChunkingDocument = {
   sourceId: string;
   attachmentId: string;
@@ -199,15 +252,21 @@ export type ConversationContextDocumentChunkingDocument = {
   totalApproxTokenCount: number;
   selectedCharCount: number;
   totalCharCount: number;
+  documentBudgetTokens: number | null;
   selectionMode: ContextDocumentChunkSelectionMode | null;
+  selectionBudgetKind: ContextDocumentChunkSelectionBudgetKind | null;
+  selectionBudgetChars: number | null;
+  selectionBudgetTokens: number | null;
   usedBudgetClamp: boolean;
   coverageSelectionApplied: boolean;
+  skippedDueToBudgetCount: number;
   rankingEnabled: boolean;
   rankingQueryTokenCount: number;
   rankingStrategy: ContextDocumentChunkRankingStrategy | null;
   rankingFallbackReason: ContextDocumentChunkRankingFallbackReason;
   occurrenceIntentDetected: boolean;
   occurrenceTargetPhrase: string | null;
+  occurrence: ConversationContextDocumentOccurrenceDebug;
   chunkCharRanges: Array<{
     chunkIndex: number;
     charStart: number;
@@ -233,6 +292,22 @@ export type ConversationContextDocumentChunkingDocument = {
 
 export type ConversationContextDocumentChunkingDebug = {
   strategy: string;
+  budget: ConversationContextDocumentBudgetDebug;
+  occurrence: {
+    intentDetected: boolean;
+    targetPhrase: string | null;
+    scannedChunkCount: number;
+    exactMatchChunkCount: number;
+    exactMatchLocationCount: number;
+    searchableDocumentIds: string[];
+    unsearchableDocuments: Array<{
+      sourceId: string;
+      filename: string;
+      sourceStatus: ConversationContextSourceStatus;
+      detail: string;
+    }>;
+    detail: string | null;
+  } | null;
   documents: ConversationContextDocumentChunkingDocument[];
 };
 
@@ -267,6 +342,238 @@ function buildChunkTextPreview(value: string) {
   return `${normalized.slice(0, 77)}...`;
 }
 
+function resolveConversationContextBudget(
+  budget: ConversationContextBudgetInput | null | undefined,
+  documentCount: number
+): ResolvedConversationContextBudget {
+  const mode = budget?.mode ?? null;
+  const budgetInputProvided = Boolean(
+    budget?.lookup || budget?.resolvedContextBudget || budget?.documentContextBudgetTokens != null
+  );
+  const resolvedContextBudget =
+    budget?.resolvedContextBudget ??
+    (budget?.lookup
+      ? resolveModelContextBudget({
+          lookup: budget.lookup,
+          mode: budget.mode ?? "standard",
+        })
+      : null);
+
+  const requestedDocumentContextBudgetTokens =
+    budget?.documentContextBudgetTokens != null
+      ? Math.max(0, Math.floor(budget.documentContextBudgetTokens))
+      : null;
+  const resolvedDocumentContextBudgetTokens =
+    requestedDocumentContextBudgetTokens != null && resolvedContextBudget
+      ? Math.min(requestedDocumentContextBudgetTokens, resolvedContextBudget.contextBudgetTokens)
+      : requestedDocumentContextBudgetTokens ?? resolvedContextBudget?.contextBudgetTokens ?? null;
+  const totalDocumentContextBudgetTokens =
+    resolvedDocumentContextBudgetTokens ?? DEFAULT_THREAD_DOCUMENT_CONTEXT_BUNDLE_TOKENS;
+  const perDocumentBudgetTokens =
+    budgetInputProvided && documentCount <= 1
+      ? totalDocumentContextBudgetTokens
+      : budgetInputProvided
+        ? Math.max(DEFAULT_THREAD_DOCUMENT_CONTEXT_TOKENS, Math.floor(totalDocumentContextBudgetTokens / 3))
+        : DEFAULT_THREAD_DOCUMENT_CONTEXT_TOKENS;
+
+  return {
+    budgetInputProvided,
+    mode: budgetInputProvided ? mode ?? resolvedContextBudget?.mode ?? "standard" : null,
+    profile: resolvedContextBudget?.profile ?? null,
+    provider: resolvedContextBudget?.profile.providers?.[0] ?? budget?.lookup?.provider ?? null,
+    protocol: budget?.lookup?.protocol ?? null,
+    model: budget?.lookup?.model ?? null,
+    fallbackProfileUsed: budgetInputProvided
+      ? (resolvedContextBudget?.profile.id ?? null) === DEFAULT_MODEL_BUDGET_PROFILE.id
+      : null,
+    totalDocumentContextBudgetTokens,
+    perDocumentBudgetTokens: Math.min(totalDocumentContextBudgetTokens, perDocumentBudgetTokens),
+  };
+}
+
+function buildThreadDocumentOccurrenceDebug(params: {
+  document: Pick<ConversationContextDocumentRecord, "id" | "filename">;
+  chunks?: ContextDocumentChunk[];
+  ranking?: ContextDocumentChunkRankingResult | null;
+  selection?: ContextDocumentChunkSelectionResult | null;
+  parentSourceStatus: ConversationContextSourceStatus;
+  extractionStatus: ConversationContextDocumentChunkingDocument["extractionStatus"];
+  occurrenceQuery: {
+    intentDetected: boolean;
+    targetPhrase: string | null;
+  };
+}): ConversationContextDocumentOccurrenceDebug {
+  const ranking = params.ranking ?? null;
+  const selection = params.selection ?? null;
+  const occurrenceIntentDetected =
+    ranking?.occurrenceIntentDetected ?? params.occurrenceQuery.intentDetected;
+  const occurrenceTargetPhrase =
+    ranking?.occurrenceTargetPhrase ?? params.occurrenceQuery.targetPhrase;
+  if (!occurrenceIntentDetected) {
+    return {
+      searchStatus: "not_requested",
+      targetPhrase: null,
+      scannedChunkCount: 0,
+      exactMatchChunkCount: 0,
+      exactMatchLocationCount: 0,
+      exactMatchChunkIndexes: [],
+      selectedRepresentativeChunkIndexes: selection?.selectedChunks.map((chunk) => chunk.chunkIndex) ?? [],
+      skippedDueToBudgetChunkIndexes: selection?.skippedChunks.map((chunk) => chunk.chunkIndex) ?? [],
+      locations: [],
+      detail: null,
+    };
+  }
+
+  if (params.extractionStatus !== "extracted" || !params.chunks?.length) {
+    return {
+      searchStatus: "not_searchable",
+      targetPhrase: occurrenceTargetPhrase,
+      scannedChunkCount: 0,
+      exactMatchChunkCount: 0,
+      exactMatchLocationCount: 0,
+      exactMatchChunkIndexes: [],
+      selectedRepresentativeChunkIndexes: selection?.selectedChunks.map((chunk) => chunk.chunkIndex) ?? [],
+      skippedDueToBudgetChunkIndexes: selection?.skippedChunks.map((chunk) => chunk.chunkIndex) ?? [],
+      locations: [],
+      detail:
+        params.parentSourceStatus === "unsupported"
+          ? "This attachment could not be searched because the current thread-document context path does not support its source type."
+          : params.parentSourceStatus === "failed"
+            ? "This attachment could not be searched because extraction failed before usable chunks were available."
+            : "This attachment could not be searched because no extracted chunks were available in this runtime.",
+    };
+  }
+
+  if (!occurrenceTargetPhrase) {
+    return {
+      searchStatus: "not_searchable",
+      targetPhrase: null,
+      scannedChunkCount: 0,
+      exactMatchChunkCount: 0,
+      exactMatchLocationCount: 0,
+      exactMatchChunkIndexes: [],
+      selectedRepresentativeChunkIndexes: selection?.selectedChunks.map((chunk) => chunk.chunkIndex) ?? [],
+      skippedDueToBudgetChunkIndexes: selection?.skippedChunks.map((chunk) => chunk.chunkIndex) ?? [],
+      locations: [],
+      detail:
+        "Occurrence/listing intent was detected, but no exact target phrase could be resolved for deterministic extracted-chunk scanning.",
+    };
+  }
+
+  const occurrenceInventory = buildDocumentChunkOccurrenceInventory({
+    chunks: params.chunks,
+    ranking,
+  });
+  const locationChunkIndexes = occurrenceInventory.locations.flatMap((location) => location.chunkIndexes);
+
+  return {
+    searchStatus: "searched",
+    targetPhrase: occurrenceInventory.targetPhrase,
+    scannedChunkCount: occurrenceInventory.scannedChunkCount,
+    exactMatchChunkCount: occurrenceInventory.exactMatchChunkCount,
+    exactMatchLocationCount: occurrenceInventory.locations.length,
+    exactMatchChunkIndexes: locationChunkIndexes,
+    selectedRepresentativeChunkIndexes: selection?.selectedChunks.map((chunk) => chunk.chunkIndex) ?? [],
+    skippedDueToBudgetChunkIndexes: selection?.skippedChunks.map((chunk) => chunk.chunkIndex) ?? [],
+    locations: occurrenceInventory.locations.map((location) => ({
+      chunkIndex: location.chunkIndex,
+      chunkIndexes: [...location.chunkIndexes],
+      sourceBodyLocationLabel: buildThreadDocumentSourceBodyLocationLabel({
+        filename: params.document.filename,
+        chunk: location,
+      }),
+      exactPhraseMatchCount: location.exactPhraseMatchCount,
+      coverageGroupKey: location.coverageGroupKey,
+      referencedLocationLabels: [...location.referencedLocationLabels],
+    })),
+    detail:
+      occurrenceInventory.exactMatchChunkCount > 0
+        ? `Scanned all ${occurrenceInventory.scannedChunkCount.toLocaleString("en-US")} extracted chunk(s) for the exact target phrase "${occurrenceInventory.targetPhrase}".`
+        : `Scanned all ${occurrenceInventory.scannedChunkCount.toLocaleString("en-US")} extracted chunk(s) for the exact target phrase "${occurrenceInventory.targetPhrase}" and found no exact matches.`,
+  };
+}
+
+function buildThreadDocumentBudgetDebug(params: {
+  resolvedBudget: ResolvedConversationContextBudget;
+  documents: ConversationContextDocumentChunkingDocument[];
+}) {
+  return {
+    budgetInputProvided: params.resolvedBudget.budgetInputProvided,
+    mode: params.resolvedBudget.budgetInputProvided ? params.resolvedBudget.mode : null,
+    modelProfileId: params.resolvedBudget.budgetInputProvided
+      ? params.resolvedBudget.profile?.id ?? null
+      : null,
+    provider: params.resolvedBudget.budgetInputProvided ? params.resolvedBudget.provider : null,
+    protocol: params.resolvedBudget.budgetInputProvided ? params.resolvedBudget.protocol : null,
+    model: params.resolvedBudget.budgetInputProvided ? params.resolvedBudget.model : null,
+    documentContextBudgetTokens: params.resolvedBudget.budgetInputProvided
+      ? params.resolvedBudget.totalDocumentContextBudgetTokens
+      : null,
+    fallbackProfileUsed: params.resolvedBudget.budgetInputProvided
+      ? params.resolvedBudget.fallbackProfileUsed
+      : null,
+    selectedChunkTokenTotal: params.documents.reduce(
+      (sum, document) => sum + document.selectedApproxTokenCount,
+      0
+    ),
+    skippedDueToBudgetCount: params.documents.reduce(
+      (sum, document) => sum + document.skippedDueToBudgetCount,
+      0
+    ),
+    detail: params.resolvedBudget.budgetInputProvided
+      ? "Thread-document chunk selection used the resolver-owned model-profile-aware token budget."
+      : "Thread-document chunk selection used the conservative legacy-equivalent fallback because no model/profile budget input was provided.",
+  } satisfies ConversationContextDocumentBudgetDebug;
+}
+
+function buildThreadDocumentOccurrenceSummary(
+  documents: ConversationContextDocumentChunkingDocument[]
+) {
+  const occurrenceDocuments = documents.filter(
+    (document) =>
+      document.occurrence.searchStatus !== "not_requested" || document.occurrenceIntentDetected
+  );
+  if (occurrenceDocuments.length === 0) {
+    return null;
+  }
+
+  const targetPhrase =
+    occurrenceDocuments.find((document) => document.occurrence.targetPhrase)?.occurrence.targetPhrase ?? null;
+  const searchableDocuments = occurrenceDocuments.filter(
+    (document) => document.occurrence.searchStatus === "searched"
+  );
+  const unsearchableDocuments = occurrenceDocuments
+    .filter((document) => document.occurrence.searchStatus === "not_searchable")
+    .map((document) => ({
+      sourceId: document.sourceId,
+      filename: document.filename,
+      sourceStatus: document.parentSourceStatus,
+      detail: document.occurrence.detail ?? "This attachment could not be searched in the current runtime.",
+    }));
+
+  return {
+    intentDetected: true,
+    targetPhrase,
+    scannedChunkCount: searchableDocuments.reduce(
+      (sum, document) => sum + document.occurrence.scannedChunkCount,
+      0
+    ),
+    exactMatchChunkCount: searchableDocuments.reduce(
+      (sum, document) => sum + document.occurrence.exactMatchChunkCount,
+      0
+    ),
+    exactMatchLocationCount: searchableDocuments.reduce(
+      (sum, document) => sum + document.occurrence.exactMatchLocationCount,
+      0
+    ),
+    searchableDocumentIds: searchableDocuments.map((document) => document.sourceId),
+    unsearchableDocuments,
+    detail: targetPhrase
+      ? `The occurrence inventory below was built by scanning ${searchableDocuments.reduce((sum, document) => sum + document.occurrence.scannedChunkCount, 0)} successfully extracted chunk${searchableDocuments.reduce((sum, document) => sum + document.occurrence.scannedChunkCount, 0) === 1 ? "" : "s"} across ${searchableDocuments.length} searchable attachment${searchableDocuments.length === 1 ? "" : "s"} for the exact target phrase "${targetPhrase}". Treat it as the authoritative scan over the successfully extracted contents of those searchable attached files. If you caveat the answer, describe it as based on the successfully extracted contents of the attached file${searchableDocuments.length === 1 ? "" : "s"} in this scan, not only on selected excerpts. Selected excerpts remain a runtime-budgeted subset for explanation.`
+      : "Occurrence/listing intent was detected, but the resolver could not build an exact-phrase chunk inventory for every attachment.",
+  };
+}
+
 type ConversationContextDocumentRecord = {
   id: string;
   conversationId: string;
@@ -291,6 +598,15 @@ type ConversationContextResolverDependencies = {
 
 export const MAX_THREAD_DOCUMENT_CONTEXT_CHARS = CHAT_THREAD_DOCUMENT_CONTEXT_CHARS;
 export const MAX_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS = CHAT_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS;
+const DEFAULT_THREAD_DOCUMENT_CONTEXT_TOKENS = Math.max(
+  1,
+  Math.floor(MAX_THREAD_DOCUMENT_CONTEXT_CHARS / DEFAULT_APPROX_CHARS_PER_TOKEN)
+);
+const DEFAULT_THREAD_DOCUMENT_CONTEXT_BUNDLE_TOKENS = Math.max(
+  1,
+  Math.floor(MAX_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS / DEFAULT_APPROX_CHARS_PER_TOKEN)
+);
+const THREAD_DOCUMENT_SECTION_TOKEN_RESERVE = 64;
 const SUPPORTED_THREAD_TEXT_EXTENSIONS = new Set(["txt", "md"]);
 const SUPPORTED_THREAD_PDF_EXTENSIONS = new Set(["pdf"]);
 const SUPPORTED_THREAD_DOCX_EXTENSIONS = new Set(["docx"]);
@@ -299,6 +615,18 @@ const SUPPORTED_THREAD_SPREADSHEET_EXTENSIONS = new Set(["xlsx", "csv", "tsv"]);
 const SUPPORTED_THREAD_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp"]);
 const THREAD_DOCUMENT_SUPPORT_DETAIL =
   "plain text, markdown, PDF, DOCX, PPTX, XLSX, CSV, TSV, and baseline PNG/JPG/JPEG/WEBP image attachment handling";
+
+type ResolvedConversationContextBudget = {
+  budgetInputProvided: boolean;
+  mode: ContextBudgetMode | null;
+  profile: ModelBudgetProfile | null;
+  provider: string | null;
+  protocol: string | null;
+  model: string | null;
+  fallbackProfileUsed: boolean | null;
+  totalDocumentContextBudgetTokens: number;
+  perDocumentBudgetTokens: number;
+};
 const CONVERSATION_CONTEXT_SOURCE_REGISTRY = [
   {
     id: "thread_documents",
@@ -500,8 +828,13 @@ function buildExtractionFailureDetail(contextKind: "pdf" | "docx" | "pptx" | "sp
 function buildUsedThreadDocumentDetail(params: {
   charCount: number;
   fullyIncluded: boolean;
+  occurrenceInventoryOnly?: boolean;
 }) {
   const readableChars = params.charCount.toLocaleString("en-US");
+
+  if (params.occurrenceInventoryOnly) {
+    return `Read ${readableChars} readable characters from this thread attachment and included a deterministic exact-phrase occurrence inventory in the active runtime context. No explanatory excerpt from this file fit within the current thread-document context budget.`;
+  }
 
   return params.fullyIncluded
     ? `Read ${readableChars} readable characters from this thread attachment and included the extracted text in the active runtime context.`
@@ -1371,6 +1704,11 @@ function buildThreadDocumentChunkingDebugDocument(params: {
   sourceType: string;
   parentSourceStatus: ConversationContextSourceStatus;
   extractionStatus: ConversationContextDocumentChunkingDocument["extractionStatus"];
+  occurrenceQuery?: {
+    intentDetected: boolean;
+    targetPhrase: string | null;
+  };
+  documentBudgetTokens?: number | null;
   chunks?: ContextDocumentChunk[];
   ranking?: ContextDocumentChunkRankingResult | null;
   selection?: ContextDocumentChunkSelectionResult | null;
@@ -1387,6 +1725,18 @@ function buildThreadDocumentChunkingDebugDocument(params: {
   const selectedDueToCoverageChunkKeys = new Set(
     selection?.selectedDueToCoverageChunkKeys ?? []
   );
+  const occurrence = buildThreadDocumentOccurrenceDebug({
+    document: params.document,
+    chunks,
+    ranking,
+    selection,
+    parentSourceStatus: params.parentSourceStatus,
+    extractionStatus: params.extractionStatus,
+    occurrenceQuery: params.occurrenceQuery ?? {
+      intentDetected: false,
+      targetPhrase: null,
+    },
+  });
 
   return {
     sourceId: params.document.id,
@@ -1397,8 +1747,10 @@ function buildThreadDocumentChunkingDebugDocument(params: {
     parentSourceStatus: params.parentSourceStatus,
     extractionStatus: params.extractionStatus,
     totalChunks: chunks.length,
-    selectedChunkIndexes: selection?.selectedChunks.map((chunk) => chunk.chunkIndex) ?? [],
-    skippedChunkIndexes: selection?.skippedChunks.map((chunk) => chunk.chunkIndex) ?? [],
+    selectedChunkIndexes:
+      selection?.selectedChunks.map((chunk) => chunk.chunkIndex).sort((left, right) => left - right) ?? [],
+    skippedChunkIndexes:
+      selection?.skippedChunks.map((chunk) => chunk.chunkIndex).sort((left, right) => left - right) ?? [],
     selectedApproxTokenCount: selection?.selectedApproxTokenCount ?? 0,
     totalApproxTokenCount:
       selection?.totalApproxTokenCount ??
@@ -1406,15 +1758,21 @@ function buildThreadDocumentChunkingDebugDocument(params: {
     selectedCharCount: selection?.selectedCharCount ?? 0,
     totalCharCount:
       selection?.totalCharCount ?? chunks.reduce((sum, chunk) => sum + chunk.text.length, 0),
+    documentBudgetTokens: params.documentBudgetTokens ?? null,
     selectionMode: selection?.selectionMode ?? null,
+    selectionBudgetKind: selection?.selectionBudgetKind ?? null,
+    selectionBudgetChars: selection?.selectionBudgetChars ?? null,
+    selectionBudgetTokens: selection?.selectionBudgetTokens ?? null,
     usedBudgetClamp: selection?.usedBudgetClamp ?? false,
     coverageSelectionApplied: selection?.coverageSelectionApplied ?? false,
+    skippedDueToBudgetCount: selection?.skippedDueToBudgetChunkKeys?.length ?? 0,
     rankingEnabled: ranking?.rankingEnabled ?? false,
     rankingQueryTokenCount: ranking?.queryTokenCount ?? 0,
     rankingStrategy: ranking?.rankingStrategy ?? DEFAULT_DOCUMENT_CHUNK_RANKING_STRATEGY,
     rankingFallbackReason: ranking?.fallbackReason ?? null,
-    occurrenceIntentDetected: ranking?.occurrenceIntentDetected ?? false,
-    occurrenceTargetPhrase: ranking?.occurrenceTargetPhrase ?? null,
+    occurrenceIntentDetected: ranking?.occurrenceIntentDetected ?? params.occurrenceQuery?.intentDetected ?? false,
+    occurrenceTargetPhrase: ranking?.occurrenceTargetPhrase ?? params.occurrenceQuery?.targetPhrase ?? null,
+    occurrence,
     chunkCharRanges: chunks.map((chunk) => {
       const rankingDetail = rankingDetails.get(`${chunk.sourceId}:${chunk.chunkIndex}`);
 
@@ -1454,18 +1812,37 @@ function buildThreadDocumentSection(params: {
   filename: string;
   selection: ContextDocumentChunkSelectionResult;
   ranking?: ContextDocumentChunkRankingResult | null;
+  occurrence?: ConversationContextDocumentOccurrenceDebug | null;
 }) {
   const displayChunks = [...params.selection.selectedChunks].sort(
     (left, right) => left.charStart - right.charStart || left.chunkIndex - right.chunkIndex
   );
+  const occurrence = params.occurrence ?? null;
   const occurrenceListingHint =
     params.ranking?.occurrenceIntentDetected && params.ranking.occurrenceTargetPhrase
       ? `For this occurrence/listing request, answer as a list of SOURCE BODY LOCATION labels where "${params.ranking.occurrenceTargetPhrase}" appears. Use the provided SOURCE BODY LOCATION labels only. Do not substitute referenced exhibits, schedules, articles, or sections as locations.`
       : params.ranking?.occurrenceIntentDetected
         ? "For this occurrence/listing request, answer as a list of SOURCE BODY LOCATION labels where the requested term appears. Use the provided SOURCE BODY LOCATION labels only. Do not substitute referenced exhibits, schedules, articles, or sections as locations."
         : null;
+  const occurrenceInventorySection =
+    occurrence?.searchStatus === "searched"
+      ? joinMarkdownSections([
+          "### Occurrence Inventory",
+          occurrence.detail,
+          occurrence.locations.length > 0
+            ? occurrence.locations
+                .map((location) =>
+                  `- ${location.sourceBodyLocationLabel} — ${location.exactPhraseMatchCount} exact match${location.exactPhraseMatchCount === 1 ? "" : "es"} found from the extracted chunk inventory`
+                )
+                .join("\n")
+            : occurrence.targetPhrase
+              ? `- No exact matches for "${occurrence.targetPhrase}" were found in the extracted chunk inventory for this attachment.`
+              : "- No exact-match occurrence inventory was available for this attachment.",
+        ])
+      : null;
 
   if (
+    occurrenceInventorySection == null &&
     params.selection.selectedChunks.length === 1 &&
     params.selection.skippedChunks.length === 0 &&
     !params.selection.usedBudgetClamp
@@ -1478,7 +1855,10 @@ function buildThreadDocumentSection(params: {
 
   return joinMarkdownSections([
     `## Thread Document: ${params.filename}`,
-    "Selected excerpts from this attachment are included below in document order. Use the excerpt provenance labels for exact article, section, exhibit, or schedule references. Treat each provenance header as the body location where the excerpt appears; references mentioned inside the excerpt do not change that location.",
+    occurrenceInventorySection,
+    displayChunks.length > 0
+      ? "Selected excerpts from this attachment are included below in document order. Use the excerpt provenance labels for exact article, section, exhibit, or schedule references. Treat each provenance header as the body location where the excerpt appears; references mentioned inside the excerpt do not change that location."
+      : "No explanatory excerpt from this attachment fit within the current runtime budget. Use the occurrence inventory above as the authoritative extracted-chunk scan result for this file's successfully extracted contents.",
     occurrenceListingHint,
     ...displayChunks.map((chunk) =>
       joinMarkdownSections([
@@ -2007,6 +2387,7 @@ export async function resolveConversationContextBundle(params: {
   authority: ConversationContextSourceAuthority;
   sourcePlan?: ConversationContextAcquisitionPlan | null;
   currentUserPrompt?: string | null;
+  budget?: ConversationContextBudgetInput | null;
 }, dependencies: ConversationContextResolverDependencies = {}): Promise<ConversationContextBundle> {
   const listDocuments = dependencies.listDocuments ?? (async (conversationId: string) => prisma.conversationDocument.findMany({
     where: { conversationId },
@@ -2040,12 +2421,14 @@ export async function resolveConversationContextBundle(params: {
         (document) => document.conversationId === params.conversationId
       )
     : [];
+  const resolvedBudget = resolveConversationContextBudget(params.budget, documents.length);
+  const occurrenceQuery = analyzeDocumentOccurrenceQuery(params.currentUserPrompt);
 
   const sources: ConversationContextSource[] = [];
   const sections: string[] = [];
   const availabilityNotes: string[] = [];
   const documentChunkingDocuments: ConversationContextDocumentChunkingDocument[] = [];
-  let remainingDocumentChars = MAX_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS;
+  let remainingDocumentTokens = resolvedBudget.totalDocumentContextBudgetTokens;
   let usedCount = 0;
   let unsupportedCount = 0;
   let failedCount = 0;
@@ -2067,6 +2450,7 @@ export async function resolveConversationContextBundle(params: {
           sourceType: document.fileType || "unknown",
           parentSourceStatus: "unsupported",
           extractionStatus: "unsupported",
+          occurrenceQuery,
         })
       );
       continue;
@@ -2083,6 +2467,7 @@ export async function resolveConversationContextBundle(params: {
           sourceType: contextKind,
           parentSourceStatus: "failed",
           extractionStatus: "failed",
+          occurrenceQuery,
         })
       );
       continue;
@@ -2100,12 +2485,13 @@ export async function resolveConversationContextBundle(params: {
           sourceType: contextKind,
           parentSourceStatus: "unavailable",
           extractionStatus: "unavailable",
+          occurrenceQuery,
         })
       );
       continue;
     }
 
-    if (remainingDocumentChars <= 0) {
+    if (remainingDocumentTokens <= 0 && !occurrenceQuery.intentDetected) {
       unavailableCount += 1;
       threadDocumentExcludedCategories.add("budget");
       const detail =
@@ -2118,6 +2504,7 @@ export async function resolveConversationContextBundle(params: {
           sourceType: contextKind,
           parentSourceStatus: "unavailable",
           extractionStatus: "unavailable",
+          occurrenceQuery,
         })
       );
       continue;
@@ -2140,6 +2527,7 @@ export async function resolveConversationContextBundle(params: {
             sourceType: contextKind,
             parentSourceStatus: "failed",
             extractionStatus: "failed",
+            occurrenceQuery,
           })
         );
         continue;
@@ -2167,6 +2555,7 @@ export async function resolveConversationContextBundle(params: {
             sourceType: contextKind,
             parentSourceStatus: "failed",
             extractionStatus: "failed",
+            occurrenceQuery,
           })
         );
         continue;
@@ -2185,6 +2574,7 @@ export async function resolveConversationContextBundle(params: {
             sourceType: contextKind,
             parentSourceStatus: "failed",
             extractionStatus: "failed",
+            occurrenceQuery,
           })
         );
         continue;
@@ -2211,6 +2601,7 @@ export async function resolveConversationContextBundle(params: {
           sourceType: contextKind,
           parentSourceStatus: "failed",
           extractionStatus: "failed",
+          occurrenceQuery,
         })
       );
       continue;
@@ -2237,6 +2628,7 @@ export async function resolveConversationContextBundle(params: {
           sourceType: contextKind,
           parentSourceStatus: "failed",
           extractionStatus: "failed",
+          occurrenceQuery,
         })
       );
       continue;
@@ -2246,30 +2638,47 @@ export async function resolveConversationContextBundle(params: {
       chunks: chunkCandidates,
       query: params.currentUserPrompt,
     });
-    const selection = selectDocumentChunksInOrder({
+    const availableDocumentTokens = Math.min(
+      resolvedBudget.perDocumentBudgetTokens,
+      remainingDocumentTokens
+    );
+    const documentBudgetTokens = Math.max(
+      0,
+      availableDocumentTokens - THREAD_DOCUMENT_SECTION_TOKEN_RESERVE
+    );
+    const selection = selectRankedDocumentChunksWithinBudget({
       chunks: ranking.rankedChunks,
-      maxChars: Math.min(MAX_THREAD_DOCUMENT_CONTEXT_CHARS, remainingDocumentChars),
+      maxTokens: documentBudgetTokens,
       selectionMode: ranking.rankingEnabled ? "ranked-order" : "document-order",
       ranking,
     });
-    if (selection.selectedChunks.length === 0) {
+    const documentChunkingDebugDocument = buildThreadDocumentChunkingDebugDocument({
+      document,
+      sourceType: contextKind,
+      parentSourceStatus: selection.selectedChunks.length > 0 ? "used" : "unavailable",
+      extractionStatus: "extracted",
+      occurrenceQuery,
+      documentBudgetTokens: resolvedBudget.budgetInputProvided ? documentBudgetTokens : null,
+      chunks: chunkCandidates,
+      ranking,
+      selection,
+    });
+    const shouldIncludeOccurrenceInventoryOnly =
+      documentChunkingDebugDocument.occurrence.searchStatus === "searched" &&
+      documentChunkingDebugDocument.occurrence.locations.length > 0 &&
+      selection.selectedChunks.length === 0;
+
+    if (selection.selectedChunks.length === 0 && !shouldIncludeOccurrenceInventoryOnly) {
       unavailableCount += 1;
       threadDocumentExcludedCategories.add("budget");
       const detail =
         "Attached to this thread, but not included in this runtime because the remaining thread-document context budget could not fit a useful excerpt after earlier attachments.";
       availabilityNotes.push(`- ${document.filename}: ${detail}`);
       sources.push(buildContextSource("unavailable", document.filename, detail));
-      documentChunkingDocuments.push(
-        buildThreadDocumentChunkingDebugDocument({
-          document,
-          sourceType: contextKind,
-          parentSourceStatus: "unavailable",
-          extractionStatus: "extracted",
-          chunks: chunkCandidates,
-          ranking,
-          selection,
-        })
-      );
+      documentChunkingDocuments.push({
+        ...documentChunkingDebugDocument,
+        parentSourceStatus: "unavailable",
+      });
       continue;
     }
 
@@ -2278,12 +2687,18 @@ export async function resolveConversationContextBundle(params: {
       selection.skippedChunks.length === 0 &&
       !selection.usedBudgetClamp;
     usedCount += 1;
-    remainingDocumentChars -= selection.selectedCharCount;
+    remainingDocumentTokens = Math.max(
+      0,
+      remainingDocumentTokens -
+        selection.selectedApproxTokenCount -
+        THREAD_DOCUMENT_SECTION_TOKEN_RESERVE
+    );
     sections.push(
       buildThreadDocumentSection({
         filename: document.filename,
         selection,
         ranking,
+        occurrence: documentChunkingDebugDocument.occurrence,
       })
     );
     sources.push(buildContextSource(
@@ -2292,19 +2707,13 @@ export async function resolveConversationContextBundle(params: {
       buildUsedThreadDocumentDetail({
         charCount: normalizedText.length,
         fullyIncluded,
+        occurrenceInventoryOnly: shouldIncludeOccurrenceInventoryOnly,
       })
     ));
-    documentChunkingDocuments.push(
-        buildThreadDocumentChunkingDebugDocument({
-          document,
-          sourceType: contextKind,
-          parentSourceStatus: "used",
-          extractionStatus: "extracted",
-          chunks: chunkCandidates,
-          ranking,
-          selection,
-        })
-      );
+    documentChunkingDocuments.push({
+      ...documentChunkingDebugDocument,
+      parentSourceStatus: "used",
+    });
   }
 
   const summarySources: ConversationContextSummarySource[] = [];
@@ -2338,9 +2747,31 @@ export async function resolveConversationContextBundle(params: {
       },
     })
   );
+  const documentChunkingBudget = buildThreadDocumentBudgetDebug({
+    resolvedBudget,
+    documents: documentChunkingDocuments,
+  });
+  const documentChunkingOccurrence = buildThreadDocumentOccurrenceSummary(
+    documentChunkingDocuments
+  );
 
   const bundle = {
     text: joinMarkdownSections([
+      documentChunkingOccurrence
+        ? joinMarkdownSections([
+            "## Thread Document Occurrence Scan",
+            documentChunkingOccurrence.detail,
+            documentChunkingOccurrence.unsearchableDocuments.length > 0
+              ? joinMarkdownSections([
+                  "Files that could not be searched in this runtime:",
+                  documentChunkingOccurrence.unsearchableDocuments
+                    .map((document) => `- ${document.filename}: ${document.detail}`)
+                    .join("\n"),
+                  "Only the files listed above fall outside this occurrence scan coverage.",
+                ])
+              : null,
+          ])
+        : null,
       sections.length > 0
         ? joinMarkdownSections([
           "## Thread-Attached Documents (Current Conversation Only)",
@@ -2365,6 +2796,8 @@ export async function resolveConversationContextBundle(params: {
     sourceDecisions: finalizedSourceDecisions,
     documentChunking: {
       strategy: DEFAULT_DOCUMENT_CHUNK_STRATEGY,
+      budget: documentChunkingBudget,
+      occurrence: documentChunkingOccurrence,
       documents: documentChunkingDocuments,
     },
   };

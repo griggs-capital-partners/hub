@@ -52,6 +52,8 @@ export type ContextDocumentChunkCandidateParams = {
 
 export type ContextDocumentChunkSelectionMode = "document-order" | "ranked-order";
 
+export type ContextDocumentChunkSelectionBudgetKind = "chars" | "tokens";
+
 export type ContextDocumentChunkSelectionResult = {
   selectedChunks: ContextDocumentChunk[];
   skippedChunks: ContextDocumentChunk[];
@@ -60,9 +62,13 @@ export type ContextDocumentChunkSelectionResult = {
   selectedCharCount: number;
   totalCharCount: number;
   selectionMode: ContextDocumentChunkSelectionMode;
+  selectionBudgetKind: ContextDocumentChunkSelectionBudgetKind;
+  selectionBudgetChars: number | null;
+  selectionBudgetTokens: number | null;
   usedBudgetClamp: boolean;
   coverageSelectionApplied: boolean;
   selectedDueToCoverageChunkKeys: string[];
+  skippedDueToBudgetChunkKeys: string[];
 };
 
 export type ContextDocumentChunkRankingStrategy = "deterministic-query-overlap-v1";
@@ -94,6 +100,39 @@ export type ContextDocumentChunkRankingResult = {
   occurrenceTargetPhrase: string | null;
   details: ContextDocumentChunkRankingDetail[];
 };
+
+export type ContextDocumentChunkOccurrenceLocation = {
+  locationKey: string;
+  chunkIndex: number;
+  chunkIndexes: number[];
+  sourceId: string;
+  sourceOrderIndex: number;
+  filename: string;
+  sectionLabel: string | null;
+  sectionPath: string[];
+  referencedLocationLabels: string[];
+  sheetName: string | null;
+  slideNumber: number | null;
+  safeProvenanceLabel: string;
+  exactPhraseMatchCount: number;
+  coverageGroupKey: string | null;
+  rankingOrder: number | null;
+};
+
+export type ContextDocumentChunkOccurrenceInventory = {
+  intentDetected: boolean;
+  targetPhrase: string | null;
+  scannedChunkCount: number;
+  exactMatchChunkCount: number;
+  locations: ContextDocumentChunkOccurrenceLocation[];
+};
+
+export function analyzeDocumentOccurrenceQuery(value: string | null | undefined) {
+  return {
+    intentDetected: detectOccurrenceListingIntent(value),
+    targetPhrase: extractOccurrenceTargetPhrase(value),
+  };
+}
 
 type NormalizedTextRange = {
   text: string;
@@ -777,6 +816,83 @@ function buildCoverageAwareChunkOrder(params: {
     ],
     coverageSelectionApplied: true,
     prioritizedChunkKeys,
+  };
+}
+
+function resolveChunkTokenEstimate(chunk: ContextDocumentChunk) {
+  return Math.max(1, chunk.approxTokenCount || estimateTextTokens(chunk.text));
+}
+
+export function buildDocumentChunkOccurrenceInventory(params: {
+  chunks: ContextDocumentChunk[];
+  ranking: ContextDocumentChunkRankingResult | null | undefined;
+}): ContextDocumentChunkOccurrenceInventory {
+  const ranking = params.ranking ?? null;
+  const intentDetected = ranking?.occurrenceIntentDetected ?? false;
+  const targetPhrase = ranking?.occurrenceTargetPhrase ?? null;
+
+  if (!intentDetected || !ranking || !targetPhrase) {
+    return {
+      intentDetected,
+      targetPhrase,
+      scannedChunkCount: 0,
+      exactMatchChunkCount: 0,
+      locations: [],
+    };
+  }
+
+  const detailByKey = new Map(
+    ranking.details.map((detail) => [`${detail.sourceId}:${detail.chunkIndex}`, detail])
+  );
+  const aggregatedLocations = new Map<string, ContextDocumentChunkOccurrenceLocation>();
+  let exactMatchChunkCount = 0;
+
+  for (const chunk of buildRankingOrderChunkList(params.chunks)) {
+    const detail = detailByKey.get(buildChunkKey(chunk));
+    const exactPhraseMatchCount = detail?.exactPhraseMatchCount ?? 0;
+    if (exactPhraseMatchCount <= 0) {
+      continue;
+    }
+
+    exactMatchChunkCount += 1;
+    const locationKey = detail?.coverageGroupKey ?? buildChunkKey(chunk);
+    const existing = aggregatedLocations.get(locationKey);
+
+    if (existing) {
+      existing.chunkIndexes.push(chunk.chunkIndex);
+      existing.exactPhraseMatchCount += exactPhraseMatchCount;
+      continue;
+    }
+
+    aggregatedLocations.set(locationKey, {
+      locationKey,
+      chunkIndex: chunk.chunkIndex,
+      chunkIndexes: [chunk.chunkIndex],
+      sourceId: chunk.sourceId,
+      sourceOrderIndex: chunk.sourceOrderIndex,
+      filename: chunk.filename,
+      sectionLabel: chunk.sectionLabel,
+      sectionPath: [...chunk.sectionPath],
+      referencedLocationLabels: [...chunk.referencedLocationLabels],
+      sheetName: chunk.sheetName,
+      slideNumber: chunk.slideNumber,
+      safeProvenanceLabel: chunk.safeProvenanceLabel,
+      exactPhraseMatchCount,
+      coverageGroupKey: detail?.coverageGroupKey ?? null,
+      rankingOrder: detail?.rankingOrder ?? null,
+    });
+  }
+
+  return {
+    intentDetected: true,
+    targetPhrase,
+    scannedChunkCount: params.chunks.length,
+    exactMatchChunkCount,
+    locations: [...aggregatedLocations.values()].sort(
+      (left, right) =>
+        left.sourceOrderIndex - right.sourceOrderIndex ||
+        left.chunkIndex - right.chunkIndex
+    ),
   };
 }
 
@@ -2294,10 +2410,103 @@ export function selectDocumentChunksInOrder(params: {
     selectedCharCount,
     totalCharCount: params.chunks.reduce((sum, chunk) => sum + chunk.text.length, 0),
     selectionMode: params.selectionMode ?? "document-order",
+    selectionBudgetKind: "chars",
+    selectionBudgetChars: params.maxChars,
+    selectionBudgetTokens: null,
     usedBudgetClamp,
     coverageSelectionApplied: coverageOrder.coverageSelectionApplied,
     selectedDueToCoverageChunkKeys: selectedChunks
       .map((chunk) => buildChunkKey(chunk))
       .filter((chunkKey) => coverageOrder.prioritizedChunkKeys.has(chunkKey)),
+    skippedDueToBudgetChunkKeys: skippedChunks.map((chunk) => buildChunkKey(chunk)),
+  } satisfies ContextDocumentChunkSelectionResult;
+}
+
+export function selectRankedDocumentChunksWithinBudget(params: {
+  chunks: ContextDocumentChunk[];
+  maxTokens: number;
+  selectionMode?: ContextDocumentChunkSelectionMode;
+  ranking?: ContextDocumentChunkRankingResult | null;
+}) {
+  const coverageOrder = params.ranking
+    ? buildCoverageAwareChunkOrder({
+        chunks: params.chunks,
+        ranking: params.ranking,
+      })
+    : {
+        orderedChunks: params.chunks,
+        coverageSelectionApplied: false,
+        prioritizedChunkKeys: new Set<string>(),
+      };
+  const maxTokens = Math.max(0, Math.floor(params.maxTokens));
+  const selectedChunks: ContextDocumentChunk[] = [];
+  const skippedDueToBudgetChunkKeys: string[] = [];
+  const selectedChunkKeys = new Set<string>();
+  let selectedApproxTokenCount = 0;
+  let selectedCharCount = 0;
+  let usedBudgetClamp = false;
+
+  for (const chunk of coverageOrder.orderedChunks) {
+    const chunkTokens = resolveChunkTokenEstimate(chunk);
+    if (selectedApproxTokenCount + chunkTokens > maxTokens) {
+      skippedDueToBudgetChunkKeys.push(buildChunkKey(chunk));
+      continue;
+    }
+
+    selectedChunks.push(chunk);
+    selectedChunkKeys.add(buildChunkKey(chunk));
+    selectedApproxTokenCount += chunkTokens;
+    selectedCharCount += chunk.text.length;
+  }
+
+  const remainingTokens = Math.max(0, maxTokens - selectedApproxTokenCount);
+  if (remainingTokens > 0) {
+    const firstSkippedChunk = coverageOrder.orderedChunks.find(
+      (chunk) => !selectedChunkKeys.has(buildChunkKey(chunk))
+    );
+    if (firstSkippedChunk) {
+      const partiallySelectedChunk = clampDocumentChunkToBudget(
+        firstSkippedChunk,
+        remainingTokens * DEFAULT_APPROX_CHARS_PER_TOKEN
+      );
+
+      if (partiallySelectedChunk) {
+        selectedChunks.push(partiallySelectedChunk);
+        selectedChunkKeys.add(buildChunkKey(firstSkippedChunk));
+        selectedApproxTokenCount += resolveChunkTokenEstimate(partiallySelectedChunk);
+        selectedCharCount += partiallySelectedChunk.text.length;
+        const partiallySelectedChunkKey = buildChunkKey(firstSkippedChunk);
+        const skippedChunkIndex = skippedDueToBudgetChunkKeys.indexOf(partiallySelectedChunkKey);
+        if (skippedChunkIndex >= 0) {
+          skippedDueToBudgetChunkKeys.splice(skippedChunkIndex, 1);
+        }
+        usedBudgetClamp = true;
+      }
+    }
+  }
+
+  const skippedChunks = params.chunks.filter(
+    (chunk) => !selectedChunkKeys.has(buildChunkKey(chunk))
+  );
+  return {
+    selectedChunks,
+    skippedChunks,
+    selectedApproxTokenCount,
+    totalApproxTokenCount: params.chunks.reduce(
+      (sum, chunk) => sum + resolveChunkTokenEstimate(chunk),
+      0
+    ),
+    selectedCharCount,
+    totalCharCount: params.chunks.reduce((sum, chunk) => sum + chunk.text.length, 0),
+    selectionMode: params.selectionMode ?? "document-order",
+    selectionBudgetKind: "tokens",
+    selectionBudgetChars: null,
+    selectionBudgetTokens: maxTokens,
+    usedBudgetClamp,
+    coverageSelectionApplied: coverageOrder.coverageSelectionApplied,
+    selectedDueToCoverageChunkKeys: selectedChunks
+      .map((chunk) => buildChunkKey(chunk))
+      .filter((chunkKey) => coverageOrder.prioritizedChunkKeys.has(chunkKey)),
+    skippedDueToBudgetChunkKeys,
   } satisfies ContextDocumentChunkSelectionResult;
 }

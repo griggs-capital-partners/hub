@@ -156,6 +156,16 @@ export async function GET(
           activeAgentIds: runtimeState.activeAgentIds,
         },
         currentUserPrompt: latestUserPrompt,
+        budget: threadExecutionTarget
+          ? {
+              mode: "standard",
+              lookup: {
+                provider: threadExecutionTarget.provider,
+                protocol: threadExecutionTarget.protocol,
+                model: threadExecutionTarget.model,
+              },
+            }
+          : null,
       }),
       prisma.user.findUnique({
         where: { id: session.user.id },

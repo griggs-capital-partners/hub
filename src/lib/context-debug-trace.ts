@@ -278,11 +278,16 @@ function buildSelectedChunkSelection(params: {
 
 function buildSkippedChunkSelection(params: {
   document: ConversationContextDocumentChunkingDocument;
+  chunkIndex: number;
 }): ContextChunkSelection {
   let reason: ContextSelectionReason = "low_relevance";
   let detail =
     "Current A-03 debug output does not emit a per-chunk skip reason, so this entry reflects the best matching resolver-level explanation.";
 
+  if (params.document.occurrence.skippedDueToBudgetChunkIndexes.includes(params.chunkIndex)) {
+    reason = "budget_exhausted";
+    detail = "Skipped after the current thread-document chunk budget was exhausted.";
+  } else
   if (params.document.parentSourceStatus === "unsupported") {
     reason = "not_supported";
     detail = "This source was unsupported in the current resolver path.";
@@ -348,7 +353,10 @@ function buildDebugDocument(document: ConversationContextDocumentChunkingDocumen
     totalTokenEstimate: document.totalApproxTokenCount,
     selectedCharCount: document.selectedCharCount,
     totalCharCount: document.totalCharCount,
+    documentBudgetTokens: document.documentBudgetTokens,
+    skippedDueToBudgetCount: document.skippedDueToBudgetCount,
     selectionMode: document.selectionMode,
+    selectionBudgetKind: document.selectionBudgetKind,
     usedBudgetClamp: document.usedBudgetClamp,
     coverageSelectionApplied: document.coverageSelectionApplied,
     ranking: {
@@ -358,6 +366,28 @@ function buildDebugDocument(document: ConversationContextDocumentChunkingDocumen
       fallbackReason: document.rankingFallbackReason,
       occurrenceIntentDetected: document.occurrenceIntentDetected,
       occurrenceTargetPhrase: document.occurrenceTargetPhrase,
+    },
+    occurrence: {
+      searchStatus: document.occurrence.searchStatus,
+      targetPhrase: document.occurrence.targetPhrase,
+      scannedChunkCount: document.occurrence.scannedChunkCount,
+      exactMatchChunkCount: document.occurrence.exactMatchChunkCount,
+      exactMatchLocationCount: document.occurrence.exactMatchLocationCount,
+      locations: document.occurrence.locations.map((location) => ({
+        chunkId: buildChunkId(document, location.chunkIndex),
+        chunkIndex: location.chunkIndex,
+        label: location.sourceBodyLocationLabel,
+        exactPhraseMatchCount: location.exactPhraseMatchCount,
+        coverageGroupKey: location.coverageGroupKey,
+        referencedLocationLabels: [...location.referencedLocationLabels],
+      })),
+      selectedRepresentativeChunkIds: document.occurrence.selectedRepresentativeChunkIndexes.map(
+        (chunkIndex) => buildChunkId(document, chunkIndex)
+      ),
+      skippedDueToBudgetChunkIds: document.occurrence.skippedDueToBudgetChunkIndexes.map(
+        (chunkIndex) => buildChunkId(document, chunkIndex)
+      ),
+      detail: document.occurrence.detail,
     },
   };
 }
@@ -410,7 +440,7 @@ function buildDebugChunk(params: {
     },
     selection: selectedIndexes.has(params.chunk.chunkIndex)
       ? buildSelectedChunkSelection(params)
-      : buildSkippedChunkSelection({ document: params.document }),
+      : buildSkippedChunkSelection({ document: params.document, chunkIndex: params.chunk.chunkIndex }),
     ranking: {
       strategy: params.document.rankingStrategy,
       score: params.chunk.rankingScore,
@@ -424,8 +454,49 @@ function buildDebugChunk(params: {
   };
 }
 
-function buildBudgetProfile(): ContextBudgetProfile | null {
-  return null;
+function buildBudgetProfile(
+  documentChunking: ConversationContextBundle["documentChunking"]
+): ContextBudgetProfile | null {
+  if (!documentChunking.budget.budgetInputProvided) {
+    return null;
+  }
+
+  return {
+    id: documentChunking.budget.modelProfileId,
+    label: documentChunking.budget.modelProfileId,
+    mode: documentChunking.budget.mode,
+    modelProfileId: documentChunking.budget.modelProfileId,
+    model: documentChunking.budget.model,
+    provider: documentChunking.budget.provider,
+    protocol: documentChunking.budget.protocol,
+    documentContextBudgetTokens: documentChunking.budget.documentContextBudgetTokens,
+    fallbackProfileUsed: documentChunking.budget.fallbackProfileUsed,
+  };
+}
+
+function buildOccurrenceTrace(
+  documentChunking: ConversationContextBundle["documentChunking"]
+): ContextDebugTrace["occurrence"] {
+  if (!documentChunking.occurrence) {
+    return null;
+  }
+
+  return {
+    intentDetected: documentChunking.occurrence.intentDetected,
+    targetPhrase: documentChunking.occurrence.targetPhrase,
+    scannedChunkCount: documentChunking.occurrence.scannedChunkCount,
+    exactMatchChunkCount: documentChunking.occurrence.exactMatchChunkCount,
+    exactMatchLocationCount: documentChunking.occurrence.exactMatchLocationCount,
+    searchableDocumentIds: [...documentChunking.occurrence.searchableDocumentIds],
+    unsearchableDocuments: documentChunking.occurrence.unsearchableDocuments.map((document) => ({
+      documentId: document.sourceId,
+      sourceId: document.sourceId,
+      title: document.filename,
+      sourceStatus: document.sourceStatus,
+      detail: document.detail,
+    })),
+    detail: documentChunking.occurrence.detail,
+  };
 }
 
 function buildInspectorParityKey(params: {
@@ -488,10 +559,11 @@ export function buildConversationContextDebugTrace(
       activeAgentId: params.authority.activeAgentId,
       activeAgentIds: [...params.authority.activeAgentIds],
     },
-    budgetProfile: buildBudgetProfile(),
+    budgetProfile: buildBudgetProfile(params.bundle.documentChunking),
     sourceEligibility: params.bundle.sourceDecisions.map(buildSourceEligibility),
     documents,
     chunks,
+    occurrence: buildOccurrenceTrace(params.bundle.documentChunking),
     retrieval: params.bundle.sourceDecisions
       .filter((sourceDecision) => sourceDecision.execution.status === "executed")
       .map((sourceDecision) => ({
@@ -519,10 +591,20 @@ export function buildConversationContextDebugTrace(
         (sum, document) => sum + (document.selectedTokenEstimate ?? 0),
         0
       ),
-      budgetMode: null,
-      modelProfileId: null,
-      detail:
-        "The current A-03 resolver path does not yet emit model-profile-aware budget metadata in this bundle.",
+      documentChunkBudgetTokens: params.bundle.documentChunking.budget.budgetInputProvided
+        ? params.bundle.documentChunking.budget.documentContextBudgetTokens
+        : null,
+      skippedDueToBudgetCount: params.bundle.documentChunking.budget.skippedDueToBudgetCount,
+      budgetMode: params.bundle.documentChunking.budget.budgetInputProvided
+        ? params.bundle.documentChunking.budget.mode
+        : null,
+      modelProfileId: params.bundle.documentChunking.budget.budgetInputProvided
+        ? params.bundle.documentChunking.budget.modelProfileId
+        : null,
+      fallbackProfileUsed: params.bundle.documentChunking.budget.budgetInputProvided
+        ? params.bundle.documentChunking.budget.fallbackProfileUsed
+        : null,
+      detail: params.bundle.documentChunking.budget.detail,
     },
     renderedContext: {
       text: null,

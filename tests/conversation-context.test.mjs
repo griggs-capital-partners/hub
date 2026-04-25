@@ -367,15 +367,32 @@ await runTest("marks unsupported files explicitly", async () => {
     totalApproxTokenCount: 0,
     selectedCharCount: 0,
     totalCharCount: 0,
+    documentBudgetTokens: null,
     selectionMode: null,
+    selectionBudgetKind: null,
+    selectionBudgetChars: null,
+    selectionBudgetTokens: null,
     usedBudgetClamp: false,
     coverageSelectionApplied: false,
+    skippedDueToBudgetCount: 0,
     rankingEnabled: false,
     rankingQueryTokenCount: 0,
     rankingStrategy: DEFAULT_DOCUMENT_CHUNK_RANKING_STRATEGY,
     rankingFallbackReason: null,
     occurrenceIntentDetected: false,
     occurrenceTargetPhrase: null,
+    occurrence: {
+      searchStatus: "not_requested",
+      targetPhrase: null,
+      scannedChunkCount: 0,
+      exactMatchChunkCount: 0,
+      exactMatchLocationCount: 0,
+      exactMatchChunkIndexes: [],
+      selectedRepresentativeChunkIndexes: [],
+      skippedDueToBudgetChunkIndexes: [],
+      locations: [],
+      detail: null,
+    },
     chunkCharRanges: [],
   });
   assert.match(bundle.text, /Thread Document Availability/);
@@ -740,7 +757,21 @@ await runTest("keeps late article definition and audit excerpts for occurrence-s
   assert.match(bundle.text, /Article XVI\.2/i);
   assert.match(bundle.text, /Article XVI\.4/i);
   assert.match(bundle.text, /Article XVI\.5/i);
+  assert.match(bundle.text, /## Thread Document Occurrence Scan/i);
+  assert.match(bundle.text, /### Occurrence Inventory/i);
+  assert.match(
+    bundle.text,
+    new RegExp(
+      `The occurrence inventory below was built by scanning ${bundle.documentChunking.occurrence?.scannedChunkCount ?? 0} successfully extracted chunks across 1 searchable attachment`,
+      "i"
+    )
+  );
+  assert.match(bundle.text, /Treat it as the authoritative scan over the successfully extracted contents of those searchable attached files/i);
+  assert.match(bundle.text, /If you caveat the answer, describe it as based on the successfully extracted contents of the attached file in this scan, not only on selected excerpts/i);
   assert.match(bundle.text, /For this occurrence\/listing request, answer as a list of SOURCE BODY LOCATION labels/i);
+  assert.doesNotMatch(bundle.text, /Ctrl\+F/i);
+  assert.doesNotMatch(bundle.text, /re-upload/i);
+  assert.doesNotMatch(bundle.text, /excerpted portions/i);
   assert.match(bundle.text, /REFERENCES MENTIONED IN TEXT \(referenced only; not the body location\): Exhibit C/i);
   assert.doesNotMatch(bundle.text, /SOURCE BODY LOCATION: .*location unclear/i);
   assert.doesNotMatch(bundle.text, /SOURCE BODY LOCATION: .*Article V\.B/i);
@@ -756,6 +787,11 @@ await runTest("keeps late article definition and audit excerpts for occurrence-s
   assert.equal(bundle.documentChunking.documents[0].rankingEnabled, true);
   assert.equal(bundle.documentChunking.documents[0].occurrenceIntentDetected, true);
   assert.equal(bundle.documentChunking.documents[0].occurrenceTargetPhrase, "joint account");
+  assert.equal(bundle.documentChunking.documents[0].occurrence.searchStatus, "searched");
+  assert.ok(bundle.documentChunking.documents[0].occurrence.exactMatchLocationCount >= 4);
+  assert.ok(bundle.documentChunking.documents[0].occurrence.locations.some((location) =>
+    /Article XVI\.2/i.test(location.sourceBodyLocationLabel)
+  ));
   assert.equal(bundle.documentChunking.documents[0].coverageSelectionApplied, true);
   assert.ok(
     bundle.documentChunking.documents[0].chunkCharRanges.some((chunk) =>
@@ -809,6 +845,229 @@ await runTest("keeps late article definition and audit excerpts for occurrence-s
       typeof chunk.textPreview === "string" && chunk.textPreview.length <= 80
     )
   );
+});
+
+await runTest("keeps conservative fallback when no budget input is passed and expands selection in deep mode", async () => {
+  const filler = Array.from(
+    { length: 220 },
+    (_, index) => `General operations note ${index + 1} covers staffing, handoff, and routine monitoring.`
+  ).join(" ");
+  const relevant = Array.from(
+    { length: 220 },
+    (_, index) => `Maintenance backlog risk ${index + 1} remains open because compressor restart depends on relief assembly verification and audit support.`
+  ).join(" ");
+  const largeDocument = [
+    "# Overview",
+    filler,
+    "## Risk Register",
+    relevant,
+    "## Audit Follow-up",
+    relevant,
+    "## Appendix",
+    filler,
+  ].join("\n\n");
+
+  const noBudgetBundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "maintenance backlog risk relief assembly audit support",
+    },
+    {
+      listDocuments: async () => [makeDocument()],
+      readTextFile: async () => largeDocument,
+    }
+  );
+  const standardBundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "maintenance backlog risk relief assembly audit support",
+      budget: {
+        mode: "standard",
+        lookup: {
+          provider: "openai",
+          protocol: "auto",
+          model: "gpt-4.1",
+        },
+      },
+    },
+    {
+      listDocuments: async () => [makeDocument()],
+      readTextFile: async () => largeDocument,
+    }
+  );
+  const deepBundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "maintenance backlog risk relief assembly audit support",
+      budget: {
+        mode: "deep",
+        lookup: {
+          provider: "openai",
+          protocol: "auto",
+          model: "gpt-4.1",
+        },
+      },
+    },
+    {
+      listDocuments: async () => [makeDocument()],
+      readTextFile: async () => largeDocument,
+    }
+  );
+
+  assert.equal(noBudgetBundle.documentChunking.budget.budgetInputProvided, false);
+  assert.equal(noBudgetBundle.debugTrace?.budgetProfile, null);
+  assert.equal(standardBundle.documentChunking.budget.budgetInputProvided, true);
+  assert.equal(standardBundle.documentChunking.budget.mode, "standard");
+  assert.equal(deepBundle.documentChunking.budget.mode, "deep");
+  assert.ok(
+    (deepBundle.documentChunking.budget.documentContextBudgetTokens ?? 0) >
+      (standardBundle.documentChunking.budget.documentContextBudgetTokens ?? 0)
+  );
+  assert.ok(
+    deepBundle.documentChunking.documents[0].selectedApproxTokenCount >=
+      standardBundle.documentChunking.documents[0].selectedApproxTokenCount
+  );
+  assert.ok(
+    standardBundle.documentChunking.documents[0].selectedChunkIndexes.length >=
+      noBudgetBundle.documentChunking.documents[0].selectedChunkIndexes.length
+  );
+  assert.match(standardBundle.text, /Maintenance backlog risk/i);
+  assert.match(deepBundle.text, /Maintenance backlog risk/i);
+});
+
+await runTest("builds a complete occurrence inventory before excerpt budgeting", async () => {
+  const articleI = Array.from(
+    { length: 80 },
+    () => "General startup provisions cover personnel coordination and routine scheduling."
+  ).join(" ");
+  const articleV = Array.from(
+    { length: 60 },
+    () => "The Operator shall discharge Joint Account obligations in accordance with Exhibit C."
+  ).join(" ");
+  const articleXviDefinition = Array.from(
+    { length: 60 },
+    () => "The term Joint Account means the shared project cost ledger."
+  ).join(" ");
+  const articleXviAudit = Array.from(
+    { length: 60 },
+    () => "Each Party may audit the Joint Account and inspect Joint Account support."
+  ).join(" ");
+  const occurrenceDocument = [
+    "ARTICLE I.",
+    "GENERAL",
+    articleI,
+    "ARTICLE V.",
+    "OPERATOR",
+    `2. ${articleV}`,
+    "ARTICLE XVI.",
+    "OTHER PROVISIONS",
+    `2. ${articleXviDefinition}`,
+    `5. ${articleXviAudit}`,
+  ].join("\n\n");
+
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "What articles does joint account appear in",
+      budget: {
+        mode: "standard",
+        lookup: {
+          provider: "local",
+          protocol: "ollama",
+          model: "llama3.2",
+        },
+        documentContextBudgetTokens: 10,
+      },
+    },
+    {
+      listDocuments: async () => [
+        makeDocument({
+          filename: "joa.pdf",
+          mimeType: "application/pdf",
+          fileType: "pdf",
+          storagePath: "C:\\GitHub\\hub\\uploads\\thread-1\\joa.pdf",
+        }),
+      ],
+      readTextFile: async () => "",
+      readBinaryFile: async () => Buffer.from("occurrence fixture", "utf8"),
+      extractPdfText: async () => occurrenceDocument,
+    }
+  );
+
+  assert.equal(bundle.documentChunking.documents[0].occurrence.searchStatus, "searched");
+  assert.ok(bundle.documentChunking.documents[0].occurrence.locations.length >= 3);
+  assert.ok(
+    bundle.documentChunking.documents[0].occurrence.locations.some((location) =>
+      /Article XVI\.5/i.test(location.sourceBodyLocationLabel)
+    )
+  );
+  assert.ok(
+    !bundle.documentChunking.documents[0].selectedChunkIndexes.includes(
+      bundle.documentChunking.documents[0].occurrence.locations.find((location) =>
+        /Article XVI\.5/i.test(location.sourceBodyLocationLabel)
+      )?.chunkIndex ?? -1
+    )
+  );
+  assert.match(bundle.text, /Occurrence Inventory/i);
+  assert.match(bundle.text, /Article XVI\.5/i);
+  assert.match(bundle.text, /Selected excerpts remain a runtime-budgeted subset/i);
+  assert.match(bundle.text, /No explanatory excerpt from this attachment fit within the current runtime budget/i);
+  assert.match(
+    bundle.text,
+    /Use the occurrence inventory above as the authoritative extracted-chunk scan result for this file's successfully extracted contents/i
+  );
+});
+
+await runTest("marks unsearchable files as outside occurrence scan coverage", async () => {
+  const occurrenceDocument = [
+    "ARTICLE V.",
+    "OPERATOR",
+    "2. The Operator shall discharge Joint Account obligations in accordance with Exhibit C.",
+    "ARTICLE XVI.",
+    "OTHER PROVISIONS",
+    "2. The term Joint Account means the shared project cost ledger.",
+  ].join("\n\n");
+
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "What articles does joint account appear in",
+    },
+    {
+      listDocuments: async () => [
+        makeDocument({
+          id: "doc-pdf",
+          filename: "joa.pdf",
+          mimeType: "application/pdf",
+          fileType: "pdf",
+          storagePath: "C:\\GitHub\\hub\\uploads\\thread-1\\joa.pdf",
+        }),
+        makeDocument({
+          id: "doc-image",
+          filename: "scan.png",
+          mimeType: "image/png",
+          fileType: "image",
+          storagePath: "C:\\GitHub\\hub\\uploads\\thread-1\\scan.png",
+        }),
+      ],
+      readTextFile: async () => "",
+      readBinaryFile: async () => Buffer.from("occurrence fixture", "utf8"),
+      extractPdfText: async () => occurrenceDocument,
+    }
+  );
+
+  assert.equal(
+    bundle.documentChunking.documents.find((document) => document.sourceId === "doc-pdf")?.occurrence.searchStatus,
+    "searched"
+  );
+  assert.equal(
+    bundle.documentChunking.documents.find((document) => document.sourceId === "doc-image")?.occurrence.searchStatus,
+    "not_searchable"
+  );
+  assert.equal(bundle.documentChunking.occurrence?.unsearchableDocuments.length, 1);
+  assert.match(bundle.text, /Files that could not be searched in this runtime:/i);
+  assert.match(bundle.text, /scan\.png: Attached to this thread, but the current Team Chat runtime does not yet load image attachments into the active model context\./i);
+  assert.match(bundle.text, /Only the files listed above fall outside this occurrence scan coverage\./i);
 });
 
 await runTest("falls back to document-order chunk selection for low-signal prompts", async () => {

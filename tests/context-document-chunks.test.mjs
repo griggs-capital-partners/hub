@@ -10,9 +10,11 @@ const jiti = createJiti(import.meta.url, { moduleCache: false });
 const {
   DEFAULT_DOCUMENT_CHUNK_STRATEGY,
   DEFAULT_DOCUMENT_CHUNK_RANKING_STRATEGY,
+  buildDocumentChunkOccurrenceInventory,
   buildDocumentChunkCandidates,
   rankDocumentChunks,
   selectDocumentChunksInOrder,
+  selectRankedDocumentChunksWithinBudget,
 } = jiti(path.join(__dirname, "..", "src", "lib", "context-document-chunks.ts"));
 
 function makeTestChunk({
@@ -401,6 +403,52 @@ assert.ok(
     occurrenceSelection.selectedDueToCoverageChunkKeys.includes("doc-joa:3")
 );
 
+const occurrenceInventory = buildDocumentChunkOccurrenceInventory({
+  chunks: jointAccountChunks,
+  ranking: occurrenceRanking,
+});
+
+assert.equal(occurrenceInventory.intentDetected, true);
+assert.equal(occurrenceInventory.targetPhrase, "joint account");
+assert.equal(occurrenceInventory.scannedChunkCount, 5);
+assert.ok(occurrenceInventory.exactMatchChunkCount >= 4);
+assert.deepEqual(
+  occurrenceInventory.locations.map((location) => location.chunkIndex),
+  [0, 2, 3, 4]
+);
+assert.ok(
+  occurrenceInventory.locations.every((location, index, all) =>
+    index === 0 || location.chunkIndex >= all[index - 1].chunkIndex
+  )
+);
+
+const tokenBudgetSelection = selectRankedDocumentChunksWithinBudget({
+  chunks: occurrenceRanking.rankedChunks,
+  maxTokens: jointAccountChunks[2].approxTokenCount + jointAccountChunks[4].approxTokenCount,
+  selectionMode: "ranked-order",
+  ranking: occurrenceRanking,
+});
+
+assert.equal(tokenBudgetSelection.selectionBudgetKind, "tokens");
+assert.equal(
+  tokenBudgetSelection.selectedChunks.some((chunk) => chunk.chunkIndex === 2),
+  true
+);
+assert.equal(
+  tokenBudgetSelection.selectedChunks.some((chunk) => chunk.chunkIndex === 4),
+  true
+);
+assert.equal(
+  tokenBudgetSelection.selectedChunks.some((chunk) => chunk.chunkIndex === 3),
+  false
+);
+assert.ok(
+  tokenBudgetSelection.selectedChunks.every((chunk, index, all) =>
+    index === 0 || chunk.chunkIndex !== all[index - 1].chunkIndex
+  )
+);
+assert.ok(tokenBudgetSelection.skippedDueToBudgetChunkKeys.includes("doc-joa:3"));
+
 const lowSignalRanking = rankDocumentChunks({
   query: "please help",
   chunks: [
@@ -534,5 +582,15 @@ assert.equal(selection.selectedChunks.length, 2);
 assert.equal(selection.selectedChunks[1].wasBudgetClamped, true);
 assert.equal(selection.usedBudgetClamp, true);
 assert.equal(selection.selectedChunks[1].text.length, 160);
+
+const tinyTokenSelection = selectRankedDocumentChunksWithinBudget({
+  chunks: jointAccountChunks,
+  maxTokens: 1,
+  selectionMode: "document-order",
+});
+
+assert.equal(tinyTokenSelection.selectionBudgetKind, "tokens");
+assert.ok(tinyTokenSelection.selectedChunks.length <= 1);
+assert.ok(tinyTokenSelection.selectedApproxTokenCount <= 1 || tinyTokenSelection.usedBudgetClamp);
 
 console.log("ok - context document chunks stay deterministic and preserve chunk provenance");

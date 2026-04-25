@@ -108,20 +108,56 @@ function makeDebugDocument(overrides = {}) {
       chunkCharRanges.reduce((sum, chunk) => sum + chunk.approxTokenCount, 0),
     selectedCharCount: overrides.selectedCharCount ?? 40,
     totalCharCount: overrides.totalCharCount ?? 40,
+    documentBudgetTokens: overrides.documentBudgetTokens ?? null,
     selectionMode: overrides.selectionMode ?? "document-order",
+    selectionBudgetKind: overrides.selectionBudgetKind ?? "chars",
+    selectionBudgetChars: overrides.selectionBudgetChars ?? null,
+    selectionBudgetTokens: overrides.selectionBudgetTokens ?? null,
     usedBudgetClamp: overrides.usedBudgetClamp ?? false,
     coverageSelectionApplied: overrides.coverageSelectionApplied ?? false,
+    skippedDueToBudgetCount: overrides.skippedDueToBudgetCount ?? 0,
     rankingEnabled: overrides.rankingEnabled ?? false,
     rankingQueryTokenCount: overrides.rankingQueryTokenCount ?? 0,
     rankingStrategy: overrides.rankingStrategy ?? "deterministic-query-overlap-v1",
     rankingFallbackReason: overrides.rankingFallbackReason ?? null,
     occurrenceIntentDetected: overrides.occurrenceIntentDetected ?? false,
     occurrenceTargetPhrase: overrides.occurrenceTargetPhrase ?? null,
+    occurrence: overrides.occurrence ?? {
+      searchStatus: "not_requested",
+      targetPhrase: null,
+      scannedChunkCount: 0,
+      exactMatchChunkCount: 0,
+      exactMatchLocationCount: 0,
+      exactMatchChunkIndexes: [],
+      selectedRepresentativeChunkIndexes: [0],
+      skippedDueToBudgetChunkIndexes: [],
+      locations: [],
+      detail: null,
+    },
     chunkCharRanges,
   };
 }
 
 function makeBundle(overrides = {}) {
+  const defaultDocumentChunking = {
+    strategy: "thread-document-paragraphs-v1",
+    budget: {
+      budgetInputProvided: false,
+      mode: null,
+      modelProfileId: null,
+      provider: null,
+      protocol: null,
+      model: null,
+      documentContextBudgetTokens: null,
+      fallbackProfileUsed: null,
+      selectedChunkTokenTotal: 0,
+      skippedDueToBudgetCount: 0,
+      detail: "Legacy-equivalent fallback budget.",
+    },
+    occurrence: null,
+    documents: [],
+  };
+
   return {
     text: overrides.text ?? "",
     sources: overrides.sources ?? [],
@@ -140,9 +176,9 @@ function makeBundle(overrides = {}) {
       excludedSourceIds: ["company_documents", "browsing", "memory", "live_data"],
     },
     sourceDecisions: overrides.sourceDecisions ?? [makeSourceDecision()],
-    documentChunking: overrides.documentChunking ?? {
-      strategy: "thread-document-paragraphs-v1",
-      documents: [],
+    documentChunking: {
+      ...defaultDocumentChunking,
+      ...(overrides.documentChunking ?? {}),
     },
   };
 }
@@ -185,6 +221,9 @@ await runTest("maps an empty executed bundle without mutating the input", async 
   assert.equal(trace.retrieval[0].sourceId, "thread_documents");
   assert.deepEqual(trace.retrieval[0].selectedChunkIds, []);
   assert.deepEqual(trace.retrieval[0].skippedChunkIds, []);
+  assert.equal(trace.budgetProfile, null);
+  assert.equal(trace.assembly.documentChunkBudgetTokens, null);
+  assert.equal(trace.occurrence, null);
   assert.equal(trace.renderedContext.text, null);
   assert.equal(trace.renderedContext.safeTextPreview, null);
   assert.equal(trace.inspectorParity.payloadMatchesRenderedContext, true);
@@ -312,9 +351,44 @@ await runTest("maps selected and skipped chunks with source-native locations and
     totalApproxTokenCount: 44,
     selectedCharCount: 128,
     totalCharCount: 192,
+    documentBudgetTokens: 32,
     selectionMode: "ranked-order",
+    selectionBudgetKind: "tokens",
+    selectionBudgetTokens: 32,
     rankingEnabled: true,
     rankingQueryTokenCount: 6,
+    skippedDueToBudgetCount: 1,
+    occurrenceIntentDetected: true,
+    occurrenceTargetPhrase: "joint account",
+    occurrence: {
+      searchStatus: "searched",
+      targetPhrase: "joint account",
+      scannedChunkCount: 3,
+      exactMatchChunkCount: 2,
+      exactMatchLocationCount: 2,
+      exactMatchChunkIndexes: [0, 2],
+      selectedRepresentativeChunkIndexes: [2, 0],
+      skippedDueToBudgetChunkIndexes: [1],
+      locations: [
+        {
+          chunkIndex: 0,
+          chunkIndexes: [0],
+          sourceBodyLocationLabel: "agreement.pdf â€” Article V â€” Article V.D â€” Article V.D.2",
+          exactPhraseMatchCount: 1,
+          coverageGroupKey: "section:v.d.2",
+          referencedLocationLabels: ["Exhibit C"],
+        },
+        {
+          chunkIndex: 2,
+          chunkIndexes: [2],
+          sourceBodyLocationLabel: "agreement.pdf â€” Article XVI â€” Article XVI.2",
+          exactPhraseMatchCount: 2,
+          coverageGroupKey: "section:xvi.2",
+          referencedLocationLabels: [],
+        },
+      ],
+      detail: "Scanned all extracted chunks for the exact target phrase.",
+    },
     chunkCharRanges: [
       makeChunkRange({
         chunkIndex: 0,
@@ -438,6 +512,29 @@ await runTest("maps selected and skipped chunks with source-native locations and
     ],
     documentChunking: {
       strategy: "thread-document-paragraphs-v1",
+      budget: {
+        budgetInputProvided: true,
+        mode: "standard",
+        modelProfileId: "openai-direct-chat-conservative",
+        provider: "openai",
+        protocol: "auto",
+        model: "gpt-4.1",
+        documentContextBudgetTokens: 32,
+        fallbackProfileUsed: false,
+        selectedChunkTokenTotal: 44,
+        skippedDueToBudgetCount: 1,
+        detail: "Profile-aware thread-document budget applied.",
+      },
+      occurrence: {
+        intentDetected: true,
+        targetPhrase: "joint account",
+        scannedChunkCount: 3,
+        exactMatchChunkCount: 2,
+        exactMatchLocationCount: 2,
+        searchableDocumentIds: ["doc-legal"],
+        unsearchableDocuments: [],
+        detail: "Scanned all extracted chunks for the exact target phrase.",
+      },
       documents: [legalDocument, spreadsheetDocument, slideDocument],
     },
   });
@@ -488,7 +585,7 @@ await runTest("maps selected and skipped chunks with source-native locations and
   assert.equal(legalCoverageChunk.selection.reason, "coverage");
   assert.equal(legalCoverageChunk.selection.selectedDueToCoverage, true);
   assert.equal(legalSkippedChunk.selection.disposition, "skipped");
-  assert.equal(legalSkippedChunk.selection.reason, "low_relevance");
+  assert.equal(legalSkippedChunk.selection.reason, "budget_exhausted");
   assert.equal(legalSkippedChunk.ranking.score, 0.12);
   assert.deepEqual(legalSkippedChunk.ranking.signals, ["filename_overlap"]);
   assert.equal(sheetChunk.provenance.sourceBodyLocation.kind, "spreadsheet_range_location");
@@ -497,6 +594,11 @@ await runTest("maps selected and skipped chunks with source-native locations and
   assert.equal(slideChunk.provenance.sourceBodyLocation.kind, "slide_location");
   assert.equal(slideChunk.provenance.sourceBodyLocation.slideNumber, 3);
   assert.equal(trace.assembly.estimatedSelectedTokens, 44);
+  assert.equal(trace.budgetProfile?.modelProfileId, "openai-direct-chat-conservative");
+  assert.equal(trace.assembly.documentChunkBudgetTokens, 32);
+  assert.equal(trace.assembly.skippedDueToBudgetCount, 1);
+  assert.equal(trace.documents[0].occurrence?.exactMatchLocationCount, 2);
+  assert.equal(trace.occurrence?.targetPhrase, "joint account");
   assert.equal("text" in legalRankedChunk, false);
 });
 

@@ -350,48 +350,31 @@ export async function POST(
           } | null = null;
 
           try {
-            const [recentMessages, orgContext, contextBundle, senderUser] = await Promise.all([
-              prisma.chatMessage.findMany({
-                where: { conversationId: conversation.id },
-                select: {
-                  id: true,
-                  body: true,
-                  toolContext: true,
-                  senderUserId: true,
-                  senderAgentId: true,
-                  senderUser: {
-                    select: {
-                      id: true,
-                      name: true,
-                      displayName: true,
-                    },
-                  },
-                  senderAgent: {
-                    select: {
-                      id: true,
-                      name: true,
-                    },
+            const recentMessages = await prisma.chatMessage.findMany({
+              where: { conversationId: conversation.id },
+              select: {
+                id: true,
+                body: true,
+                toolContext: true,
+                senderUserId: true,
+                senderAgentId: true,
+                senderUser: {
+                  select: {
+                    id: true,
+                    name: true,
+                    displayName: true,
                   },
                 },
-                orderBy: { createdAt: "desc" },
-                take: CHAT_HISTORY_MESSAGE_WINDOW,
-              }),
-              buildOrgContext(),
-              resolveConversationContextBundle({
-                conversationId: conversation.id,
-                authority: {
-                  requestingUserId: session.user.id,
-                  activeUserIds: runtimeState.activeUserIds,
-                  activeAgentId: runtimeState.activeAgentMember?.agent.id ?? null,
-                  activeAgentIds: runtimeState.activeAgentIds,
+                senderAgent: {
+                  select: {
+                    id: true,
+                    name: true,
+                  },
                 },
-                currentUserPrompt: message,
-              }),
-              prisma.user.findUnique({
-                where: { id: session.user.id },
-                select: { displayName: true, name: true },
-              }),
-            ]);
+              },
+              orderBy: { createdAt: "desc" },
+              take: CHAT_HISTORY_MESSAGE_WINDOW,
+            });
             const agentConfig = normalizeAgentExecutionConfig(agent);
             const currentThreadLlmState = runtimeState.threadLlmState;
             const threadLlmPlan = planConversationLlmSelection({
@@ -402,6 +385,34 @@ export async function POST(
               routingPolicy: resolveAgentLlmRoutingPolicy(agent.abilities),
             });
             const selectedTarget = threadLlmPlan.target;
+
+            const [orgContext, contextBundle, senderUser] = await Promise.all([
+              buildOrgContext(),
+              resolveConversationContextBundle({
+                conversationId: conversation.id,
+                authority: {
+                  requestingUserId: session.user.id,
+                  activeUserIds: runtimeState.activeUserIds,
+                  activeAgentId: runtimeState.activeAgentMember?.agent.id ?? null,
+                  activeAgentIds: runtimeState.activeAgentIds,
+                },
+                currentUserPrompt: message,
+                budget: selectedTarget
+                  ? {
+                      mode: "standard",
+                      lookup: {
+                        provider: selectedTarget.provider,
+                        protocol: selectedTarget.protocol,
+                        model: selectedTarget.model,
+                      },
+                    }
+                  : null,
+              }),
+              prisma.user.findUnique({
+                where: { id: session.user.id },
+                select: { displayName: true, name: true },
+              }),
+            ]);
             selectedTargetSummary = selectedTarget
               ? {
                   connectionId: selectedTarget.connectionId,
@@ -738,6 +749,16 @@ export async function POST(
               activeAgentIds: runtimeState.activeAgentIds,
             },
             currentUserPrompt: message,
+            budget: selectedTarget
+              ? {
+                  mode: "standard",
+                  lookup: {
+                    provider: selectedTarget.provider,
+                    protocol: selectedTarget.protocol,
+                    model: selectedTarget.model,
+                  },
+                }
+              : null,
           }),
           prisma.user.findUnique({
             where: { id: session.user.id },

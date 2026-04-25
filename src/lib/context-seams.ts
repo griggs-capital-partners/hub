@@ -266,11 +266,14 @@ export interface ContextBudgetProfile {
   modelProfileId?: string | null;
   model?: string | null;
   provider?: string | null;
+  protocol?: string | null;
   maxContextTokens?: number | null;
   reservedSystemPromptTokens?: number | null;
   reservedResponseTokens?: number | null;
   availableContextTokens?: number | null;
   requestedContextTokens?: number | null;
+  documentContextBudgetTokens?: number | null;
+  fallbackProfileUsed?: boolean | null;
 }
 
 export interface ContextAssemblyPlan {
@@ -311,7 +314,10 @@ export interface ContextDebugDocument {
   totalTokenEstimate?: number | null;
   selectedCharCount?: number | null;
   totalCharCount?: number | null;
+  documentBudgetTokens?: number | null;
+  skippedDueToBudgetCount?: number | null;
   selectionMode?: string | null;
+  selectionBudgetKind?: string | null;
   usedBudgetClamp?: boolean;
   coverageSelectionApplied?: boolean;
   ranking?: {
@@ -321,6 +327,24 @@ export interface ContextDebugDocument {
     fallbackReason?: string | null;
     occurrenceIntentDetected?: boolean;
     occurrenceTargetPhrase?: string | null;
+  } | null;
+  occurrence?: {
+    searchStatus: "not_requested" | "searched" | "not_searchable";
+    targetPhrase?: string | null;
+    scannedChunkCount?: number | null;
+    exactMatchChunkCount?: number | null;
+    exactMatchLocationCount?: number | null;
+    locations?: Array<{
+      chunkId: string;
+      chunkIndex: number;
+      label: string;
+      exactPhraseMatchCount: number;
+      coverageGroupKey?: string | null;
+      referencedLocationLabels?: string[];
+    }>;
+    selectedRepresentativeChunkIds?: string[];
+    skippedDueToBudgetChunkIds?: string[];
+    detail?: string | null;
   } | null;
 }
 
@@ -360,6 +384,22 @@ export interface ContextDebugTrace {
   sourceEligibility: ContextSourceEligibility[];
   documents: ContextDebugDocument[];
   chunks: ContextDebugChunk[];
+  occurrence?: {
+    intentDetected: boolean;
+    targetPhrase: string | null;
+    scannedChunkCount: number;
+    exactMatchChunkCount: number;
+    exactMatchLocationCount: number;
+    searchableDocumentIds: string[];
+    unsearchableDocuments: Array<{
+      documentId: string;
+      sourceId: string;
+      title: string;
+      sourceStatus?: string | null;
+      detail: string;
+    }>;
+    detail?: string | null;
+  } | null;
   retrieval: Array<{
     adapterId: string;
     sourceId?: string | null;
@@ -376,8 +416,11 @@ export interface ContextDebugTrace {
     skippedChunkIds: string[];
     estimatedTokens?: number | null;
     estimatedSelectedTokens?: number | null;
+    documentChunkBudgetTokens?: number | null;
+    skippedDueToBudgetCount?: number | null;
     budgetMode?: ContextBudgetMode | null;
     modelProfileId?: string | null;
+    fallbackProfileUsed?: boolean | null;
     detail?: string | null;
   };
   renderedContext: {

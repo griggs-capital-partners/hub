@@ -70,4 +70,15 @@ assert.equal(
   resolveContextBudgetTokens(DEFAULT_MODEL_BUDGET_PROFILE, "standard")
 );
 
+const deepOpenAiBudget = resolveModelContextBudget({
+  lookup: { provider: "openai", model: "gpt-4.1" },
+  mode: "deep",
+});
+assert.equal(deepOpenAiBudget.profile.id, "openai-direct-chat-conservative");
+assert.equal(deepOpenAiBudget.mode, "deep");
+assert.equal(
+  deepOpenAiBudget.contextBudgetTokens,
+  resolveContextBudgetTokens(openAiProfile, "deep")
+);
+
 console.log("ok - model budget profiles resolve conservative provider-aware defaults");
