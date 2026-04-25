@@ -1,5 +1,10 @@
 import { createHash, createHmac } from "crypto";
 import type { AgentLlmProvider } from "@/lib/agent-llm-config";
+import {
+  CHAT_REPLY_MAX_OUTPUT_TOKENS,
+  CHAT_REPLY_REQUEST_TIMEOUT_MS,
+  CHAT_REPLY_STREAM_TIMEOUT_MS,
+} from "./chat-runtime-budgets";
 
 type LlmEndpointKind = "ollama" | "openai";
 
@@ -442,7 +447,7 @@ function signAwsRequest(params: {
 async function fetchBedrockJson(
   config: Pick<AgentLlmConfig, "llmEndpointUrl" | "llmRegion" | "llmModel" | "llmAccessKeyId" | "llmSecretAccessKey">,
   body: Record<string, unknown>,
-  timeoutMs = 60000
+  timeoutMs = CHAT_REPLY_REQUEST_TIMEOUT_MS
 ) {
   const accessKeyId = config.llmAccessKeyId?.trim();
   const secretAccessKey = config.llmSecretAccessKey?.trim();
@@ -596,10 +601,10 @@ export function buildSystemPrompt(config: AgentLlmConfig) {
   );
   sections.push(
     "Communication style:\n" +
-    "- Be concise. Lead with the answer, add detail only if it helps.\n" +
-    "- Use bullet points for any list of items, steps, options, or recommendations — never write them as long prose.\n" +
-    "- Keep each bullet tight — one idea per line.\n" +
-    "- Short paragraphs for context or explanation, bullets for structure.\n" +
+    "- Lead with the answer and keep it grounded in the provided context.\n" +
+    "- Match depth to the ask. For debugging, analysis, planning, tradeoffs, or synthesis, give a fuller answer with concrete detail.\n" +
+    "- Do not cut off important caveats, rationale, or next steps just to stay short.\n" +
+    "- Use bullets when they improve clarity for lists, steps, options, or recommendations; natural paragraphs are fine when they read better.\n" +
     "- Avoid filler phrases like 'Certainly!', 'Great question!', or 'Of course!'.\n" +
     "- When referencing tasks, teammates, customers, or repos, use their actual names from the org context."
   );
@@ -731,7 +736,7 @@ function buildBedrockConversationBody(messages: LlmMessage[], systemPrompt: stri
       role: message.role,
       content: [{ text: message.content }],
     })),
-    inferenceConfig: { maxTokens: 2048 },
+    inferenceConfig: { maxTokens: CHAT_REPLY_MAX_OUTPUT_TOKENS },
   };
 }
 
@@ -977,7 +982,7 @@ async function* streamBedrockReply(
       body: serializedBody,
     }),
     body: serializedBody,
-    signal: AbortSignal.timeout(300000),
+    signal: AbortSignal.timeout(CHAT_REPLY_STREAM_TIMEOUT_MS),
   });
   diagnostics.httpStatus = response.status;
   diagnostics.contentType = response.headers.get("content-type");
@@ -1446,11 +1451,11 @@ async function generateAnthropicReply(
     headers: buildAnthropicHeaders(config),
     body: JSON.stringify({
       model: config.llmModel?.trim(),
-      max_tokens: 2048,
+      max_tokens: CHAT_REPLY_MAX_OUTPUT_TOKENS,
       system: systemPrompt,
       messages: toAnthropicMessages(messages),
     }),
-    signal: AbortSignal.timeout(60000),
+    signal: AbortSignal.timeout(CHAT_REPLY_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -1519,7 +1524,7 @@ export async function generateAgentReply(
           think: config.enableThinking ?? false,
           messages,
         }),
-        signal: AbortSignal.timeout(60000),
+        signal: AbortSignal.timeout(CHAT_REPLY_REQUEST_TIMEOUT_MS),
       });
 
       if (!response.ok) {
@@ -1540,9 +1545,10 @@ export async function generateAgentReply(
       headers: buildJsonHeaders(config),
       body: JSON.stringify({
         model: resolved.model,
+        max_tokens: CHAT_REPLY_MAX_OUTPUT_TOKENS,
         messages,
       }),
-      signal: AbortSignal.timeout(60000),
+      signal: AbortSignal.timeout(CHAT_REPLY_REQUEST_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -1625,7 +1631,7 @@ export async function* streamAgentReply(
             stream: false,
             ...(resolved.kind === "ollama" ? { think: false } : {}),
           }),
-          signal: AbortSignal.timeout(60000),
+          signal: AbortSignal.timeout(CHAT_REPLY_REQUEST_TIMEOUT_MS),
         });
       } catch {
         // Network error, timeout, or endpoint doesn't support non-streaming tool calls.
@@ -1735,8 +1741,9 @@ export async function* streamAgentReply(
         model: resolved.model,
         messages,
         stream: true,
+        max_tokens: CHAT_REPLY_MAX_OUTPUT_TOKENS,
       }),
-      signal: AbortSignal.timeout(300000),
+      signal: AbortSignal.timeout(CHAT_REPLY_STREAM_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -1856,7 +1863,7 @@ export async function* streamAgentReply(
       think: config.enableThinking ?? false,
       messages,
     }),
-    signal: AbortSignal.timeout(300000),
+    signal: AbortSignal.timeout(CHAT_REPLY_STREAM_TIMEOUT_MS),
   });
 
   if (!response.ok) {

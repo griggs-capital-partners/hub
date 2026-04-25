@@ -3,6 +3,10 @@ import { normalize, resolve, sep } from "path";
 import mammoth from "mammoth";
 import { parseOffice, type OfficeContentNode, type SlideMetadata } from "officeparser";
 import * as XLSX from "xlsx";
+import {
+  CHAT_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS,
+  CHAT_THREAD_DOCUMENT_CONTEXT_CHARS,
+} from "./chat-runtime-budgets";
 import { prisma } from "./prisma";
 
 export type ConversationContextSourceStatus = "used" | "unsupported" | "failed" | "unavailable";
@@ -183,8 +187,8 @@ type ConversationContextResolverDependencies = {
   ) => Promise<string>;
 };
 
-export const MAX_THREAD_DOCUMENT_CONTEXT_CHARS = 2_000;
-export const MAX_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS = 6_000;
+export const MAX_THREAD_DOCUMENT_CONTEXT_CHARS = CHAT_THREAD_DOCUMENT_CONTEXT_CHARS;
+export const MAX_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS = CHAT_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS;
 const SUPPORTED_THREAD_TEXT_EXTENSIONS = new Set(["txt", "md"]);
 const SUPPORTED_THREAD_PDF_EXTENSIONS = new Set(["pdf"]);
 const SUPPORTED_THREAD_DOCX_EXTENSIONS = new Set(["docx"]);

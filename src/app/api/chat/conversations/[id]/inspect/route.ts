@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { buildAgentRuntimePreview, probeAgentLlm } from "@/lib/agent-llm";
+import { CHAT_HISTORY_MESSAGE_WINDOW } from "@/lib/chat-runtime-budgets";
 import {
   buildExecutionTargetRuntimeConfig,
   getPublicAgentLlmCatalog,
@@ -127,7 +128,7 @@ export async function GET(
         },
       },
       orderBy: { createdAt: "desc" },
-      take: 12,
+      take: CHAT_HISTORY_MESSAGE_WINDOW,
     });
     const llmConfig = normalizeAgentLlmConfig(agent.llmConfig, {
       llmEndpointUrl: agent.llmEndpointUrl,
@@ -250,7 +251,7 @@ export async function GET(
           estimatedSystemPromptTokens: runtimePreview.estimatedSystemPromptTokens,
           estimatedHistoryTokens: runtimePreview.estimatedHistoryTokens,
           recentHistoryCount: runtimePreview.recentHistoryCount,
-          historyWindowSize: 12,
+          historyWindowSize: CHAT_HISTORY_MESSAGE_WINDOW,
           knowledgeSources: runtimePreview.knowledgeSources,
           sourceSelection: contextBundle.sourceSelection,
           sourceDecisions: contextBundle.sourceDecisions,

@@ -9,6 +9,7 @@ import {
   resolveThinkingMode,
   streamAgentReply,
 } from "@/lib/agent-llm";
+import { CHAT_HISTORY_MESSAGE_WINDOW } from "@/lib/chat-runtime-budgets";
 import {
   applyResolvedThreadModel,
   buildExecutionTargetRuntimeConfig,
@@ -154,7 +155,7 @@ function buildRuntimeSnapshot(params: {
       estimatedSystemPromptTokens: params.runtimePreview.estimatedSystemPromptTokens,
       estimatedHistoryTokens: params.runtimePreview.estimatedHistoryTokens,
       recentHistoryCount: params.runtimePreview.recentHistoryCount,
-      historyWindowSize: 12,
+      historyWindowSize: CHAT_HISTORY_MESSAGE_WINDOW,
       knowledgeSources: params.runtimePreview.knowledgeSources,
       sourceSelection: params.sourceSelection,
       sourceDecisions: params.sourceDecisions,
@@ -370,7 +371,7 @@ export async function POST(
                   },
                 },
                 orderBy: { createdAt: "desc" },
-                take: 12,
+                take: CHAT_HISTORY_MESSAGE_WINDOW,
               }),
               buildOrgContext(),
               resolveConversationContextBundle({
@@ -698,7 +699,7 @@ export async function POST(
           },
         },
         orderBy: { createdAt: "desc" },
-        take: 12,
+        take: CHAT_HISTORY_MESSAGE_WINDOW,
       });
 
       let agentReply: string;

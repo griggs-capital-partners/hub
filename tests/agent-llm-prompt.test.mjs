@@ -42,5 +42,8 @@ assert.match(prompt, /Context grounding rules:/);
 assert.match(prompt, /If this prompt includes a `## Thread Document:` section, that attachment was successfully read/);
 assert.match(prompt, /Treat the `Thread attachment resolution` lines as authoritative status/);
 assert.match(prompt, /Only say a thread attachment could not be read, did not load, or was unavailable when the prompt explicitly says so/);
+assert.match(prompt, /Match depth to the ask\./);
+assert.match(prompt, /Do not cut off important caveats, rationale, or next steps just to stay short\./);
+assert.doesNotMatch(prompt, /Be concise\./);
 
 console.log("ok - agent prompt grounding rules include thread-document truthfulness guidance");
