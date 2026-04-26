@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import createJiti from "jiti";
+import {
+  getPageAwarePdfExpectations,
+  getPageAwarePdfExtractionFixture,
+  getT5DeckExpectations,
+  getT5DeckPdfExtractionFixture,
+} from "./fixtures/context-pdf-fixtures.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -9,6 +15,12 @@ const __dirname = path.dirname(__filename);
 const jiti = createJiti(import.meta.url, { moduleCache: false });
 const { buildConversationContextDebugTrace } = jiti(
   path.join(__dirname, "..", "src", "lib", "context-debug-trace.ts")
+);
+const { buildDocumentChunkCandidates, rankDocumentChunks } = jiti(
+  path.join(__dirname, "..", "src", "lib", "context-document-chunks.ts")
+);
+const { buildPdfContextExtractionResult } = jiti(
+  path.join(__dirname, "..", "src", "lib", "context-pdf.ts")
 );
 
 function makeAuthority(overrides = {}) {
@@ -73,11 +85,22 @@ function makeChunkRange(overrides = {}) {
     safeProvenanceLabel: overrides.safeProvenanceLabel ?? "Excerpt 1 (chars 1-40)",
     sectionLabel: overrides.sectionLabel ?? null,
     sectionPath: overrides.sectionPath ?? [],
+    headingPath: overrides.headingPath ?? overrides.sectionPath ?? [],
     sourceBodyLocationLabel:
       overrides.sourceBodyLocationLabel ?? "notes.md — Excerpt 1 (chars 1-40)",
     referencedLocationLabels: overrides.referencedLocationLabels ?? [],
     sheetName: overrides.sheetName ?? null,
     slideNumber: overrides.slideNumber ?? null,
+    pageNumberStart: overrides.pageNumberStart ?? null,
+    pageNumberEnd: overrides.pageNumberEnd ?? overrides.pageNumberStart ?? null,
+    pageLabelStart: overrides.pageLabelStart ?? null,
+    pageLabelEnd: overrides.pageLabelEnd ?? overrides.pageLabelStart ?? null,
+    tableId: overrides.tableId ?? null,
+    figureId: overrides.figureId ?? null,
+    visualClassification: overrides.visualClassification ?? null,
+    visualClassificationConfidence: overrides.visualClassificationConfidence ?? null,
+    visualClassificationReasonCodes: overrides.visualClassificationReasonCodes ?? [],
+    visualAnchorTitle: overrides.visualAnchorTitle ?? null,
     rankingScore: overrides.rankingScore ?? 0,
     rankingSignals: overrides.rankingSignals ?? [],
     rankingOrder: overrides.rankingOrder ?? 0,
@@ -99,6 +122,8 @@ function makeDebugDocument(overrides = {}) {
     sourceType: overrides.sourceType ?? "markdown",
     parentSourceStatus: overrides.parentSourceStatus ?? "used",
     extractionStatus: overrides.extractionStatus ?? "extracted",
+    extractionDetail: overrides.extractionDetail,
+    sourceMetadata: overrides.sourceMetadata,
     totalChunks: overrides.totalChunks ?? chunkCharRanges.length,
     selectedChunkIndexes: overrides.selectedChunkIndexes ?? [0],
     skippedChunkIndexes: overrides.skippedChunkIndexes ?? [],
@@ -600,6 +625,190 @@ await runTest("maps selected and skipped chunks with source-native locations and
   assert.equal(trace.documents[0].occurrence?.exactMatchLocationCount, 2);
   assert.equal(trace.occurrence?.targetPhrase, "joint account");
   assert.equal("text" in legalRankedChunk, false);
+});
+
+await runTest("preserves page-aware PDF metadata and region provenance in the debug trace", async () => {
+  const expectations = getPageAwarePdfExpectations();
+  const extraction = buildPdfContextExtractionResult(getPageAwarePdfExtractionFixture());
+  const chunks = buildDocumentChunkCandidates({
+    sourceId: expectations.sourceId,
+    attachmentId: expectations.sourceId,
+    fileId: expectations.sourceId,
+    filename: expectations.filename,
+    sourceType: "pdf",
+    text: extraction.text,
+    structuredRanges: extraction.structuredRanges,
+    maxChunkTokens: 50,
+  });
+  const appendixChunk = chunks.find((chunk) => /Contractor rates remain fixed/i.test(chunk.text));
+  const tableChunk = chunks.find((chunk) => chunk.tableId === expectations.tableLabel);
+  assert.ok(appendixChunk);
+  assert.ok(tableChunk);
+
+  const appendixChunkRange = makeChunkRange({
+    ...appendixChunk,
+    textPreview: appendixChunk.text,
+    sourceBodyLocationLabel: `${expectations.filename} — page A-1 — ${appendixChunk.sectionPath.join(" — ")}`,
+  });
+  const tableChunkRange = makeChunkRange({
+    ...tableChunk,
+    textPreview: tableChunk.text,
+    sourceBodyLocationLabel: `${expectations.filename} — page A-1 — ${tableChunk.sectionPath.join(" — ")}`,
+  });
+
+  const bundle = makeBundle({
+    text: `## Thread Document: ${expectations.filename}\n\nSelected excerpts.`,
+    documentChunking: {
+      strategy: "thread-document-paragraphs-v1",
+      documents: [
+        makeDebugDocument({
+          sourceId: expectations.sourceId,
+          attachmentId: expectations.sourceId,
+          fileId: expectations.sourceId,
+          filename: expectations.filename,
+          sourceType: "pdf",
+          extractionDetail: extraction.metadata.detail,
+          sourceMetadata: extraction.metadata,
+          selectedChunkIndexes: [appendixChunkRange.chunkIndex, tableChunkRange.chunkIndex],
+          skippedChunkIndexes: [],
+          selectionMode: "ranked-order",
+          rankingEnabled: true,
+          rankingQueryTokenCount: 3,
+          selectedApproxTokenCount: appendixChunkRange.approxTokenCount + tableChunkRange.approxTokenCount,
+          totalApproxTokenCount: appendixChunkRange.approxTokenCount + tableChunkRange.approxTokenCount,
+          selectedCharCount:
+            appendixChunkRange.charEnd - appendixChunkRange.charStart +
+            tableChunkRange.charEnd - tableChunkRange.charStart,
+          totalCharCount:
+            appendixChunkRange.charEnd - appendixChunkRange.charStart +
+            tableChunkRange.charEnd - tableChunkRange.charStart,
+          chunkCharRanges: [appendixChunkRange, tableChunkRange],
+        }),
+      ],
+    },
+  });
+
+  const trace = buildConversationContextDebugTrace({
+    conversationId: "thread-5",
+    authority: makeAuthority(),
+    currentUserPrompt: "Summarize the attachment on page 2.",
+    bundle,
+  });
+
+  const appendixTraceChunk = trace.chunks.find(
+    (chunk) => chunk.id === `${expectations.sourceId}:${appendixChunkRange.chunkIndex}`
+  );
+  const tableTraceChunk = trace.chunks.find(
+    (chunk) => chunk.id === `${expectations.sourceId}:${tableChunkRange.chunkIndex}`
+  );
+
+  assert.equal(trace.documents[0].extractionDetail, extraction.metadata.detail);
+  assert.equal(trace.documents[0].metadata?.detectedTableCount, 1);
+  assert.ok(appendixTraceChunk);
+  assert.ok(tableTraceChunk);
+  assert.equal(appendixTraceChunk.provenance.sourceBodyLocation.pageRange, undefined);
+  assert.equal(appendixTraceChunk.provenance.sourceBodyLocation.pageNumber, 2);
+  assert.match(
+    appendixTraceChunk.provenance.sourceBodyLocation.headingPath.join(" | "),
+    /Appendix A\b.*Pricing Terms/i
+  );
+  assert.match(
+    appendixTraceChunk.provenance.sourceBodyLocation.headingPath.join(" | "),
+    /Attachment 1\b.*Contractor Rates/i
+  );
+  assert.equal(tableTraceChunk.provenance.sourceBodyLocation.tableId, expectations.tableLabel);
+});
+
+await runTest("surfaces PDF visual classification and selection visibility for table-focused ranking", async () => {
+  const expectations = getT5DeckExpectations();
+  const extraction = buildPdfContextExtractionResult(getT5DeckPdfExtractionFixture());
+  const chunks = buildDocumentChunkCandidates({
+    sourceId: expectations.sourceId,
+    attachmentId: expectations.sourceId,
+    fileId: expectations.sourceId,
+    filename: expectations.filename,
+    sourceType: "pdf",
+    text: extraction.text,
+    structuredRanges: extraction.structuredRanges,
+    maxChunkTokens: 80,
+  });
+  const ranking = rankDocumentChunks({
+    query: expectations.tableQuery,
+    chunks,
+  });
+  const selectedChunkIndexes = ranking.rankedChunks.slice(0, 2).map((chunk) => chunk.chunkIndex);
+  const skippedChunkIndexes = chunks
+    .filter((chunk) => !selectedChunkIndexes.includes(chunk.chunkIndex))
+    .map((chunk) => chunk.chunkIndex);
+  const totalApproxTokenCount = chunks.reduce((sum, chunk) => sum + chunk.approxTokenCount, 0);
+  const totalCharCount = chunks.reduce((sum, chunk) => sum + (chunk.charEnd - chunk.charStart), 0);
+  const selectedApproxTokenCount = ranking.rankedChunks
+    .slice(0, 2)
+    .reduce((sum, chunk) => sum + chunk.approxTokenCount, 0);
+  const selectedCharCount = ranking.rankedChunks
+    .slice(0, 2)
+    .reduce((sum, chunk) => sum + (chunk.charEnd - chunk.charStart), 0);
+
+  const bundle = makeBundle({
+    text: `## Thread Document: ${expectations.filename}\n\nSelected excerpts.`,
+    documentChunking: {
+      strategy: "thread-document-paragraphs-v1",
+      documents: [
+        makeDebugDocument({
+          sourceId: expectations.sourceId,
+          attachmentId: expectations.sourceId,
+          fileId: expectations.sourceId,
+          filename: expectations.filename,
+          sourceType: "pdf",
+          extractionDetail: extraction.metadata.detail,
+          sourceMetadata: extraction.metadata,
+          selectedChunkIndexes,
+          skippedChunkIndexes,
+          selectionMode: "ranked-order",
+          rankingEnabled: true,
+          rankingQueryTokenCount: 2,
+          selectedApproxTokenCount,
+          totalApproxTokenCount,
+          selectedCharCount,
+          totalCharCount,
+          chunkCharRanges: chunks.map((chunk) => {
+            const detail = ranking.details.find((entry) => entry.chunkIndex === chunk.chunkIndex);
+            return makeChunkRange({
+              ...chunk,
+              textPreview: chunk.text,
+              sourceBodyLocationLabel: `${expectations.filename} — page ${chunk.pageNumberStart ?? "?"}`,
+              rankingScore: detail?.score ?? 0,
+              rankingSignals: detail?.signalLabels ?? [],
+              rankingOrder: detail?.rankingOrder ?? chunk.chunkIndex,
+              exactPhraseMatchCount: detail?.exactPhraseMatchCount ?? 0,
+              definitionBoostApplied: detail?.definitionBoostApplied ?? false,
+              coverageGroupKey: detail?.coverageGroupKey ?? null,
+              selectedDueToCoverage: false,
+            });
+          }),
+        }),
+      ],
+    },
+  });
+
+  const trace = buildConversationContextDebugTrace({
+    conversationId: "thread-6",
+    authority: makeAuthority(),
+    currentUserPrompt: expectations.tableQuery,
+    bundle,
+  });
+
+  const topChunk = trace.chunks.find((chunk) => chunk.id === `${expectations.sourceId}:${selectedChunkIndexes[0]}`);
+  const mapChunk = trace.chunks.find((chunk) => chunk.provenance.sourceBodyLocation.pageNumber === 9);
+
+  assert.equal(trace.documents[0].metadata?.pageStructures.find((page) => page.pageNumber === 15)?.primaryClassification, "true_table");
+  assert.equal(trace.documents[0].metadata?.pageStructures.find((page) => page.pageNumber === 18)?.primaryClassification, "table_like_schedule_or_timeline");
+  assert.ok(topChunk);
+  assert.equal(topChunk.metadata.visualClassification, "true_table");
+  assert.ok(topChunk.ranking.signals.includes("true_table_classification"));
+  assert.ok(mapChunk);
+  assert.notEqual(mapChunk.metadata.visualClassification, "true_table");
+  assert.ok(mapChunk.ranking.signals.includes("non_table_visual_penalty"));
 });
 
 await runTest("maps ordinary unstructured documents safely and keeps parity deterministic", async () => {

@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import createJiti from "jiti";
+import {
+  getPageAwarePdfExpectations,
+  getPageAwarePdfExtractionFixture,
+  getT5DeckExpectations,
+  getT5DeckPdfExtractionFixture,
+} from "./fixtures/context-pdf-fixtures.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,6 +22,9 @@ const {
   selectDocumentChunksInOrder,
   selectRankedDocumentChunksWithinBudget,
 } = jiti(path.join(__dirname, "..", "src", "lib", "context-document-chunks.ts"));
+const { buildPdfContextExtractionResult } = jiti(
+  path.join(__dirname, "..", "src", "lib", "context-pdf.ts")
+);
 
 function makeTestChunk({
   sourceId,
@@ -46,9 +55,20 @@ function makeTestChunk({
     safeProvenanceLabel: `Excerpt ${chunkIndex + 1} (chars ${charStart + 1}-${charStart + text.length})`,
     sectionLabel,
     sectionPath,
+    headingPath: [...sectionPath],
     referencedLocationLabels,
     sheetName: null,
     slideNumber: null,
+    pageNumberStart: null,
+    pageNumberEnd: null,
+    pageLabelStart: null,
+    pageLabelEnd: null,
+    tableId: null,
+    figureId: null,
+    visualClassification: null,
+    visualClassificationConfidence: null,
+    visualClassificationReasonCodes: [],
+    visualAnchorTitle: null,
   };
 }
 
@@ -228,6 +248,90 @@ const compoundClauseChunk = compoundLegalHeadingChunks.find((chunk) => /satisfy 
 assert.ok(compoundClauseChunk);
 assert.match(compoundClauseChunk.sectionPath.join(" | "), /Article V\.D/i);
 assert.match(compoundClauseChunk.sectionPath.join(" | "), /Article V\.D\.2/i);
+
+const pageAwarePdfFixture = getPageAwarePdfExtractionFixture();
+const pageAwarePdfExpectations = getPageAwarePdfExpectations();
+const pageAwarePdfExtraction = buildPdfContextExtractionResult(pageAwarePdfFixture);
+const pageAwarePdfChunks = buildDocumentChunkCandidates({
+  sourceId: pageAwarePdfExpectations.sourceId,
+  attachmentId: pageAwarePdfExpectations.sourceId,
+  fileId: pageAwarePdfExpectations.sourceId,
+  filename: pageAwarePdfExpectations.filename,
+  sourceType: "pdf",
+  text: pageAwarePdfExtraction.text,
+  structuredRanges: pageAwarePdfExtraction.structuredRanges,
+  maxChunkTokens: 50,
+});
+
+const pageAwareAppendixChunk = pageAwarePdfChunks.find((chunk) => /Contractor rates remain fixed/i.test(chunk.text));
+assert.ok(pageAwareAppendixChunk);
+assert.equal(pageAwareAppendixChunk.pageNumberStart, 2);
+assert.equal(pageAwareAppendixChunk.pageNumberEnd, 2);
+assert.equal(pageAwareAppendixChunk.pageLabelStart, "A-1");
+assert.match(pageAwareAppendixChunk.sectionPath.join(" | "), /Appendix A\b.*Pricing Terms/i);
+assert.match(pageAwareAppendixChunk.sectionPath.join(" | "), /Attachment 1\b.*Contractor Rates/i);
+assert.match(pageAwareAppendixChunk.safeProvenanceLabel, /page A-1/i);
+
+const rankedPageAwareChunks = rankDocumentChunks({
+  query: "page 2 contractor rates",
+  chunks: pageAwarePdfChunks,
+});
+
+assert.equal(rankedPageAwareChunks.rankedChunks[0].pageNumberStart, 2);
+assert.ok(rankedPageAwareChunks.details[0].signalLabels.includes("page_number_match"));
+
+const t5DeckFixture = getT5DeckPdfExtractionFixture();
+const t5DeckExpectations = getT5DeckExpectations();
+const t5DeckExtraction = buildPdfContextExtractionResult(t5DeckFixture);
+const t5DeckChunks = buildDocumentChunkCandidates({
+  sourceId: t5DeckExpectations.sourceId,
+  attachmentId: t5DeckExpectations.sourceId,
+  fileId: t5DeckExpectations.sourceId,
+  filename: t5DeckExpectations.filename,
+  sourceType: "pdf",
+  text: t5DeckExtraction.text,
+  structuredRanges: t5DeckExtraction.structuredRanges,
+  maxChunkTokens: 80,
+});
+
+const t5TableFocusedRanking = rankDocumentChunks({
+  query: t5DeckExpectations.tableQuery,
+  chunks: t5DeckChunks,
+});
+const t5Page15Chunk = t5DeckChunks.find((chunk) => chunk.pageNumberStart === 15);
+const t5Page18Chunk = t5DeckChunks.find((chunk) => chunk.pageNumberStart === 18);
+const t5Page9Chunk = t5DeckChunks.find((chunk) => chunk.pageNumberStart === 9);
+const t5TopTableChunk = t5TableFocusedRanking.rankedChunks[0];
+const t5TopTableDetail = t5TableFocusedRanking.details.find(
+  (detail) => detail.chunkIndex === t5TopTableChunk.chunkIndex
+);
+const t5MapDetail = t5TableFocusedRanking.details.find(
+  (detail) => detail.chunkIndex === t5Page9Chunk?.chunkIndex
+);
+
+assert.ok(t5Page15Chunk);
+assert.ok(t5Page18Chunk);
+assert.ok(t5Page9Chunk);
+assert.equal(t5Page15Chunk.visualClassification, "true_table");
+assert.equal(t5Page18Chunk.visualClassification, "table_like_schedule_or_timeline");
+assert.equal(t5TopTableChunk.pageNumberStart, 15);
+assert.ok(t5TopTableDetail?.signalLabels.includes("true_table_classification"));
+assert.ok(t5MapDetail?.signalLabels.includes("non_table_visual_penalty"));
+assert.equal(
+  t5TableFocusedRanking.rankedChunks.slice(0, 2).some((chunk) => chunk.pageNumberStart === 18),
+  true
+);
+
+const t5TimelineRanking = rankDocumentChunks({
+  query: t5DeckExpectations.timelineQuery,
+  chunks: t5DeckChunks,
+});
+const t5TopTimelineDetail = t5TimelineRanking.details.find(
+  (detail) => detail.chunkIndex === t5TimelineRanking.rankedChunks[0].chunkIndex
+);
+
+assert.equal(t5TimelineRanking.rankedChunks[0].pageNumberStart, 18);
+assert.ok(t5TopTimelineDetail?.signalLabels.includes("timeline_visual_match"));
 
 const rankedLateSectionChunks = rankDocumentChunks({
   query: "maintenance backlog risk",

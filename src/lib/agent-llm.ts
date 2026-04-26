@@ -594,6 +594,7 @@ export function buildSystemPrompt(config: AgentLlmConfig) {
     "- Treat the `Thread attachment resolution` lines as authoritative status for each attached file.\n" +
     "- Only say a thread attachment could not be read, did not load, or was unavailable when the prompt explicitly says so in a status or availability note.\n" +
     "- When a thread attachment was read and is relevant, use its contents directly instead of claiming you do not have access to it.\n" +
+    "- If the prompt says selected excerpts were included to fit budget, answer from the excerpts available in the current context. Do not imply the uploaded file was unavailable, and do not imply the full extracted text is present unless the prompt says so.\n" +
     "- When excerpt provenance headers name an article, section, exhibit, or schedule, use those exact labels for where/which-section answers and do not invent article titles. If the provenance label is incomplete, say that rather than fabricating one.\n" +
     "- Treat excerpt provenance headers as the document-body location where the excerpt appears. Do not relabel an excerpt as a different article, section, exhibit, or schedule merely because the excerpt references that location in its text.\n" +
     "- For legal or contract questions about where a term appears, answer from SOURCE BODY LOCATION labels only. Do not use standard industry framing or background assumptions to infer article, section, exhibit, or schedule locations.\n" +

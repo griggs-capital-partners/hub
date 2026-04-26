@@ -4,6 +4,11 @@ import { fileURLToPath } from "node:url";
 import createJiti from "jiti";
 import JSZip from "jszip";
 import * as XLSX from "xlsx";
+import {
+  getPageAwarePdfExtractionFixture,
+  getT5DeckExpectations,
+  getT5DeckPdfExtractionFixture,
+} from "./fixtures/context-pdf-fixtures.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,6 +27,9 @@ const {
   resolveConversationDocumentMetadata,
   validateConversationDocument,
 } = jiti(path.join(__dirname, "..", "src", "lib", "conversation-documents.ts"));
+const { buildPdfContextExtractionResult } = jiti(
+  path.join(__dirname, "..", "src", "lib", "context-pdf.ts")
+);
 
 function makeDocument(overrides = {}) {
   return {
@@ -535,6 +543,92 @@ await runTest("explains when a PDF parses but returns no readable text", async (
   assert.match(bundle.sources[0].detail, /image-based\/scanned|unsupported text layer/);
 });
 
+await runTest("preserves page-aware PDF provenance, partial extraction detail, and PDF debug metadata", async () => {
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "What does the attachment on page 2 say about contractor rates?",
+    },
+    {
+      listDocuments: async () => [
+        makeDocument({
+          id: "doc-page-aware",
+          filename: "rates.pdf",
+          mimeType: "application/pdf",
+          fileType: "pdf",
+          storagePath: "C:\\GitHub\\hub\\uploads\\thread-1\\rates.pdf",
+        }),
+      ],
+      readBinaryFile: async () => Buffer.from("%PDF-1.4\npage-aware fixture", "utf8"),
+      extractPdfText: async () =>
+        buildPdfContextExtractionResult(getPageAwarePdfExtractionFixture()),
+    }
+  );
+
+  assert.equal(bundle.sources[0].status, "used");
+  assert.match(bundle.sources[0].detail, /Extracted readable text from 2 of 3 PDF pages/i);
+  assert.match(bundle.sources[0].detail, /OCR is not implemented/i);
+  const pageAwareChunkLabel = bundle.documentChunking.documents[0]?.chunkCharRanges.find(
+    (chunk) => chunk.pageNumberStart === 2
+  )?.sourceBodyLocationLabel;
+  assert.match(pageAwareChunkLabel ?? "", /rates\.pdf.*page A-1.*Appendix A.*Attachment 1/i);
+  assert.match(bundle.text, /SOURCE BODY LOCATION: rates\.pdf — page A-1 — Table 1/i);
+  assert.equal(bundle.documentChunking.documents[0]?.extractionDetail?.includes("partial page-aware provenance"), true);
+  assert.equal(bundle.documentChunking.documents[0]?.sourceMetadata?.detectedTableCount, 1);
+  assert.deepEqual(bundle.documentChunking.documents[0]?.sourceMetadata?.lowTextPageNumbers, [3]);
+  assert.equal(bundle.debugTrace?.documents[0]?.metadata?.detectedTableCount, 1);
+  assert.equal(bundle.debugTrace?.chunks.some((chunk) => chunk.provenance.sourceBodyLocation.pageNumber === 2), true);
+});
+
+await runTest("classifies T5 deck table and visual excerpts without inventing fake repeated tables", async () => {
+  const expectations = getT5DeckExpectations();
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: expectations.tableQuery,
+    },
+    {
+      listDocuments: async () => [
+        makeDocument({
+          id: expectations.sourceId,
+          filename: expectations.filename,
+          mimeType: "application/pdf",
+          fileType: "pdf",
+          storagePath: "C:\\GitHub\\hub\\uploads\\thread-1\\t5.pdf",
+        }),
+      ],
+      readBinaryFile: async () => Buffer.from("%PDF-1.4\nt5 fixture", "utf8"),
+      extractPdfText: async () =>
+        buildPdfContextExtractionResult(getT5DeckPdfExtractionFixture()),
+    }
+  );
+
+  assert.equal(bundle.sources[0].status, "used");
+  assert.equal(
+    bundle.documentChunking.documents[0].chunkCharRanges.some((chunk) => chunk.pageNumberStart === 15),
+    true
+  );
+  assert.equal(
+    bundle.documentChunking.documents[0].chunkCharRanges.some((chunk) => chunk.pageNumberStart === 18),
+    true
+  );
+  assert.equal(
+    bundle.documentChunking.documents[0].chunkCharRanges.some(
+      (chunk) =>
+        chunk.pageNumberStart != null &&
+        chunk.pageNumberStart >= 9 &&
+        chunk.pageNumberStart <= 13 &&
+        chunk.tableId != null
+    ),
+    false
+  );
+  assert.match(bundle.text, /Smackover Water Chemistry/i);
+  assert.match(bundle.text, /PDF STRUCTURE CLASSIFICATION: probable true data table/i);
+  assert.match(bundle.text, /PDF STRUCTURE CLASSIFICATION: table-like schedule\/timeline visual/i);
+  assert.equal(bundle.documentChunking.documents[0].sourceMetadata?.classificationCounts?.true_table, 1);
+  assert.equal(bundle.debugTrace?.documents[0]?.metadata?.pageStructures?.find((page) => page.pageNumber === 15)?.primaryClassification, "true_table");
+});
+
 await runTest("uses supported DOCX attachments when extraction succeeds", async () => {
   const bundle = await resolveConversationContextBundle(
     { conversationId: "thread-1" },
@@ -580,7 +674,9 @@ await runTest("splits long thread documents into ordered chunk excerpts with deb
 
   assert.equal(bundle.sources[0].status, "used");
   assert.match(bundle.sources[0].detail, /included selected excerpts/i);
-  assert.match(bundle.text, /Selected excerpts from this attachment are included below in document order\./);
+  assert.match(bundle.text, /Only selected excerpts from this attachment are available below in the current runtime context\./);
+  assert.match(bundle.text, /Base your answer on the excerpts available here/i);
+  assert.doesNotMatch(bundle.text, /need the full pdf/i);
   assert.match(bundle.text, /### Excerpt 1/);
   assert.match(bundle.text, /SOURCE BODY LOCATION: notes\.md — Incident Overview/);
   assert.match(bundle.text, /TEXT:/);

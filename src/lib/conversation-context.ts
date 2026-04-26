@@ -26,6 +26,11 @@ import {
 } from "./chat-runtime-budgets";
 import { buildConversationContextDebugTrace } from "./context-debug-trace";
 import { joinMarkdownSections } from "./context-formatting";
+import {
+  buildPdfContextExtractionResult,
+  formatPdfVisualClassificationLabel,
+  type PdfContextExtractionResult,
+} from "./context-pdf";
 import { DEFAULT_APPROX_CHARS_PER_TOKEN } from "./context-token-budget";
 import {
   DEFAULT_MODEL_BUDGET_PROFILE,
@@ -245,6 +250,8 @@ export type ConversationContextDocumentChunkingDocument = {
   sourceType: string;
   parentSourceStatus: ConversationContextSourceStatus;
   extractionStatus: "unsupported" | "failed" | "unavailable" | "extracted";
+  extractionDetail?: string | null;
+  sourceMetadata?: Record<string, unknown> | null;
   totalChunks: number;
   selectedChunkIndexes: number[];
   skippedChunkIndexes: number[];
@@ -276,10 +283,21 @@ export type ConversationContextDocumentChunkingDocument = {
     safeProvenanceLabel: string;
     sectionLabel: string | null;
     sectionPath: string[];
+    headingPath: string[];
     sourceBodyLocationLabel: string;
     referencedLocationLabels: string[];
     sheetName: string | null;
     slideNumber: number | null;
+    pageNumberStart: number | null;
+    pageNumberEnd: number | null;
+    pageLabelStart: string | null;
+    pageLabelEnd: string | null;
+    tableId: string | null;
+    figureId: string | null;
+    visualClassification: string | null;
+    visualClassificationConfidence: string | null;
+    visualClassificationReasonCodes: string[];
+    visualAnchorTitle: string | null;
     rankingScore: number;
     rankingSignals: string[];
     rankingOrder: number;
@@ -311,10 +329,44 @@ export type ConversationContextDocumentChunkingDebug = {
   documents: ConversationContextDocumentChunkingDocument[];
 };
 
+function formatThreadDocumentPageRangeLabel(chunk: {
+  pageNumberStart?: number | null;
+  pageNumberEnd?: number | null;
+  pageLabelStart?: string | null;
+  pageLabelEnd?: string | null;
+}) {
+  const startLabel = chunk.pageLabelStart ?? (chunk.pageNumberStart != null ? String(chunk.pageNumberStart) : null);
+  const endLabel = chunk.pageLabelEnd ?? (chunk.pageNumberEnd != null ? String(chunk.pageNumberEnd) : null);
+
+  if (!startLabel && !endLabel) {
+    return null;
+  }
+
+  if (startLabel && endLabel && startLabel !== endLabel) {
+    return `pages ${startLabel}-${endLabel}`;
+  }
+
+  return `page ${startLabel ?? endLabel}`;
+}
+
 function buildThreadDocumentSourceBodyLocationLabel(params: {
   filename: string;
-  chunk: Pick<ContextDocumentChunk, "sectionPath" | "sectionLabel" | "safeProvenanceLabel">;
+  chunk: Pick<
+    ContextDocumentChunk,
+    | "sectionPath"
+    | "sectionLabel"
+    | "safeProvenanceLabel"
+    | "pageNumberStart"
+    | "pageNumberEnd"
+    | "pageLabelStart"
+    | "pageLabelEnd"
+    | "tableId"
+    | "figureId"
+    | "visualAnchorTitle"
+  >;
 }) {
+  const pageLabel = formatThreadDocumentPageRangeLabel(params.chunk);
+
   const sectionPath = Array.from(
     new Set(
       (params.chunk.sectionPath ?? []).filter(
@@ -322,6 +374,34 @@ function buildThreadDocumentSourceBodyLocationLabel(params: {
       )
     )
   );
+  if (pageLabel) {
+    sectionPath.unshift(pageLabel);
+  }
+  if (
+    params.chunk.sectionLabel?.trim() &&
+    !sectionPath.includes(params.chunk.sectionLabel.trim())
+  ) {
+    sectionPath.push(params.chunk.sectionLabel.trim());
+  }
+  if (
+    params.chunk.tableId?.trim() &&
+    !sectionPath.includes(params.chunk.tableId.trim())
+  ) {
+    sectionPath.push(params.chunk.tableId.trim());
+  }
+  if (
+    params.chunk.figureId?.trim() &&
+    !sectionPath.includes(params.chunk.figureId.trim())
+  ) {
+    sectionPath.push(params.chunk.figureId.trim());
+  }
+  if (
+    sectionPath.length <= 1 &&
+    params.chunk.visualAnchorTitle?.trim() &&
+    !sectionPath.includes(params.chunk.visualAnchorTitle.trim())
+  ) {
+    sectionPath.push(params.chunk.visualAnchorTitle.trim());
+  }
   if (sectionPath.length > 0) {
     return [params.filename, ...sectionPath].join(" — ");
   }
@@ -340,6 +420,55 @@ function buildChunkTextPreview(value: string) {
   }
 
   return `${normalized.slice(0, 77)}...`;
+}
+
+function buildPdfStructureClassificationNote(params: {
+  sourceType: string;
+  chunk: Pick<
+    ContextDocumentChunk,
+    | "visualClassification"
+    | "visualClassificationConfidence"
+    | "visualClassificationReasonCodes"
+  >;
+}) {
+  if (params.sourceType !== "pdf" || !params.chunk.visualClassification) {
+    return null;
+  }
+
+  const confidencePrefix =
+    params.chunk.visualClassificationConfidence === "low"
+      ? "probable "
+      : params.chunk.visualClassificationConfidence === "medium"
+        ? "likely "
+        : "";
+  const label = `${confidencePrefix}${formatPdfVisualClassificationLabel(params.chunk.visualClassification)}`;
+
+  if (
+    params.chunk.visualClassification === "true_table" &&
+    params.chunk.visualClassificationReasonCodes.includes("title_only_table_inference")
+  ) {
+    return `PDF STRUCTURE CLASSIFICATION: ${label}. This classification is based on the page title/context cues only; detailed row/column text was not fully extractable from this page.`;
+  }
+
+  if (params.chunk.visualClassification === "table_like_schedule_or_timeline") {
+    return `PDF STRUCTURE CLASSIFICATION: ${label}. Treat it as a schedule/timeline visual rather than a clean numeric data table.`;
+  }
+
+  if (
+    params.chunk.visualClassification === "map_or_location_figure" ||
+    params.chunk.visualClassification === "chart_or_plot" ||
+    params.chunk.visualClassification === "technical_log_or_well_log" ||
+    params.chunk.visualClassification === "schematic_or_diagram" ||
+    params.chunk.visualClassification === "photo_or_core_image"
+  ) {
+    return `PDF STRUCTURE CLASSIFICATION: ${label}. Do not treat it as a clean data table unless the extracted text below shows actual row/column data.`;
+  }
+
+  if (params.chunk.visualClassification === "low_text_or_scanned_visual") {
+    return `PDF STRUCTURE CLASSIFICATION: ${label}. Do not infer unseen details beyond the extracted text below.`;
+  }
+
+  return `PDF STRUCTURE CLASSIFICATION: ${label}.`;
 }
 
 function resolveConversationContextBudget(
@@ -587,7 +716,7 @@ type ConversationContextResolverDependencies = {
   listDocuments?: (conversationId: string) => Promise<ConversationContextDocumentRecord[]>;
   readTextFile?: (storagePath: string) => Promise<string>;
   readBinaryFile?: (storagePath: string) => Promise<Buffer>;
-  extractPdfText?: (fileBuffer: Buffer) => Promise<string>;
+  extractPdfText?: (fileBuffer: Buffer) => Promise<string | PdfContextExtractionResult>;
   extractDocxText?: (fileBuffer: Buffer) => Promise<string>;
   extractPptxText?: (fileBuffer: Buffer) => Promise<string>;
   extractSpreadsheetText?: (
@@ -759,7 +888,14 @@ function summarizeExtractionError(error: unknown) {
   return normalized.length > 180 ? `${normalized.slice(0, 177)}...` : normalized;
 }
 
-function buildPdfNoReadableTextDetail() {
+function buildPdfNoReadableTextDetail(metadata?: PdfContextExtractionResult["metadata"] | null) {
+  if (metadata && metadata.totalPages > 0) {
+    const lowTextDetail = metadata.lowTextPageLabels.length > 0
+      ? ` Detected little or no extractable text on ${metadata.lowTextPageLabels.join(", ")}.`
+      : "";
+    return `Attached to this thread, but the PDF parser returned no readable text.${lowTextDetail} OCR is not implemented in this pass, so image-only/scanned pages remain unavailable to the active runtime.`;
+  }
+
   return "Attached to this thread, but the PDF parser returned no readable text. This usually means the PDF is image-based/scanned or uses an unsupported text layer.";
 }
 
@@ -801,6 +937,10 @@ function buildExtractionFailureDetail(contextKind: "pdf" | "docx" | "pptx" | "sp
     }
 
     const message = summarizeExtractionError(error);
+    if (message && /password|encrypted|encrypt/i.test(message)) {
+      return `Attached to this thread, but the PDF appears to be encrypted or password-protected (${message}).`;
+    }
+
     return message
       ? `Attached to this thread, but the PDF parser failed before usable text could be extracted (${message}).`
       : "Attached to this thread, but the PDF parser failed before usable text could be extracted.";
@@ -829,16 +969,74 @@ function buildUsedThreadDocumentDetail(params: {
   charCount: number;
   fullyIncluded: boolean;
   occurrenceInventoryOnly?: boolean;
+  extractionDetail?: string | null;
 }) {
   const readableChars = params.charCount.toLocaleString("en-US");
+  const extractionDetailSuffix = params.extractionDetail?.trim()
+    ? ` ${params.extractionDetail.trim()}`
+    : "";
 
   if (params.occurrenceInventoryOnly) {
-    return `Read ${readableChars} readable characters from this thread attachment and included a deterministic exact-phrase occurrence inventory in the active runtime context. No explanatory excerpt from this file fit within the current thread-document context budget.`;
+    return `Read ${readableChars} readable characters from this thread attachment and included a deterministic exact-phrase occurrence inventory in the active runtime context. No explanatory excerpt from this file fit within the current thread-document context budget.${extractionDetailSuffix}`;
   }
 
   return params.fullyIncluded
-    ? `Read ${readableChars} readable characters from this thread attachment and included the extracted text in the active runtime context.`
-    : `Read ${readableChars} readable characters from this thread attachment and included selected excerpts in the active runtime context to stay within the thread-document context budget.`;
+    ? `Read ${readableChars} readable characters from this thread attachment and included the extracted text in the active runtime context.${extractionDetailSuffix}`
+    : `Read ${readableChars} readable characters from this thread attachment and included selected excerpts in the active runtime context to stay within the thread-document context budget. If you caveat the answer, describe it as based on the excerpts available in the current context, not as though the uploaded file was unavailable.${extractionDetailSuffix}`;
+}
+
+function isPdfContextExtractionResult(value: unknown): value is PdfContextExtractionResult {
+  return typeof value === "object"
+    && value !== null
+    && "text" in value
+    && "structuredRanges" in value
+    && "metadata" in value;
+}
+
+function buildPdfSourceMetadata(metadata: PdfContextExtractionResult["metadata"] | null) {
+  if (!metadata) {
+    return null;
+  }
+
+  return {
+    extractor: metadata.extractor,
+    extractorVersion: metadata.extractorVersion,
+    totalPages: metadata.totalPages,
+    extractedPageCount: metadata.extractedPageCount,
+    lowTextPageNumbers: metadata.lowTextPageNumbers,
+    lowTextPageLabels: metadata.lowTextPageLabels,
+    suppressedHeaderLines: metadata.suppressedHeaderLines,
+    suppressedFooterLines: metadata.suppressedFooterLines,
+    detectedTableCount: metadata.detectedTableCount,
+    retainedTableSummaryCount: metadata.retainedTableSummaryCount,
+    rejectedTableCandidateCount: metadata.rejectedTableCandidateCount,
+    detectedTableCaptionCount: metadata.detectedTableCaptionCount,
+    detectedFigureCaptionCount: metadata.detectedFigureCaptionCount,
+    pageLabelsAvailable: metadata.pageLabelsAvailable,
+    partialExtraction: metadata.partialExtraction,
+    ocrStatus: metadata.ocrStatus,
+    tableExtractionStatus: metadata.tableExtractionStatus,
+    tableExtractionDetail: metadata.tableExtractionDetail,
+    pageStructures: metadata.pageStructures,
+    classificationCounts: metadata.classificationCounts,
+    detail: metadata.detail,
+  } satisfies Record<string, unknown>;
+}
+
+function resolvePdfExtractionResult(value: string | PdfContextExtractionResult) {
+  if (isPdfContextExtractionResult(value)) {
+    return {
+      text: value.text,
+      structuredRanges: value.structuredRanges,
+      metadata: value.metadata,
+    };
+  }
+
+  return {
+    text: value,
+    structuredRanges: undefined,
+    metadata: null,
+  };
 }
 
 function normalizeDocumentText(value: string) {
@@ -1454,14 +1652,64 @@ async function extractThreadPdfText(fileBuffer: Buffer) {
   }
 
   let parser: {
-    getText: () => Promise<{ text: string }>;
+    getText: (params?: {
+      cellSeparator?: string;
+      lineEnforce?: boolean;
+      pageJoiner?: string;
+    }) => Promise<{
+      text: string;
+      pages: Array<{
+        num: number;
+        text: string;
+      }>;
+      total: number;
+    }>;
+    getInfo: (params?: { parsePageInfo?: boolean }) => Promise<{
+      total: number;
+      pages: Array<{
+        pageNumber: number;
+        pageLabel?: string | null;
+      }>;
+    }>;
+    getTable: () => Promise<{
+      pages: Array<{
+        num: number;
+        tables: string[][][];
+      }>;
+    }>;
     destroy: () => Promise<unknown>;
   } | null = null;
 
   try {
     parser = new PDFParse({ data: fileBuffer });
-    const result = await parser.getText();
-    return result.text;
+    const textResult = await parser.getText({
+      cellSeparator: "\t",
+      lineEnforce: true,
+      pageJoiner: "",
+    });
+    let infoResult: Awaited<ReturnType<typeof parser.getInfo>> | null = null;
+    let tableResult: Awaited<ReturnType<typeof parser.getTable>> | null = null;
+    let tableExtractionErrorDetail: string | null = null;
+
+    try {
+      infoResult = await parser.getInfo({ parsePageInfo: true });
+    } catch {
+      infoResult = null;
+    }
+
+    try {
+      tableResult = await parser.getTable();
+    } catch (error) {
+      tableExtractionErrorDetail = summarizeExtractionError(error) || "table extraction failed";
+    }
+
+    return buildPdfContextExtractionResult({
+      textPages: textResult.pages,
+      infoPages: infoResult?.pages ?? [],
+      tablePages: tableResult?.pages ?? undefined,
+      extractorVersion: "pdf-parse@2.4.5",
+      tableExtractionErrorDetail,
+    });
   } finally {
     if (parser) {
       try {
@@ -1704,6 +1952,8 @@ function buildThreadDocumentChunkingDebugDocument(params: {
   sourceType: string;
   parentSourceStatus: ConversationContextSourceStatus;
   extractionStatus: ConversationContextDocumentChunkingDocument["extractionStatus"];
+  extractionDetail?: string | null;
+  sourceMetadata?: Record<string, unknown> | null;
   occurrenceQuery?: {
     intentDetected: boolean;
     targetPhrase: string | null;
@@ -1746,6 +1996,8 @@ function buildThreadDocumentChunkingDebugDocument(params: {
     sourceType: params.sourceType || params.document.fileType || "unknown",
     parentSourceStatus: params.parentSourceStatus,
     extractionStatus: params.extractionStatus,
+    ...(params.extractionDetail != null ? { extractionDetail: params.extractionDetail } : {}),
+    ...(params.sourceMetadata ? { sourceMetadata: params.sourceMetadata } : {}),
     totalChunks: chunks.length,
     selectedChunkIndexes:
       selection?.selectedChunks.map((chunk) => chunk.chunkIndex).sort((left, right) => left - right) ?? [],
@@ -1787,6 +2039,9 @@ function buildThreadDocumentChunkingDebugDocument(params: {
         sectionPath: (chunk.sectionPath ?? []).filter(
           (entry): entry is string => typeof entry === "string" && entry.trim().length > 0
         ),
+        headingPath: (chunk.headingPath ?? []).filter(
+          (entry): entry is string => typeof entry === "string" && entry.trim().length > 0
+        ),
         sourceBodyLocationLabel: buildThreadDocumentSourceBodyLocationLabel({
           filename: params.document.filename,
           chunk,
@@ -1794,6 +2049,16 @@ function buildThreadDocumentChunkingDebugDocument(params: {
         referencedLocationLabels: chunk.referencedLocationLabels,
         sheetName: chunk.sheetName,
         slideNumber: chunk.slideNumber,
+        pageNumberStart: chunk.pageNumberStart,
+        pageNumberEnd: chunk.pageNumberEnd,
+        pageLabelStart: chunk.pageLabelStart,
+        pageLabelEnd: chunk.pageLabelEnd,
+        tableId: chunk.tableId,
+        figureId: chunk.figureId,
+        visualClassification: chunk.visualClassification,
+        visualClassificationConfidence: chunk.visualClassificationConfidence,
+        visualClassificationReasonCodes: [...chunk.visualClassificationReasonCodes],
+        visualAnchorTitle: chunk.visualAnchorTitle,
         rankingScore: rankingDetail?.score ?? 0,
         rankingSignals: rankingDetail?.signalLabels ?? [],
         rankingOrder: rankingDetail?.rankingOrder ?? chunk.chunkIndex,
@@ -1810,6 +2075,7 @@ function buildThreadDocumentChunkingDebugDocument(params: {
 
 function buildThreadDocumentSection(params: {
   filename: string;
+  fullyIncluded?: boolean;
   selection: ContextDocumentChunkSelectionResult;
   ranking?: ContextDocumentChunkRankingResult | null;
   occurrence?: ConversationContextDocumentOccurrenceDebug | null;
@@ -1857,7 +2123,9 @@ function buildThreadDocumentSection(params: {
     `## Thread Document: ${params.filename}`,
     occurrenceInventorySection,
     displayChunks.length > 0
-      ? "Selected excerpts from this attachment are included below in document order. Use the excerpt provenance labels for exact article, section, exhibit, or schedule references. Treat each provenance header as the body location where the excerpt appears; references mentioned inside the excerpt do not change that location."
+      ? params.fullyIncluded
+        ? "The extracted text available for this attachment in the current runtime context is included below in document order. Use the excerpt provenance labels for exact article, section, exhibit, or schedule references. Treat each provenance header as the body location where the excerpt appears; references mentioned inside the excerpt do not change that location."
+        : "Only selected excerpts from this attachment are available below in the current runtime context. Base your answer on the excerpts available here unless a status note says extraction failed or the attachment was unavailable. If more detail may exist elsewhere in the same uploaded file, describe the limit as excerpt/context-budget limited rather than saying the PDF was unavailable. Use the excerpt provenance labels for exact article, section, exhibit, or schedule references. Treat each provenance header as the body location where the excerpt appears; references mentioned inside the excerpt do not change that location."
       : "No explanatory excerpt from this attachment fit within the current runtime budget. Use the occurrence inventory above as the authoritative extracted-chunk scan result for this file's successfully extracted contents.",
     occurrenceListingHint,
     ...displayChunks.map((chunk) =>
@@ -1873,6 +2141,10 @@ function buildThreadDocumentSection(params: {
         chunk.sectionPath.length === 0
           ? `EXCERPT PROVENANCE NOTE: ${chunk.safeProvenanceLabel}`
           : null,
+        buildPdfStructureClassificationNote({
+          sourceType: chunk.sourceType,
+          chunk,
+        }),
         "TEXT:",
         chunk.text,
       ])
@@ -2467,6 +2739,7 @@ export async function resolveConversationContextBundle(params: {
           sourceType: contextKind,
           parentSourceStatus: "failed",
           extractionStatus: "failed",
+          extractionDetail: detail,
           occurrenceQuery,
         })
       );
@@ -2511,6 +2784,10 @@ export async function resolveConversationContextBundle(params: {
     }
 
     let rawText: string;
+    let pdfStructuredRanges: PdfContextExtractionResult["structuredRanges"] | undefined;
+    let pdfExtractionMetadata: PdfContextExtractionResult["metadata"] | null = null;
+    let extractionDetail: string | null = null;
+    let sourceMetadata: Record<string, unknown> | null = null;
 
     if (contextKind === "pdf" || contextKind === "docx" || contextKind === "pptx" || contextKind === "spreadsheet") {
       let fileBuffer: Buffer;
@@ -2522,28 +2799,36 @@ export async function resolveConversationContextBundle(params: {
         availabilityNotes.push(`- ${document.filename}: ${detail}`);
         sources.push(buildContextSource("failed", document.filename, detail));
         documentChunkingDocuments.push(
-          buildThreadDocumentChunkingDebugDocument({
-            document,
-            sourceType: contextKind,
-            parentSourceStatus: "failed",
-            extractionStatus: "failed",
-            occurrenceQuery,
-          })
-        );
+        buildThreadDocumentChunkingDebugDocument({
+          document,
+          sourceType: contextKind,
+          parentSourceStatus: "failed",
+          extractionStatus: "failed",
+          extractionDetail: detail,
+          occurrenceQuery,
+        })
+      );
         continue;
       }
 
       try {
-        rawText = contextKind === "pdf"
-          ? await extractPdfText(fileBuffer)
-          : contextKind === "docx"
+        if (contextKind === "pdf") {
+          const resolvedPdfExtraction = resolvePdfExtractionResult(await extractPdfText(fileBuffer));
+          rawText = resolvedPdfExtraction.text;
+          pdfStructuredRanges = resolvedPdfExtraction.structuredRanges;
+          pdfExtractionMetadata = resolvedPdfExtraction.metadata;
+          extractionDetail = resolvedPdfExtraction.metadata?.detail ?? null;
+          sourceMetadata = buildPdfSourceMetadata(resolvedPdfExtraction.metadata);
+        } else {
+          rawText = contextKind === "docx"
             ? await extractDocxText(fileBuffer)
             : contextKind === "pptx"
               ? await extractPptxText(fileBuffer)
-            : await extractSpreadsheetText(fileBuffer, {
-              filename: document.filename,
-              mimeType: document.mimeType,
-            });
+              : await extractSpreadsheetText(fileBuffer, {
+                filename: document.filename,
+                mimeType: document.mimeType,
+              });
+        }
       } catch (error) {
         failedCount += 1;
         const detail = buildExtractionFailureDetail(contextKind, error);
@@ -2585,7 +2870,7 @@ export async function resolveConversationContextBundle(params: {
     if (!normalizedText) {
       failedCount += 1;
       const detail = contextKind === "pdf"
-        ? buildPdfNoReadableTextDetail()
+        ? buildPdfNoReadableTextDetail(pdfExtractionMetadata)
         : contextKind === "docx"
           ? "Attached to this thread, but the DOCX parser returned no readable text."
           : contextKind === "pptx"
@@ -2601,6 +2886,8 @@ export async function resolveConversationContextBundle(params: {
           sourceType: contextKind,
           parentSourceStatus: "failed",
           extractionStatus: "failed",
+          extractionDetail: detail,
+          sourceMetadata,
           occurrenceQuery,
         })
       );
@@ -2615,6 +2902,7 @@ export async function resolveConversationContextBundle(params: {
       filename: document.filename,
       sourceType: resolveDocumentChunkSourceType(document, contextKind),
       text: normalizedText,
+      structuredRanges: contextKind === "pdf" ? pdfStructuredRanges : undefined,
     });
     if (chunkCandidates.length === 0) {
       failedCount += 1;
@@ -2628,6 +2916,8 @@ export async function resolveConversationContextBundle(params: {
           sourceType: contextKind,
           parentSourceStatus: "failed",
           extractionStatus: "failed",
+          extractionDetail: detail,
+          sourceMetadata,
           occurrenceQuery,
         })
       );
@@ -2657,6 +2947,8 @@ export async function resolveConversationContextBundle(params: {
       sourceType: contextKind,
       parentSourceStatus: selection.selectedChunks.length > 0 ? "used" : "unavailable",
       extractionStatus: "extracted",
+      extractionDetail,
+      sourceMetadata,
       occurrenceQuery,
       documentBudgetTokens: resolvedBudget.budgetInputProvided ? documentBudgetTokens : null,
       chunks: chunkCandidates,
@@ -2696,6 +2988,10 @@ export async function resolveConversationContextBundle(params: {
     sections.push(
       buildThreadDocumentSection({
         filename: document.filename,
+        fullyIncluded:
+          selection.selectedChunks.length === chunkCandidates.length &&
+          selection.skippedChunks.length === 0 &&
+          !selection.usedBudgetClamp,
         selection,
         ranking,
         occurrence: documentChunkingDebugDocument.occurrence,
@@ -2708,6 +3004,7 @@ export async function resolveConversationContextBundle(params: {
         charCount: normalizedText.length,
         fullyIncluded,
         occurrenceInventoryOnly: shouldIncludeOccurrenceInventoryOnly,
+        extractionDetail,
       })
     ));
     documentChunkingDocuments.push({

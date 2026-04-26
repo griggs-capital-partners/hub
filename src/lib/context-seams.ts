@@ -119,6 +119,7 @@ export interface BaseContextLocation {
   title?: string | null;
   url?: string | null;
   pageNumber?: number | null;
+  pageRange?: ContextNumericRange | null;
   headingPath?: string[];
   sectionPath?: string[];
   articlePath?: string[];
@@ -307,6 +308,7 @@ export interface ContextDebugDocument {
   title: string;
   sourceStatus?: string | null;
   extractionStatus?: string | null;
+  extractionDetail?: string | null;
   totalChunks: number;
   selectedChunkIds: string[];
   skippedChunkIds: string[];
@@ -346,6 +348,7 @@ export interface ContextDebugDocument {
     skippedDueToBudgetChunkIds?: string[];
     detail?: string | null;
   } | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface ContextDebugChunk {

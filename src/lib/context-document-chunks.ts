@@ -1,5 +1,9 @@
 import { DEFAULT_APPROX_CHARS_PER_TOKEN, estimateTextTokens } from "./context-token-budget";
 import { joinMarkdownSections } from "./context-formatting";
+import type {
+  PdfVisualClassification,
+  PdfVisualClassificationConfidence,
+} from "./context-pdf";
 
 export type ContextDocumentChunkSourceType =
   | "text"
@@ -30,12 +34,42 @@ export type ContextDocumentChunk = {
   safeProvenanceLabel: string;
   sectionLabel: string | null;
   sectionPath: string[];
+  headingPath: string[];
   referencedLocationLabels: string[];
   sheetName: string | null;
   slideNumber: number | null;
+  pageNumberStart: number | null;
+  pageNumberEnd: number | null;
+  pageLabelStart: string | null;
+  pageLabelEnd: string | null;
+  tableId: string | null;
+  figureId: string | null;
+  visualClassification: PdfVisualClassification | null;
+  visualClassificationConfidence: PdfVisualClassificationConfidence | null;
+  visualClassificationReasonCodes: string[];
+  visualAnchorTitle: string | null;
   wasBudgetClamped?: boolean;
   originalCharEnd?: number;
   originalApproxTokenCount?: number;
+};
+
+export type ContextDocumentStructuredRangeInput = {
+  text: string;
+  sectionLabel?: string | null;
+  sectionPath?: string[];
+  headingPath?: string[];
+  referencedLocationLabels?: string[];
+  sheetName?: string | null;
+  slideNumber?: number | null;
+  pageNumber?: number | null;
+  pageLabel?: string | null;
+  tableId?: string | null;
+  figureId?: string | null;
+  visualClassification?: PdfVisualClassification | null;
+  visualClassificationConfidence?: PdfVisualClassificationConfidence | null;
+  visualClassificationReasonCodes?: string[];
+  visualAnchorTitle?: string | null;
+  updatesHeadingContext?: boolean;
 };
 
 export type ContextDocumentChunkCandidateParams = {
@@ -46,6 +80,7 @@ export type ContextDocumentChunkCandidateParams = {
   filename: string;
   sourceType: ContextDocumentChunkSourceType;
   text: string;
+  structuredRanges?: ContextDocumentStructuredRangeInput[];
   maxChunkTokens?: number;
   charsPerToken?: number;
 };
@@ -110,9 +145,20 @@ export type ContextDocumentChunkOccurrenceLocation = {
   filename: string;
   sectionLabel: string | null;
   sectionPath: string[];
+  headingPath: string[];
   referencedLocationLabels: string[];
   sheetName: string | null;
   slideNumber: number | null;
+  pageNumberStart: number | null;
+  pageNumberEnd: number | null;
+  pageLabelStart: string | null;
+  pageLabelEnd: string | null;
+  tableId: string | null;
+  figureId: string | null;
+  visualClassification: PdfVisualClassification | null;
+  visualClassificationConfidence: PdfVisualClassificationConfidence | null;
+  visualClassificationReasonCodes: string[];
+  visualAnchorTitle: string | null;
   safeProvenanceLabel: string;
   exactPhraseMatchCount: number;
   coverageGroupKey: string | null;
@@ -140,12 +186,21 @@ type NormalizedTextRange = {
   charEnd: number;
   sectionLabel: string | null;
   sectionPath: string[];
+  headingPath: string[];
   referencedLocationLabels: string[];
   sheetName: string | null;
   slideNumber: number | null;
+  pageNumber: number | null;
+  pageLabel: string | null;
+  tableId: string | null;
+  figureId: string | null;
+  visualClassification: PdfVisualClassification | null;
+  visualClassificationConfidence: PdfVisualClassificationConfidence | null;
+  visualClassificationReasonCodes: string[];
+  visualAnchorTitle: string | null;
 };
 
-type LegalHeadingKind = "Article" | "Section" | "Exhibit" | "Schedule";
+type LegalHeadingKind = "Article" | "Section" | "Exhibit" | "Schedule" | "Appendix" | "Attachment";
 
 type LegalHeadingContext = {
   kind: LegalHeadingKind;
@@ -235,6 +290,10 @@ const OCCURRENCE_LOCATION_TERMS = [
   "provisions",
   "part",
   "parts",
+  "appendix",
+  "appendices",
+  "attachment",
+  "attachments",
 ] as const;
 const OCCURRENCE_REFERENCE_VERBS = [
   "appear",
@@ -260,6 +319,9 @@ type PreparedChunkRankingQuery = {
   keywordTokenSet: Set<string>;
   phraseCandidates: string[];
   referencedSlideNumbers: Set<number>;
+  referencedPageNumbers: Set<number>;
+  tableIntentDetected: boolean;
+  timelineIntentDetected: boolean;
   occurrenceIntentDetected: boolean;
   targetPhrase: string | null;
 };
@@ -271,7 +333,27 @@ type PreparedChunkRankingCorpus = {
   sectionTokens: Set<string>;
   sheetTokens: Set<string>;
   slideLabelTokens: Set<string>;
+  pageLabelTokens: Set<string>;
   sectionText: string;
+};
+
+type NormalizedStructuredRangeInput = {
+  text: string;
+  sectionLabel: string | null;
+  sectionPath: string[];
+  headingPath: string[];
+  referencedLocationLabels: string[];
+  sheetName: string | null;
+  slideNumber: number | null;
+  pageNumber: number | null;
+  pageLabel: string | null;
+  tableId: string | null;
+  figureId: string | null;
+  visualClassification: PdfVisualClassification | null;
+  visualClassificationConfidence: PdfVisualClassificationConfidence | null;
+  visualClassificationReasonCodes: string[];
+  visualAnchorTitle: string | null;
+  updatesHeadingContext: boolean;
 };
 
 function normalizeRankingText(value: string | null | undefined) {
@@ -444,11 +526,63 @@ function resolveReferencedSlideNumbers(value: string | null | undefined) {
   return slideNumbers;
 }
 
+function resolveReferencedPageNumbers(value: string | null | undefined) {
+  const pageNumbers = new Set<number>();
+  const lowerCased = (value ?? "").toLowerCase();
+
+  for (const match of lowerCased.matchAll(/\bpages?\s+(\d+)(?:\s*[-to]+\s*(\d+))?\b/g)) {
+    const startPage = Number(match[1]);
+    const endPage = match[2] ? Number(match[2]) : startPage;
+    if (!Number.isFinite(startPage) || !Number.isFinite(endPage)) {
+      continue;
+    }
+
+    const lowerBound = Math.min(startPage, endPage);
+    const upperBound = Math.max(startPage, endPage);
+    for (let pageNumber = lowerBound; pageNumber <= upperBound; pageNumber += 1) {
+      pageNumbers.add(pageNumber);
+    }
+  }
+
+  return pageNumbers;
+}
+
+function detectTableFocusedIntent(value: string | null | undefined) {
+  const normalized = normalizeRankingText(value);
+  if (!normalized) {
+    return false;
+  }
+
+  return /\btable\b/.test(normalized) ||
+    /\btables\b/.test(normalized) ||
+    /\btabular\b/.test(normalized) ||
+    /\bcolumn\b/.test(normalized) ||
+    /\bcolumns\b/.test(normalized) ||
+    /\brow\b/.test(normalized) ||
+    /\brows\b/.test(normalized) ||
+    normalized.includes("data table") ||
+    normalized.includes("water chemistry");
+}
+
+function detectTimelineFocusedIntent(value: string | null | undefined) {
+  const normalized = normalizeRankingText(value);
+  if (!normalized) {
+    return false;
+  }
+
+  return normalized.includes("timeline") ||
+    normalized.includes("schedule") ||
+    normalized.includes("gantt") ||
+    normalized.includes("milestone");
+}
+
 function prepareChunkRankingQuery(value: string | null | undefined): PreparedChunkRankingQuery {
   const normalizedText = normalizeRankingText(value);
   const keywordTokens = tokenizeRankingText(value);
   const targetPhrase = extractOccurrenceTargetPhrase(value);
   const occurrenceIntentDetected = detectOccurrenceListingIntent(value);
+  const timelineIntentDetected = detectTimelineFocusedIntent(value);
+  const tableIntentDetected = detectTableFocusedIntent(value) || timelineIntentDetected;
 
   return {
     normalizedText,
@@ -459,6 +593,9 @@ function prepareChunkRankingQuery(value: string | null | undefined): PreparedChu
       ...(targetPhrase ? [targetPhrase] : []),
     ]),
     referencedSlideNumbers: resolveReferencedSlideNumbers(value),
+    referencedPageNumbers: resolveReferencedPageNumbers(value),
+    tableIntentDetected,
+    timelineIntentDetected,
     occurrenceIntentDetected,
     targetPhrase,
   };
@@ -479,6 +616,12 @@ function prepareChunkRankingCorpus(chunk: ContextDocumentChunk): PreparedChunkRa
         { includeStopwords: true }
       )
     ),
+    pageLabelTokens: new Set(
+      tokenizeRankingText(
+        formatChunkPageLabel(chunk),
+        { includeStopwords: true }
+      )
+    ),
     sectionText,
   };
 }
@@ -495,6 +638,23 @@ function countTokenMatches(queryTokens: Set<string>, candidateTokens: Set<string
   return matches;
 }
 
+function chunkContainsPageNumber(
+  chunk: Pick<ContextDocumentChunk, "pageNumberStart" | "pageNumberEnd">,
+  pageNumber: number
+) {
+  if (chunk.pageNumberStart == null && chunk.pageNumberEnd == null) {
+    return false;
+  }
+
+  const startPage = chunk.pageNumberStart ?? chunk.pageNumberEnd ?? null;
+  const endPage = chunk.pageNumberEnd ?? chunk.pageNumberStart ?? null;
+  if (startPage == null || endPage == null) {
+    return false;
+  }
+
+  return pageNumber >= Math.min(startPage, endPage) && pageNumber <= Math.max(startPage, endPage);
+}
+
 function countPhraseOccurrences(value: string, phrase: string) {
   if (!value || !phrase) {
     return 0;
@@ -508,6 +668,14 @@ function resolveChunkCoverageGroupKey(
   chunk: ContextDocumentChunk,
   corpus: PreparedChunkRankingCorpus
 ) {
+  if (chunk.tableId) {
+    return `table:${normalizeOccurrenceQueryText(chunk.tableId)}`;
+  }
+
+  if (chunk.figureId) {
+    return `figure:${normalizeOccurrenceQueryText(chunk.figureId)}`;
+  }
+
   const candidateLabels = [...chunk.sectionPath];
 
   for (const label of [...candidateLabels].reverse()) {
@@ -528,7 +696,7 @@ function resolveChunkCoverageGroupKey(
       return `section:${sectionMatch[1]}`;
     }
 
-    const exhibitMatch = /^(exhibit|schedule)\s+([a-z0-9.-]+)\b/.exec(normalized);
+    const exhibitMatch = /^(exhibit|schedule|appendix|attachment)\s+([a-z0-9.-]+)\b/.exec(normalized);
     if (exhibitMatch) {
       return `${exhibitMatch[1]}:${exhibitMatch[2]}`;
     }
@@ -581,6 +749,20 @@ function resolveChunkLocationFamilyKeys(params: {
   }
 
   if (coverageGroupKey?.startsWith("article:")) {
+    return {
+      rootFamilyKey: coverageGroupKey,
+      parentFamilyKey: coverageGroupKey,
+    };
+  }
+
+  if (
+    coverageGroupKey?.startsWith("exhibit:") ||
+    coverageGroupKey?.startsWith("schedule:") ||
+    coverageGroupKey?.startsWith("appendix:") ||
+    coverageGroupKey?.startsWith("attachment:") ||
+    coverageGroupKey?.startsWith("table:") ||
+    coverageGroupKey?.startsWith("figure:")
+  ) {
     return {
       rootFamilyKey: coverageGroupKey,
       parentFamilyKey: coverageGroupKey,
@@ -873,9 +1055,20 @@ export function buildDocumentChunkOccurrenceInventory(params: {
       filename: chunk.filename,
       sectionLabel: chunk.sectionLabel,
       sectionPath: [...chunk.sectionPath],
+      headingPath: [...(chunk.headingPath ?? [])],
       referencedLocationLabels: [...chunk.referencedLocationLabels],
       sheetName: chunk.sheetName,
       slideNumber: chunk.slideNumber,
+      pageNumberStart: chunk.pageNumberStart,
+      pageNumberEnd: chunk.pageNumberEnd,
+      pageLabelStart: chunk.pageLabelStart,
+      pageLabelEnd: chunk.pageLabelEnd,
+      tableId: chunk.tableId,
+      figureId: chunk.figureId,
+      visualClassification: chunk.visualClassification,
+      visualClassificationConfidence: chunk.visualClassificationConfidence,
+      visualClassificationReasonCodes: [...chunk.visualClassificationReasonCodes],
+      visualAnchorTitle: chunk.visualAnchorTitle,
       safeProvenanceLabel: chunk.safeProvenanceLabel,
       exactPhraseMatchCount,
       coverageGroupKey: detail?.coverageGroupKey ?? null,
@@ -967,12 +1160,63 @@ function scoreDocumentChunk(params: {
     signalLabels.push("slide_label_match");
   }
 
+  const pageLabelOverlap = countTokenMatches(params.query.keywordTokenSet, corpus.pageLabelTokens);
+  if (pageLabelOverlap > 0) {
+    score += pageLabelOverlap * 4;
+    signalLabels.push("page_label_match");
+  }
+
   if (
     params.chunk.slideNumber != null &&
     params.query.referencedSlideNumbers.has(params.chunk.slideNumber)
   ) {
     score += 8;
     signalLabels.push("slide_number_match");
+  }
+
+  if (
+    params.query.referencedPageNumbers.size > 0 &&
+    [...params.query.referencedPageNumbers].some((pageNumber) => chunkContainsPageNumber(params.chunk, pageNumber))
+  ) {
+    score += 8;
+    signalLabels.push("page_number_match");
+  }
+
+  if (params.query.tableIntentDetected && params.chunk.visualClassification) {
+    switch (params.chunk.visualClassification) {
+      case "true_table":
+        score += params.query.timelineIntentDetected ? 8 : 24;
+        signalLabels.push("true_table_classification");
+        if (params.chunk.text.includes("\t")) {
+          score += 6;
+          signalLabels.push("structured_table_text");
+        }
+        if (params.chunk.visualClassificationReasonCodes.includes("title_only_table_inference")) {
+          signalLabels.push("title_only_table_inference");
+        }
+        break;
+      case "table_like_schedule_or_timeline":
+        score += params.query.timelineIntentDetected ? 26 : 10;
+        signalLabels.push(
+          params.query.timelineIntentDetected
+            ? "timeline_visual_match"
+            : "table_like_schedule_classification"
+        );
+        break;
+      case "caption_or_callout":
+        score -= 1;
+        signalLabels.push("caption_only_penalty");
+        break;
+      case "low_text_or_scanned_visual":
+      case "unknown_visual":
+        score -= 3;
+        signalLabels.push("ambiguous_table_penalty");
+        break;
+      default:
+        score -= params.query.timelineIntentDetected ? 4 : 8;
+        signalLabels.push("non_table_visual_penalty");
+        break;
+    }
   }
 
   if (params.query.occurrenceIntentDetected && params.query.targetPhrase) {
@@ -1058,6 +1302,95 @@ function advancePastWhitespace(value: string, start: number, end: number) {
   }
 
   return nextStart;
+}
+
+function normalizeChunkSourceText(value: string | null | undefined) {
+  return (value ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\u0000/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function normalizeStructuredRangeInput(
+  input: ContextDocumentStructuredRangeInput
+): NormalizedStructuredRangeInput | null {
+  const text = normalizeChunkSourceText(input.text);
+  if (!text) {
+    return null;
+  }
+
+  return {
+    text,
+    sectionLabel: typeof input.sectionLabel === "string" && input.sectionLabel.trim().length > 0
+      ? input.sectionLabel.trim()
+      : null,
+    sectionPath: (input.sectionPath ?? [])
+      .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      .map((entry) => entry.trim()),
+    headingPath: (input.headingPath ?? [])
+      .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+      .map((entry) => entry.trim()),
+    referencedLocationLabels: dedupeTokens(
+      (input.referencedLocationLabels ?? [])
+        .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+        .map((entry) => entry.trim())
+    ),
+    sheetName: typeof input.sheetName === "string" && input.sheetName.trim().length > 0
+      ? input.sheetName.trim()
+      : null,
+    slideNumber: typeof input.slideNumber === "number" && Number.isFinite(input.slideNumber)
+      ? input.slideNumber
+      : null,
+    pageNumber: typeof input.pageNumber === "number" && Number.isFinite(input.pageNumber)
+      ? input.pageNumber
+      : null,
+    pageLabel: typeof input.pageLabel === "string" && input.pageLabel.trim().length > 0
+      ? input.pageLabel.trim()
+      : null,
+    tableId: typeof input.tableId === "string" && input.tableId.trim().length > 0
+      ? input.tableId.trim()
+      : null,
+    figureId: typeof input.figureId === "string" && input.figureId.trim().length > 0
+      ? input.figureId.trim()
+      : null,
+    visualClassification: typeof input.visualClassification === "string" && input.visualClassification.trim().length > 0
+      ? input.visualClassification
+      : null,
+    visualClassificationConfidence:
+      input.visualClassificationConfidence === "high" ||
+      input.visualClassificationConfidence === "medium" ||
+      input.visualClassificationConfidence === "low"
+        ? input.visualClassificationConfidence
+        : null,
+    visualClassificationReasonCodes: dedupeTokens(
+      (input.visualClassificationReasonCodes ?? [])
+        .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+        .map((entry) => entry.trim())
+    ),
+    visualAnchorTitle: typeof input.visualAnchorTitle === "string" && input.visualAnchorTitle.trim().length > 0
+      ? input.visualAnchorTitle.trim()
+      : null,
+    updatesHeadingContext: input.updatesHeadingContext !== false,
+  };
+}
+
+function buildStructuredRangeSourceText(inputs: ContextDocumentStructuredRangeInput[]) {
+  const normalizedInputs = inputs
+    .map((input) => normalizeStructuredRangeInput(input))
+    .filter((input): input is NormalizedStructuredRangeInput => Boolean(input));
+
+  if (normalizedInputs.length === 0) {
+    return {
+      text: "",
+      inputs: [] as NormalizedStructuredRangeInput[],
+    };
+  }
+
+  return {
+    text: normalizedInputs.map((input) => input.text).join("\n\n"),
+    inputs: normalizedInputs,
+  };
 }
 
 function normalizeHeadingLabelText(value: string) {
@@ -1160,7 +1493,7 @@ function resolveStructuredHeadingTitle(inlineTitle: string, trailingLines: strin
   };
 }
 
-function buildHeadingLabel(prefix: "Article" | "Section" | "Exhibit" | "Schedule", id: string, title?: string | null) {
+function buildHeadingLabel(prefix: LegalHeadingKind, id: string, title?: string | null) {
   const normalizedId = normalizeHeadingId(id);
   return title
     ? `${prefix} ${normalizedId} — ${title}`
@@ -1176,7 +1509,7 @@ function extractHeadingRootId(value: string | null | undefined) {
     return subsectionMatch[1];
   }
 
-  const exhibitMatch = /^(?:exhibit|schedule)\s+([a-z0-9.-]+)\b/i.exec(normalized);
+  const exhibitMatch = /^(?:exhibit|schedule|appendix|attachment)\s+([a-z0-9.-]+)\b/i.exec(normalized);
   return exhibitMatch?.[1] ?? null;
 }
 
@@ -1193,7 +1526,7 @@ function extractHeadingFullId(value: string | null | undefined) {
     return sectionMatch[1];
   }
 
-  const exhibitMatch = /^(?:exhibit|schedule)\s+([a-z0-9.-]+)\b/i.exec(normalized);
+  const exhibitMatch = /^(?:exhibit|schedule|appendix|attachment)\s+([a-z0-9.-]+)\b/i.exec(normalized);
   return exhibitMatch?.[1] ?? null;
 }
 
@@ -1217,6 +1550,14 @@ function parseHeadingKind(value: string | null | undefined): LegalHeadingKind | 
 
   if (normalized.startsWith("schedule ")) {
     return "Schedule";
+  }
+
+  if (normalized.startsWith("appendix ")) {
+    return "Appendix";
+  }
+
+  if (normalized.startsWith("attachment ")) {
+    return "Attachment";
   }
 
   return null;
@@ -1425,7 +1766,7 @@ function buildInheritedCompoundSubsectionPath(
   ];
 }
 
-function shouldTreatBareExhibitOrScheduleAsHeading(
+function shouldTreatBareAttachmentLikeHeadingAsHeading(
   inheritedPath: string[],
   kind: LegalHeadingKind,
   title: string | null
@@ -1442,11 +1783,19 @@ function shouldTreatBareExhibitOrScheduleAsHeading(
   return inheritedContext.kind === kind;
 }
 
+function shouldTreatBareExhibitOrScheduleAsHeading(
+  inheritedPath: string[],
+  kind: LegalHeadingKind,
+  title: string | null
+) {
+  return shouldTreatBareAttachmentLikeHeadingAsHeading(inheritedPath, kind, title);
+}
+
 function extractReferencedLocationLabels(value: string) {
   const labels: string[] = [];
 
   for (const match of value.matchAll(
-    /\b(article\s+(?:[ivxlcdm]+|\d+[a-z]?)(?:\.(?:\d+[a-z]?|[a-z]))*|section\s+(?:\d+[a-z]?)(?:\.(?:\d+[a-z]?|[a-z]))*|exhibit\s+[a-z0-9.-]+|schedule\s+[a-z0-9.-]+)\b/gi
+    /\b(article\s+(?:[ivxlcdm]+|\d+[a-z]?)(?:\.(?:\d+[a-z]?|[a-z]))*|section\s+(?:\d+[a-z]?)(?:\.(?:\d+[a-z]?|[a-z]))*|exhibit\s+[a-z0-9.-]+|schedule\s+[a-z0-9.-]+|appendix\s+[a-z0-9.-]+|attachment\s+[a-z0-9.-]+)\b/gi
   )) {
     const normalized = normalizeHeadingLabelText(match[1] ?? "");
     if (normalized) {
@@ -1597,6 +1946,34 @@ function buildLegalHeadingPath(lines: string[], inheritedPath: string[]) {
     return [buildHeadingLabel(headingKind, headingId, headingTitle)];
   }
 
+  const appendixOrAttachmentMatch = /^(appendix|attachment)\s+([a-z0-9.-]+)(?:\s*[-â€”:]\s*|\s+)?(.*)$/i.exec(
+    firstLine
+  );
+  if (appendixOrAttachmentMatch && !isLikelyTableOfContentsLine(firstLine)) {
+    const headingKind = appendixOrAttachmentMatch[1].toLowerCase() === "attachment"
+      ? "Attachment"
+      : "Appendix";
+    const headingId = appendixOrAttachmentMatch[2];
+    const { title: headingTitle, isValid } = resolveStructuredHeadingTitle(
+      appendixOrAttachmentMatch[3] ?? "",
+      trailingLines
+    );
+    if (!isValid) {
+      return null;
+    }
+    if (!shouldTreatBareAttachmentLikeHeadingAsHeading(inheritedPath, headingKind, headingTitle)) {
+      return null;
+    }
+    const inheritedContext = resolveInheritedHeadingContext(inheritedPath);
+    if (headingKind === "Attachment" && inheritedContext?.kind === "Appendix") {
+      return [
+        ...inheritedContext.basePath,
+        buildHeadingLabel(headingKind, headingId, headingTitle),
+      ];
+    }
+    return [buildHeadingLabel(headingKind, headingId, headingTitle)];
+  }
+
   const articleMatch = /^article\s+([ivxlcdm]+|\d+[a-z]?)(?:\s*[-—:]\s*|\s+)?(.*)$/i.exec(firstLine);
   if (articleMatch && !isLikelyTableOfContentsLine(firstLine)) {
     const articleId = articleMatch[1];
@@ -1630,6 +2007,17 @@ function buildLegalHeadingPath(lines: string[], inheritedPath: string[]) {
   const numericArticleMatch = /^(\d+[a-z]?)\.?$/.exec(firstLine);
   if (numericArticleMatch && trailingLines[0] && isLikelyHeadingTitleLine(trailingLines[0])) {
     return [buildHeadingLabel("Section", numericArticleMatch[1], normalizeHeadingLabelText(trailingLines[0]))];
+  }
+
+  const singleSectionMatch = /^(\d+[a-z]?)(?:[.)]|(?=\s))(?:\s+)?(.*)$/i.exec(firstLine);
+  if (singleSectionMatch && !isLikelyTableOfContentsLine(firstLine)) {
+    const { title: sectionTitle, isValid } = resolveStructuredHeadingTitle(
+      singleSectionMatch[2] ?? "",
+      trailingLines
+    );
+    if (isValid && sectionTitle) {
+      return [buildHeadingLabel("Section", singleSectionMatch[1], sectionTitle)];
+    }
   }
 
   const inheritedLabel = inheritedPath.at(-1) ?? null;
@@ -1811,6 +2199,51 @@ function resolveRangeSectionMetadata(sectionPath: string[]) {
   };
 }
 
+function formatPageRangeLabel(range: {
+  pageNumber: number | null;
+  pageLabel: string | null;
+}) {
+  if (range.pageLabel) {
+    return `page ${range.pageLabel}`;
+  }
+
+  if (range.pageNumber != null) {
+    return `page ${range.pageNumber}`;
+  }
+
+  return null;
+}
+
+function formatChunkPageLabel(chunk: Pick<
+  ContextDocumentChunk,
+  "pageNumberStart" | "pageNumberEnd" | "pageLabelStart" | "pageLabelEnd"
+>) {
+  const startLabel = formatPageRangeLabel({
+    pageNumber: chunk.pageNumberStart,
+    pageLabel: chunk.pageLabelStart,
+  });
+  const endLabel = formatPageRangeLabel({
+    pageNumber: chunk.pageNumberEnd,
+    pageLabel: chunk.pageLabelEnd,
+  });
+
+  if (!startLabel && !endLabel) {
+    return null;
+  }
+
+  if (
+    startLabel &&
+    endLabel &&
+    startLabel !== endLabel &&
+    chunk.pageNumberStart != null &&
+    chunk.pageNumberEnd != null
+  ) {
+    return `pages ${chunk.pageLabelStart ?? chunk.pageNumberStart}-${chunk.pageLabelEnd ?? chunk.pageNumberEnd}`;
+  }
+
+  return startLabel ?? endLabel;
+}
+
 function findPreferredBreak(
   value: string,
   start: number,
@@ -1901,10 +2334,19 @@ function collectNormalizedRanges(
         ...structuralRange,
         ...sectionMetadata,
         sectionPath: [...blockPath],
+        headingPath: [...blockPath],
         referencedLocationLabels: filterReferencedLocationLabels(
           extractReferencedLocationLabels(structuralRange.text),
           blockPath
         ),
+        pageNumber: null,
+        pageLabel: null,
+        tableId: null,
+        figureId: null,
+        visualClassification: null,
+        visualClassificationConfidence: null,
+        visualClassificationReasonCodes: [],
+        visualAnchorTitle: null,
       };
 
       if (estimateTextTokens(range.text) <= maxChunkTokens) {
@@ -1919,6 +2361,96 @@ function collectNormalizedRanges(
   return ranges;
 }
 
+function collectNormalizedRangesFromStructuredInputs(
+  inputs: ContextDocumentStructuredRangeInput[],
+  maxChunkChars: number,
+  maxChunkTokens: number
+) {
+  const { text, inputs: normalizedInputs } = buildStructuredRangeSourceText(inputs);
+  if (!text || normalizedInputs.length === 0) {
+    return {
+      text,
+      ranges: [] as NormalizedTextRange[],
+    };
+  }
+
+  const ranges: NormalizedTextRange[] = [];
+  let inheritedPath: string[] = [];
+  let cursor = 0;
+
+  for (const input of normalizedInputs) {
+    const charStart = cursor;
+    const charEnd = charStart + input.text.length;
+    cursor = charEnd + 2;
+
+    const structuredRange = {
+      text: input.text,
+      charStart,
+      charEnd,
+    };
+    const sourceRanges = input.sectionPath.length > 0 || !input.updatesHeadingContext
+      ? [structuredRange]
+      : splitRangeAtEmbeddedHeadings(text, structuredRange, inheritedPath);
+
+    for (const sourceRange of sourceRanges) {
+      const resolved = input.sectionPath.length > 0
+        ? {
+            nextPath: input.updatesHeadingContext ? [...input.sectionPath] : [...inheritedPath],
+            blockPath: [...input.sectionPath],
+          }
+        : resolveHeadingContext(sourceRange.text, inheritedPath);
+      const sectionPath = resolved.blockPath.length > 0
+        ? resolved.blockPath
+        : input.sectionPath.length > 0
+          ? [...input.sectionPath]
+          : [];
+      const sectionMetadata = resolveRangeSectionMetadata(sectionPath);
+      const range: NormalizedTextRange = {
+        ...sourceRange,
+        sectionLabel: input.sectionLabel ?? sectionMetadata.sectionLabel,
+        sectionPath: [...sectionPath],
+        headingPath:
+          input.headingPath.length > 0
+            ? [...input.headingPath]
+            : sectionPath.length > 0
+              ? [...sectionPath]
+              : [],
+        referencedLocationLabels: filterReferencedLocationLabels(
+          input.referencedLocationLabels.length > 0
+            ? input.referencedLocationLabels
+            : extractReferencedLocationLabels(sourceRange.text),
+          sectionPath
+        ),
+        sheetName: input.sheetName ?? sectionMetadata.sheetName,
+        slideNumber: input.slideNumber ?? sectionMetadata.slideNumber,
+        pageNumber: input.pageNumber,
+        pageLabel: input.pageLabel,
+        tableId: input.tableId,
+        figureId: input.figureId,
+        visualClassification: input.visualClassification,
+        visualClassificationConfidence: input.visualClassificationConfidence,
+        visualClassificationReasonCodes: [...input.visualClassificationReasonCodes],
+        visualAnchorTitle: input.visualAnchorTitle,
+      };
+
+      if (estimateTextTokens(range.text) <= maxChunkTokens) {
+        ranges.push(range);
+      } else {
+        ranges.push(...splitOversizedRange(text, range, maxChunkChars));
+      }
+
+      if (input.updatesHeadingContext) {
+        inheritedPath = resolved.nextPath;
+      }
+    }
+  }
+
+  return {
+    text,
+    ranges,
+  };
+}
+
 function buildChunkProvenanceLabel(range: NormalizedTextRange, chunkIndex: number) {
   const locationParts = [];
 
@@ -1926,12 +2458,53 @@ function buildChunkProvenanceLabel(range: NormalizedTextRange, chunkIndex: numbe
     locationParts.push(`Sheet: ${range.sheetName}`);
   } else if (range.slideNumber != null) {
     locationParts.push(`Slide ${range.slideNumber}`);
+  } else {
+    const pageLabel = formatPageRangeLabel(range);
+    if (pageLabel) {
+      locationParts.push(pageLabel);
+    }
+  }
+
+  if (range.tableId) {
+    locationParts.push(range.tableId);
+  } else if (range.figureId) {
+    locationParts.push(range.figureId);
   } else if (range.sectionLabel) {
     locationParts.push(range.sectionLabel);
+  } else if (range.visualAnchorTitle) {
+    locationParts.push(range.visualAnchorTitle);
   }
 
   locationParts.push(`chars ${range.charStart + 1}-${range.charEnd}`);
   return `Excerpt ${chunkIndex + 1} (${locationParts.join("; ")})`;
+}
+
+function resolveFirstRangeValue<T>(
+  ranges: Array<NormalizedTextRange>,
+  selector: (range: NormalizedTextRange) => T | null
+) {
+  for (const range of ranges) {
+    const value = selector(range);
+    if (value != null) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function resolveLastRangeValue<T>(
+  ranges: Array<NormalizedTextRange>,
+  selector: (range: NormalizedTextRange) => T | null
+) {
+  for (let index = ranges.length - 1; index >= 0; index -= 1) {
+    const value = selector(ranges[index]);
+    if (value != null) {
+      return value;
+    }
+  }
+
+  return null;
 }
 
 function isHeadingLikeText(value: string) {
@@ -1955,7 +2528,70 @@ function isHeadingLikeRange(range: NormalizedTextRange) {
 }
 
 function isLegalSectionLabel(value: string | null | undefined) {
-  return /^(article|section|exhibit|schedule)\b/i.test(value?.trim() ?? "");
+  return /^(article|section|exhibit|schedule|appendix|attachment)\b/i.test(value?.trim() ?? "");
+}
+
+function buildRangePageBoundaryKey(range: Pick<
+  NormalizedTextRange,
+  "pageNumber" | "pageLabel"
+>) {
+  if (range.pageLabel) {
+    return `page:${range.pageLabel}`;
+  }
+
+  if (range.pageNumber != null) {
+    return `page:${range.pageNumber}`;
+  }
+
+  return null;
+}
+
+function buildRangeRegionBoundaryKey(range: Pick<
+  NormalizedTextRange,
+  "tableId" | "figureId"
+>) {
+  if (range.tableId) {
+    return `table:${range.tableId}`;
+  }
+
+  if (range.figureId) {
+    return `figure:${range.figureId}`;
+  }
+
+  return null;
+}
+
+function buildRangeVisualBoundaryKey(range: Pick<
+  NormalizedTextRange,
+  "visualClassification"
+>) {
+  return range.visualClassification ? `visual:${range.visualClassification}` : null;
+}
+
+function shouldSplitPendingRangesAtStructuredBoundary(
+  pendingRanges: NormalizedTextRange[],
+  nextRange: NormalizedTextRange
+) {
+  const pendingLastRange = pendingRanges[pendingRanges.length - 1];
+  if (!pendingLastRange) {
+    return false;
+  }
+
+  const pendingRegionKey = buildRangeRegionBoundaryKey(pendingLastRange);
+  const nextRegionKey = buildRangeRegionBoundaryKey(nextRange);
+  if (pendingRegionKey || nextRegionKey) {
+    return pendingRegionKey !== nextRegionKey;
+  }
+
+  const pendingPageKey = buildRangePageBoundaryKey(pendingLastRange);
+  const nextPageKey = buildRangePageBoundaryKey(nextRange);
+  if (pendingPageKey && nextPageKey && pendingPageKey !== nextPageKey) {
+    return true;
+  }
+
+  const pendingVisualKey = buildRangeVisualBoundaryKey(pendingLastRange);
+  const nextVisualKey = buildRangeVisualBoundaryKey(nextRange);
+  return Boolean(pendingVisualKey && nextVisualKey && pendingVisualKey !== nextVisualKey);
 }
 
 function shouldSplitPendingRangesAtLegalBoundary(
@@ -2013,12 +2649,26 @@ function mergeChunkRanges(
     ),
     sectionLabel: mostSpecificRange.sectionLabel,
     sectionPath: [...mostSpecificRange.sectionPath],
+    headingPath:
+      mostSpecificRange.headingPath.length > 0
+        ? [...mostSpecificRange.headingPath]
+        : [...mostSpecificRange.sectionPath],
     referencedLocationLabels: filterReferencedLocationLabels(
       dedupeTokens(params.ranges.flatMap((range) => range.referencedLocationLabels)),
       mostSpecificRange.sectionPath
     ),
     sheetName: mostSpecificRange.sheetName,
     slideNumber: mostSpecificRange.slideNumber,
+    pageNumberStart: resolveFirstRangeValue(params.ranges, (range) => range.pageNumber),
+    pageNumberEnd: resolveLastRangeValue(params.ranges, (range) => range.pageNumber),
+    pageLabelStart: resolveFirstRangeValue(params.ranges, (range) => range.pageLabel),
+    pageLabelEnd: resolveLastRangeValue(params.ranges, (range) => range.pageLabel),
+    tableId: mostSpecificRange.tableId,
+    figureId: mostSpecificRange.figureId,
+    visualClassification: mostSpecificRange.visualClassification,
+    visualClassificationConfidence: mostSpecificRange.visualClassificationConfidence,
+    visualClassificationReasonCodes: [...mostSpecificRange.visualClassificationReasonCodes],
+    visualAnchorTitle: mostSpecificRange.visualAnchorTitle,
   };
 }
 
@@ -2072,7 +2722,13 @@ function clampDocumentChunkToBudget(chunk: ContextDocumentChunk, maxChars: numbe
 }
 
 export function buildDocumentChunkCandidates(params: ContextDocumentChunkCandidateParams) {
-  const normalizedText = params.text?.trim() ?? "";
+  const normalizedInput = params.structuredRanges?.length
+    ? buildStructuredRangeSourceText(params.structuredRanges)
+    : {
+        text: normalizeChunkSourceText(params.text),
+        inputs: [] as NormalizedStructuredRangeInput[],
+      };
+  const normalizedText = normalizedInput.text;
   if (!normalizedText) {
     return [];
   }
@@ -2080,7 +2736,13 @@ export function buildDocumentChunkCandidates(params: ContextDocumentChunkCandida
   const charsPerToken = Math.max(1, params.charsPerToken ?? DEFAULT_APPROX_CHARS_PER_TOKEN);
   const maxChunkTokens = Math.max(1, params.maxChunkTokens ?? DEFAULT_DOCUMENT_CHUNK_MAX_TOKENS);
   const maxChunkChars = maxChunkTokens * charsPerToken;
-  const ranges = collectNormalizedRanges(normalizedText, maxChunkChars, maxChunkTokens);
+  const ranges = params.structuredRanges?.length
+    ? collectNormalizedRangesFromStructuredInputs(
+        params.structuredRanges,
+        maxChunkChars,
+        maxChunkTokens
+      ).ranges
+    : collectNormalizedRanges(normalizedText, maxChunkChars, maxChunkTokens);
   if (ranges.length === 0) {
     return [];
   }
@@ -2095,6 +2757,21 @@ export function buildDocumentChunkCandidates(params: ContextDocumentChunkCandida
     const carryHeadingForward = isHeadingLikeRange(range) && nextRange != null;
     const pendingHeadingOnly =
       pendingRanges.length > 0 && pendingRanges.every((pendingRange) => isHeadingLikeRange(pendingRange));
+
+    if (
+      pendingRanges.length > 0 &&
+      shouldSplitPendingRangesAtStructuredBoundary(pendingRanges, range)
+    ) {
+      chunks.push(
+        mergeChunkRanges({
+          ...params,
+          ranges: pendingRanges,
+          chunkIndex: chunks.length,
+        })
+      );
+      pendingRanges = [];
+      pendingTokens = 0;
+    }
 
     if (
       pendingRanges.length > 0 &&

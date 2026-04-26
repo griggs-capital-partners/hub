@@ -66,7 +66,7 @@ function buildChunkId(document: ConversationContextDocumentChunkingDocument, chu
 }
 
 function hasLegalStructure(sectionPath: string[]) {
-  return sectionPath.some((entry) => /^(article|section|subsection|clause|exhibit|schedule)\b/i.test(entry));
+  return sectionPath.some((entry) => /^(article|section|subsection|clause|exhibit|schedule|appendix|attachment)\b/i.test(entry));
 }
 
 function buildArticlePath(sectionPath: string[]) {
@@ -85,8 +85,21 @@ function buildSourceBodyLocation(params: {
     sourceType: normalizedSourceType,
     filename: params.document.filename,
     title: params.document.filename,
+    pageNumber: params.chunk.pageNumberStart,
+    pageRange:
+      params.chunk.pageNumberStart != null &&
+      params.chunk.pageNumberEnd != null &&
+      params.chunk.pageNumberStart !== params.chunk.pageNumberEnd
+        ? {
+            start: params.chunk.pageNumberStart,
+            end: params.chunk.pageNumberEnd,
+          }
+        : undefined,
+    headingPath: (params.chunk.headingPath ?? []).filter(Boolean),
     sectionPath,
     articlePath: buildArticlePath(sectionPath),
+    tableId: params.chunk.tableId,
+    figureId: params.chunk.figureId,
     slideNumber: params.chunk.slideNumber,
     slideTitle: params.chunk.sectionLabel,
     sheetName: params.chunk.sheetName,
@@ -169,7 +182,7 @@ function buildReferencedLocation(params: {
     label: params.label,
   };
 
-  if (/^(article|section|subsection|clause|exhibit|schedule)\b/i.test(params.label)) {
+  if (/^(article|section|subsection|clause|exhibit|schedule|appendix|attachment)\b/i.test(params.label)) {
     return {
       kind: "legal_section_location",
       ...shared,
@@ -346,6 +359,7 @@ function buildDebugDocument(document: ConversationContextDocumentChunkingDocumen
     title: document.filename,
     sourceStatus: document.parentSourceStatus,
     extractionStatus: document.extractionStatus,
+    extractionDetail: document.extractionDetail,
     totalChunks: document.totalChunks,
     selectedChunkIds: document.selectedChunkIndexes.map((chunkIndex) => buildChunkId(document, chunkIndex)),
     skippedChunkIds: document.skippedChunkIndexes.map((chunkIndex) => buildChunkId(document, chunkIndex)),
@@ -389,6 +403,7 @@ function buildDebugDocument(document: ConversationContextDocumentChunkingDocumen
       ),
       detail: document.occurrence.detail,
     },
+    metadata: document.sourceMetadata,
   };
 }
 
@@ -422,10 +437,21 @@ function buildDebugChunk(params: {
       filename: params.document.filename,
       sectionLabel: params.chunk.sectionLabel,
       sectionPath: params.chunk.sectionPath,
+      headingPath: params.chunk.headingPath,
       sourceBodyLocationLabel: params.chunk.sourceBodyLocationLabel,
       referencedLocationLabels: params.chunk.referencedLocationLabels,
       sheetName: params.chunk.sheetName,
       slideNumber: params.chunk.slideNumber,
+      pageNumberStart: params.chunk.pageNumberStart,
+      pageNumberEnd: params.chunk.pageNumberEnd,
+      pageLabelStart: params.chunk.pageLabelStart,
+      pageLabelEnd: params.chunk.pageLabelEnd,
+      tableId: params.chunk.tableId,
+      figureId: params.chunk.figureId,
+      visualClassification: params.chunk.visualClassification,
+      visualClassificationConfidence: params.chunk.visualClassificationConfidence,
+      visualClassificationReasonCodes: params.chunk.visualClassificationReasonCodes,
+      visualAnchorTitle: params.chunk.visualAnchorTitle,
       selectionMode: params.document.selectionMode,
       selectedDueToCoverage: params.chunk.selectedDueToCoverage,
       coverageGroupKey: params.chunk.coverageGroupKey,
