@@ -331,6 +331,14 @@ function getRecordArray(record: Record<string, unknown> | null, key: string) {
   });
 }
 
+function getContextRegistryRecord(debugTrace: unknown) {
+  return asRecord(asRecord(debugTrace)?.contextRegistry);
+}
+
+function getRegistryRecordArray(debugTrace: unknown, section: "contextDebt" | "capabilityGaps", key: string) {
+  return getRecordArray(asRecord(getContextRegistryRecord(debugTrace)?.[section]), key);
+}
+
 function capabilityCardExists(capability: InspectionCapability) {
   return getDefaultCapabilityCards().some((card) => card.id === capability);
 }
@@ -479,6 +487,7 @@ function collectDeferredCapabilities(params: {
   agentControl?: unknown;
   progressiveAssembly?: unknown;
   asyncAgentWork?: unknown;
+  debugTrace?: unknown;
 }) {
   const capabilities: string[] = [];
   const asyncRecord = asRecord(params.asyncAgentWork);
@@ -504,6 +513,12 @@ function collectDeferredCapabilities(params: {
   for (const gap of getRecordArray(assemblyRecord, "gaps")) {
     capabilities.push(...stringArray(gap.recommendedCapabilities));
   }
+  for (const debt of [
+    ...getRegistryRecordArray(params.debugTrace, "contextDebt", "records"),
+    ...getRegistryRecordArray(params.debugTrace, "contextDebt", "selectedRecords"),
+  ]) {
+    capabilities.push(...stringArray(debt.deferredCapabilities));
+  }
 
   return unique(capabilities);
 }
@@ -512,6 +527,7 @@ function collectRecommendedCapabilities(params: {
   documentIntelligence?: unknown;
   agentControl?: unknown;
   progressiveAssembly?: unknown;
+  debugTrace?: unknown;
 }) {
   const capabilities: string[] = [];
   const documents = getRecordArray(asRecord(params.documentIntelligence), "documents");
@@ -532,11 +548,20 @@ function collectRecommendedCapabilities(params: {
   for (const gap of getRecordArray(assemblyRecord, "gaps")) {
     capabilities.push(...stringArray(gap.recommendedCapabilities));
   }
+  for (const gap of [
+    ...getRegistryRecordArray(params.debugTrace, "capabilityGaps", "records"),
+    ...getRegistryRecordArray(params.debugTrace, "capabilityGaps", "selectedRecords"),
+  ]) {
+    const capability = stringValue(gap.neededCapability);
+    if (capability) capabilities.push(capability);
+    capabilities.push(...stringArray(gap.candidateModelCapabilities));
+    capabilities.push(...stringArray(gap.candidateContextLanes));
+  }
 
   return unique(capabilities);
 }
 
-function collectContextGapKinds(progressiveAssembly: unknown, asyncAgentWork: unknown) {
+function collectContextGapKinds(progressiveAssembly: unknown, asyncAgentWork: unknown, debugTrace?: unknown) {
   const kinds: string[] = [];
   for (const gap of getRecordArray(asRecord(progressiveAssembly), "gaps")) {
     const kind = stringValue(gap.kind);
@@ -546,16 +571,31 @@ function collectContextGapKinds(progressiveAssembly: unknown, asyncAgentWork: un
     const kind = stringValue(gap.kind);
     if (kind) kinds.push(kind);
   }
+  for (const debt of [
+    ...getRegistryRecordArray(debugTrace, "contextDebt", "records"),
+    ...getRegistryRecordArray(debugTrace, "contextDebt", "selectedRecords"),
+  ]) {
+    const kind = stringValue(debt.kind);
+    if (kind) kinds.push(kind);
+  }
   return unique(kinds);
 }
 
-function collectLimitations(asyncAgentWork: unknown) {
+function collectLimitations(asyncAgentWork: unknown, debugTrace?: unknown) {
   const asyncRecord = asRecord(asyncAgentWork);
   const limitations = [
     ...stringArray(asyncRecord?.limitations),
     ...stringArray(asRecord(asyncRecord?.completionState)?.limitations),
+    ...getRegistryRecordArray(debugTrace, "contextDebt", "selectedRecords").flatMap((debt) => [
+      stringValue(debt.title),
+      stringValue(debt.description),
+    ]),
+    ...getRegistryRecordArray(debugTrace, "capabilityGaps", "selectedRecords").flatMap((gap) => [
+      stringValue(gap.title),
+      stringValue(gap.currentLimitation),
+    ]),
   ];
-  return unique(limitations);
+  return unique(limitations.filter((value): value is string => Boolean(value)));
 }
 
 export function buildTruthfulExecutionClaimSnapshot(params: {
@@ -587,8 +627,8 @@ export function buildTruthfulExecutionClaimSnapshot(params: {
     reusedArtifactKeys,
     persistedMemoryUpdates: createdArtifactKeys,
     inspectionTaskResults: collectInspectionTaskResultIds(params.documentIntelligence),
-    contextGapKinds: collectContextGapKinds(params.progressiveAssembly, params.asyncAgentWork),
-    limitations: collectLimitations(params.asyncAgentWork),
+    contextGapKinds: collectContextGapKinds(params.progressiveAssembly, params.asyncAgentWork, params.debugTrace),
+    limitations: collectLimitations(params.asyncAgentWork, params.debugTrace),
     capabilityAudit,
   };
 }

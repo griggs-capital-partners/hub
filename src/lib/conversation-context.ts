@@ -76,6 +76,21 @@ import {
   assembleProgressiveContext,
   type ProgressiveContextAssemblyResult,
 } from "./progressive-context-assembly";
+import {
+  EMPTY_CONTEXT_REGISTRY_SELECTION,
+  buildAgentControlSourceSignalsFromRegistry,
+  buildContextRegistryDebugSnapshot,
+  buildContextRegistryPackingCandidates,
+  buildRegistryUpsertsFromAsyncAgentWork,
+  buildRegistryUpsertsFromProgressiveAssembly,
+  mergeContextRegistryBatches,
+  mergeContextRegistrySelections,
+  selectOpenContextRegistryRecords,
+  upsertContextRegistryBatch,
+  type ContextRegistryDebugSnapshot,
+  type ContextRegistrySelection,
+  type ContextRegistryUpsertBatch,
+} from "./capability-gap-context-debt-registry";
 import { DEFAULT_APPROX_CHARS_PER_TOKEN } from "./context-token-budget";
 import {
   DEFAULT_MODEL_BUDGET_PROFILE,
@@ -245,6 +260,7 @@ export type ConversationContextBundle = {
   agentControl: AgentControlDebugSnapshot;
   progressiveAssembly: ProgressiveContextAssemblyResult;
   asyncAgentWork: AsyncAgentWorkDebugSnapshot | null;
+  contextRegistry: ContextRegistryDebugSnapshot;
   debugTrace?: ContextDebugTrace | null;
 };
 
@@ -926,6 +942,13 @@ type ConversationContextResolverDependencies = {
   ) => Promise<ConversationDocumentInspectionTaskStoreRecord>;
   persistAsyncAgentWork?: boolean;
   upsertAsyncAgentWorkItem?: (item: AsyncAgentWorkItem) => Promise<AsyncAgentWorkItem>;
+  persistContextRegistry?: boolean;
+  listContextRegistryRecords?: (params: {
+    conversationId: string;
+    conversationDocumentIds: string[];
+    request?: string | null;
+  }) => Promise<ContextRegistrySelection>;
+  upsertContextRegistryRecords?: (batch: ContextRegistryUpsertBatch) => Promise<ContextRegistrySelection>;
 };
 
 export const MAX_THREAD_DOCUMENT_CONTEXT_CHARS = CHAT_THREAD_DOCUMENT_CONTEXT_CHARS;
@@ -1634,6 +1657,28 @@ function buildAgentControlSourceSignals(params: {
         : null,
     };
   });
+}
+
+function buildContextRegistrySection(selection: ContextRegistrySelection) {
+  const candidates = buildContextRegistryPackingCandidates(selection);
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  return joinMarkdownSections([
+    "## Known Context Debt and Capability Gaps",
+    "These are durable registry records from prior inspections or deferred capability evidence. They are memory, not proof that unavailable tools ran.",
+    ...candidates.slice(0, 8).map((candidate) => candidate.content),
+  ]);
+}
+
+function hasContextRegistryPrismaDelegates() {
+  const client = prisma as unknown as Record<string, unknown>;
+  return Boolean(
+    client.contextDebtRecord &&
+      client.capabilityGapRecord &&
+      client.sourceCoverageRecord
+  );
 }
 
 function resolvePdfExtractionResult(value: string | PdfContextExtractionResult) {
@@ -3596,6 +3641,22 @@ export async function resolveConversationContextBundle(params: {
       ? upsertAsyncAgentWorkItem
       : async (item: AsyncAgentWorkItem) => item
   );
+  const persistContextRegistry = dependencies.persistContextRegistry ?? persistDocumentIntelligence;
+  const canUseDefaultContextRegistryPersistence = persistContextRegistry && hasContextRegistryPrismaDelegates();
+  const listContextRegistry = dependencies.listContextRegistryRecords ?? (
+    canUseDefaultContextRegistryPersistence
+      ? async (input: { conversationId: string; conversationDocumentIds: string[]; request?: string | null }) =>
+          selectOpenContextRegistryRecords({
+            conversationId: input.conversationId,
+            conversationDocumentIds: input.conversationDocumentIds,
+          })
+      : async () => EMPTY_CONTEXT_REGISTRY_SELECTION
+  );
+  const persistContextRegistryBatch = dependencies.upsertContextRegistryRecords ?? (
+    canUseDefaultContextRegistryPersistence
+      ? upsertContextRegistryBatch
+      : async () => EMPTY_CONTEXT_REGISTRY_SELECTION
+  );
   const requestedSources = resolveRequestedConversationContextSourcePlan(params.sourcePlan);
   const sourceDecisions = resolveConversationContextSourceDecisions({
     conversationId: params.conversationId,
@@ -3613,12 +3674,15 @@ export async function resolveConversationContextBundle(params: {
   const resolvedBudget = resolveConversationContextBudget(params.budget, documents.length);
   const occurrenceQuery = analyzeDocumentOccurrenceQuery(params.currentUserPrompt);
   const documentIds = documents.map((document) => document.id);
-  const [storedKnowledgeArtifacts, storedInspectionTasks] = documentIds.length > 0
-    ? await Promise.all([
-        listKnowledgeArtifacts(documentIds),
-        listInspectionTasks(documentIds),
-      ])
-    : [[], []];
+  const [storedKnowledgeArtifacts, storedInspectionTasks, openContextRegistry] = await Promise.all([
+    documentIds.length > 0 ? listKnowledgeArtifacts(documentIds) : Promise.resolve([]),
+    documentIds.length > 0 ? listInspectionTasks(documentIds) : Promise.resolve([]),
+    listContextRegistry({
+      conversationId: params.conversationId,
+      conversationDocumentIds: documentIds,
+      request: params.currentUserPrompt ?? null,
+    }),
+  ]);
   const storedKnowledgeArtifactsByDocument = new Map<string, DocumentKnowledgeArtifactRecord[]>();
   const storedInspectionTasksByDocument = new Map<string, DocumentInspectionTaskRecord[]>();
 
@@ -4172,6 +4236,8 @@ export async function resolveConversationContextBundle(params: {
   const documentChunkingOccurrence = buildThreadDocumentOccurrenceSummary(
     documentChunkingDocuments
   );
+  const contextRegistryPackingCandidates = buildContextRegistryPackingCandidates(openContextRegistry);
+  const contextRegistrySection = buildContextRegistrySection(openContextRegistry);
   const agentControl = evaluateAgentControlSurface({
     conversationId: params.conversationId,
     request: params.currentUserPrompt ?? null,
@@ -4183,11 +4249,14 @@ export async function resolveConversationContextBundle(params: {
           mode: resolvedBudget.mode ?? "standard",
         }
       : null,
-    sourceSignals: buildAgentControlSourceSignals({
-      sourceDocuments: documents,
-      documentChunkingDocuments,
-      documentIntelligenceDocuments,
-    }),
+    sourceSignals: [
+      ...buildAgentControlSourceSignals({
+        sourceDocuments: documents,
+        documentChunkingDocuments,
+        documentIntelligenceDocuments,
+      }),
+      ...buildAgentControlSourceSignalsFromRegistry(openContextRegistry),
+    ],
   });
 
   const renderedText = joinMarkdownSections([
@@ -4213,6 +4282,7 @@ export async function resolveConversationContextBundle(params: {
         ...sections,
       ])
       : null,
+    contextRegistrySection,
     availabilityNotes.length > 0
       ? joinMarkdownSections([
           "## Thread Document Availability",
@@ -4224,7 +4294,7 @@ export async function resolveConversationContextBundle(params: {
   const progressiveAssembly = assembleProgressiveContext({
     request: params.currentUserPrompt ?? null,
     agentControl,
-    artifactCandidates: progressiveArtifactCandidates,
+    artifactCandidates: [...progressiveArtifactCandidates, ...contextRegistryPackingCandidates],
     rawExcerptCandidates: progressiveRawExcerptCandidates,
   });
   const asyncWorkItems = planAsyncAgentWorkItems({
@@ -4239,6 +4309,29 @@ export async function resolveConversationContextBundle(params: {
     ? await persistAsyncWorkItem(runAsyncAgentWorkItem(asyncWorkItems[0]))
     : null;
   const asyncAgentWork = toAsyncAgentWorkDebugSnapshot(asyncAgentWorkItem);
+  const contextRegistryUpserts = mergeContextRegistryBatches(
+    buildRegistryUpsertsFromProgressiveAssembly({
+      conversationId: params.conversationId,
+      conversationDocumentId: documents.length === 1 ? documents[0].id : null,
+      agentControl,
+      assembly: progressiveAssembly,
+    }),
+    asyncAgentWorkItem
+      ? buildRegistryUpsertsFromAsyncAgentWork({
+          conversationId: params.conversationId,
+          conversationDocumentId: asyncAgentWorkItem.conversationDocumentId,
+          item: asyncAgentWorkItem,
+        })
+      : {
+          contextDebtRecords: [],
+          capabilityGapRecords: [],
+          sourceCoverageRecords: [],
+        }
+  );
+  const persistedContextRegistry = await persistContextRegistryBatch(contextRegistryUpserts);
+  const contextRegistry = buildContextRegistryDebugSnapshot(
+    mergeContextRegistrySelections(openContextRegistry, persistedContextRegistry)
+  );
 
   const bundle = {
     text: renderedText,
@@ -4263,6 +4356,7 @@ export async function resolveConversationContextBundle(params: {
     agentControl,
     progressiveAssembly,
     asyncAgentWork,
+    contextRegistry,
   };
 
   return {

@@ -4,6 +4,7 @@ import {
   type AgentControlDebugSnapshot,
 } from "./agent-control-surface";
 import type { AsyncAgentWorkDebugSnapshot } from "./async-agent-work-queue";
+import type { ContextRegistryDebugSnapshot } from "./capability-gap-context-debt-registry";
 import type {
   ContextBudgetProfile,
   ContextChunkSelection,
@@ -36,6 +37,7 @@ type BuildConversationContextDebugTraceParams = {
   > & {
     agentControl?: AgentControlDebugSnapshot | null;
     asyncAgentWork?: AsyncAgentWorkDebugSnapshot | null;
+    contextRegistry?: ContextRegistryDebugSnapshot | null;
   };
 };
 
@@ -916,6 +918,7 @@ export function buildConversationContextDebugTrace(
     budgetProfile: buildBudgetProfile(params.bundle.documentChunking),
     agentControl,
     asyncAgentWork: params.bundle.asyncAgentWork ?? null,
+    contextRegistry: params.bundle.contextRegistry ?? null,
     sourceEligibility: params.bundle.sourceDecisions.map(buildSourceEligibility),
     documents,
     chunks,

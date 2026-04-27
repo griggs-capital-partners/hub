@@ -7,6 +7,7 @@
 
 import type { AgentControlDebugSnapshot } from "./agent-control-surface";
 import type { AsyncAgentWorkDebugSnapshot } from "./async-agent-work-queue";
+import type { ContextRegistryDebugSnapshot } from "./capability-gap-context-debt-registry";
 import type { ProgressiveContextAssemblyResult } from "./progressive-context-assembly";
 
 export type ContextSourceType =
@@ -448,6 +449,7 @@ export interface ContextDebugTrace {
   budgetProfile: ContextBudgetProfile | null;
   agentControl: AgentControlDebugSnapshot;
   asyncAgentWork?: AsyncAgentWorkDebugSnapshot | null;
+  contextRegistry?: ContextRegistryDebugSnapshot | null;
   sourceEligibility: ContextSourceEligibility[];
   documents: ContextDebugDocument[];
   chunks: ContextDebugChunk[];

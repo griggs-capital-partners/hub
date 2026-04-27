@@ -42,6 +42,7 @@ import {
   shouldUseBufferedTruthfulExecutionResponse,
   type TruthfulExecutionClaimSnapshot,
 } from "@/lib/truthful-execution-claim-guard";
+import { upsertTruthfulExecutionRegistryCandidates } from "@/lib/capability-gap-context-debt-registry";
 
 export const dynamic = "force-dynamic";
 
@@ -518,6 +519,19 @@ export async function POST(
               debugTrace: contextBundle.debugTrace,
             });
             truthfulExecutionClaims = runtimeTruthfulExecutionClaims;
+            await upsertTruthfulExecutionRegistryCandidates({
+              conversationId: conversation.id,
+              snapshot: runtimeTruthfulExecutionClaims,
+            }).catch((error) => {
+              console.warn(
+                "[chat/messages][truthful-execution-registry]",
+                JSON.stringify({
+                  conversationId: conversation.id,
+                  agentId: agent.id,
+                  error: error instanceof Error ? error.message : String(error),
+                })
+              );
+            });
             const truthfulExecutionContext = renderTruthfulExecutionClaimContext(runtimeTruthfulExecutionClaims);
             const bufferExecutionSensitiveResponse = shouldUseBufferedTruthfulExecutionResponse({
               userPrompt: message,
@@ -903,6 +917,19 @@ export async function POST(
           progressiveAssembly: contextBundle.progressiveAssembly,
           asyncAgentWork: contextBundle.asyncAgentWork,
           debugTrace: contextBundle.debugTrace,
+        });
+        await upsertTruthfulExecutionRegistryCandidates({
+          conversationId: conversation.id,
+          snapshot: truthfulExecutionClaims,
+        }).catch((error) => {
+          console.warn(
+            "[chat/messages][truthful-execution-registry]",
+            JSON.stringify({
+              conversationId: conversation.id,
+              agentId: agent.id,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          );
         });
         const truthfulExecutionContext = renderTruthfulExecutionClaimContext(truthfulExecutionClaims);
         retrievalSources = contextBundle.sources;

@@ -601,6 +601,9 @@ model Conversation {
     messages  ChatMessage[]
     documents ConversationDocument[]
     asyncAgentWorkItems AsyncAgentWorkItem[]
+    contextDebtRecords ContextDebtRecord[]
+    capabilityGapRecords CapabilityGapRecord[]
+    sourceCoverageRecords SourceCoverageRecord[]
 
   @@index([type, updatedAt])
   @@index([archivedAt, updatedAt])
@@ -625,6 +628,9 @@ model ConversationDocument {
   knowledgeArtifacts ConversationDocumentKnowledgeArtifact[]
   inspectionTasks    ConversationDocumentInspectionTask[]
   asyncAgentWorkItems AsyncAgentWorkItem[]
+  contextDebtRecords ContextDebtRecord[]
+  capabilityGapRecords CapabilityGapRecord[]
+  sourceCoverageRecords SourceCoverageRecord[]
 
   @@index([conversationId, createdAt])
   @@index([uploadedBy, createdAt])
@@ -723,6 +729,9 @@ model AsyncAgentWorkItem {
   conversation         Conversation?         @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   conversationDocument ConversationDocument? @relation(fields: [conversationDocumentId], references: [id], onDelete: Cascade)
   createdBy            User?                 @relation("AsyncAgentWorkCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  contextDebtRecords   ContextDebtRecord[]
+  capabilityGapRecords CapabilityGapRecord[]
+  sourceCoverageRecords SourceCoverageRecord[]
 
   @@index([conversationId, status, type], map: "async_agent_work_conversation_status_type_idx")
   @@index([conversationDocumentId, status, type], map: "async_agent_work_document_status_type_idx")
@@ -730,6 +739,141 @@ model AsyncAgentWorkItem {
   @@index([trigger, createdAt], map: "async_agent_work_trigger_created_idx")
   @@index([createdById, createdAt], map: "async_agent_work_created_by_idx")
   @@map("async_agent_work_items")
+}
+
+model ContextDebtRecord {
+  id                          String    @id @default(cuid())
+  debtKey                     String    @unique
+  workspaceId                 String?
+  conversationId              String?
+  conversationDocumentId      String?
+  asyncAgentWorkItemId        String?
+  artifactKey                 String?
+  sourceId                    String?
+  kind                        String
+  status                      String    @default("open")
+  severity                    String    @default("medium")
+  sourceScope                 String
+  sourceLocatorJson           String    @default("{}")
+  title                       String
+  description                 String
+  whyItMatters                String?
+  resolutionPath              String
+  resolutionPathsJson         String    @default("[]")
+  deferredCapabilitiesJson    String    @default("[]")
+  requiredApprovalReasonsJson String    @default("[]")
+  policyBlockersJson          String    @default("[]")
+  sourceCoverageTargetJson    String    @default("{}")
+  evidenceJson                String    @default("{}")
+  traceJson                   String    @default("[]")
+  linkedArtifactKeysJson      String    @default("[]")
+  firstSeenAt                 DateTime  @default(now())
+  lastSeenAt                  DateTime  @default(now())
+  resolvedAt                  DateTime?
+  createdAt                   DateTime  @default(now())
+  updatedAt                   DateTime  @default(now()) @updatedAt
+
+  conversation         Conversation?         @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationDocument ConversationDocument? @relation(fields: [conversationDocumentId], references: [id], onDelete: Cascade)
+  asyncAgentWorkItem   AsyncAgentWorkItem?   @relation(fields: [asyncAgentWorkItemId], references: [id], onDelete: SetNull)
+  capabilityGapRecords CapabilityGapRecord[]
+
+  @@index([conversationId, status, severity, lastSeenAt], map: "context_debt_conversation_status_idx")
+  @@index([conversationDocumentId, status, severity, lastSeenAt], map: "context_debt_document_status_idx")
+  @@index([sourceId, status, lastSeenAt], map: "context_debt_source_status_idx")
+  @@index([asyncAgentWorkItemId, status], map: "context_debt_async_work_status_idx")
+  @@map("context_debt_records")
+}
+
+model CapabilityGapRecord {
+  id                             String    @id @default(cuid())
+  gapKey                         String    @unique
+  workspaceId                    String?
+  conversationId                 String?
+  conversationDocumentId         String?
+  asyncAgentWorkItemId           String?
+  relatedContextDebtId           String?
+  sourceId                       String?
+  kind                           String
+  status                         String    @default("detected")
+  severity                       String    @default("medium")
+  reviewState                    String    @default("needs_review")
+  neededCapability               String
+  missingPayloadType             String?
+  missingToolId                  String?
+  missingModelCapability         String?
+  missingArtifactType            String?
+  missingConnector               String?
+  missingApprovalPath            String?
+  missingBudgetProfile           String?
+  title                          String
+  description                    String
+  whyNeeded                      String?
+  currentLimitation              String?
+  recommendedResolution          String?
+  resolutionPath                 String
+  resolutionPathsJson            String    @default("[]")
+  candidateToolCategoriesJson    String    @default("[]")
+  candidateModelCapabilitiesJson String    @default("[]")
+  candidateContextLanesJson      String    @default("[]")
+  requiredArtifactTypesJson      String    @default("[]")
+  requiredApprovalPolicyJson     String    @default("{}")
+  requiredBudgetProfileJson      String    @default("{}")
+  securityConsiderationsJson     String    @default("[]")
+  dataEgressConsiderationsJson   String    @default("[]")
+  benchmarkFixtureIdsJson        String    @default("[]")
+  evidenceJson                   String    @default("{}")
+  traceJson                      String    @default("[]")
+  firstSeenAt                    DateTime  @default(now())
+  lastSeenAt                     DateTime  @default(now())
+  resolvedAt                     DateTime?
+  createdAt                      DateTime  @default(now())
+  updatedAt                      DateTime  @default(now()) @updatedAt
+
+  conversation         Conversation?         @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationDocument ConversationDocument? @relation(fields: [conversationDocumentId], references: [id], onDelete: Cascade)
+  asyncAgentWorkItem   AsyncAgentWorkItem?   @relation(fields: [asyncAgentWorkItemId], references: [id], onDelete: SetNull)
+  relatedContextDebt   ContextDebtRecord?    @relation(fields: [relatedContextDebtId], references: [id], onDelete: SetNull)
+
+  @@index([neededCapability, status, lastSeenAt], map: "capability_gap_needed_status_idx")
+  @@index([conversationId, status, severity, lastSeenAt], map: "capability_gap_conversation_status_idx")
+  @@index([conversationDocumentId, status, severity, lastSeenAt], map: "capability_gap_document_status_idx")
+  @@index([relatedContextDebtId, status], map: "capability_gap_debt_status_idx")
+  @@index([asyncAgentWorkItemId, status], map: "capability_gap_async_work_status_idx")
+  @@map("capability_gap_records")
+}
+
+model SourceCoverageRecord {
+  id                     String   @id @default(cuid())
+  coverageKey            String   @unique
+  workspaceId            String?
+  conversationId         String?
+  conversationDocumentId String?
+  asyncAgentWorkItemId   String?
+  sourceId               String
+  sourceScope            String
+  sourceLocatorJson      String   @default("{}")
+  coverageStatus         String   @default("unknown")
+  coverageTargetJson     String   @default("{}")
+  inspectedByJson        String   @default("[]")
+  limitationsJson        String   @default("[]")
+  relatedDebtIdsJson     String   @default("[]")
+  selectedCandidateCount Int      @default(0)
+  totalCandidateCount    Int      @default(0)
+  evidenceJson           String   @default("{}")
+  traceJson              String   @default("[]")
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @default(now()) @updatedAt
+
+  conversation         Conversation?         @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationDocument ConversationDocument? @relation(fields: [conversationDocumentId], references: [id], onDelete: Cascade)
+  asyncAgentWorkItem   AsyncAgentWorkItem?   @relation(fields: [asyncAgentWorkItemId], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, coverageStatus, updatedAt], map: "source_coverage_conversation_status_idx")
+  @@index([conversationDocumentId, coverageStatus, updatedAt], map: "source_coverage_document_status_idx")
+  @@index([sourceId, coverageStatus, updatedAt], map: "source_coverage_source_status_idx")
+  @@index([asyncAgentWorkItemId, coverageStatus], map: "source_coverage_async_work_status_idx")
+  @@map("source_coverage_records")
 }
 
 model ConversationMember {
