@@ -548,7 +548,7 @@ runTest("Existing source memory structures adapt into context payloads", () => {
 runTest("Model and tool manifests govern payload negotiation", () => {
   assert.equal(
     DEFAULT_TOOL_OUTPUT_MANIFESTS.some((manifest) =>
-      manifest.toolId === "existing_parser_text_extraction" &&
+      manifest.toolId === "parser_text_extraction" &&
       manifest.producedPayloadTypes.includes("text_excerpt") &&
       manifest.producedPayloadTypes.includes("source_observation")
     ),

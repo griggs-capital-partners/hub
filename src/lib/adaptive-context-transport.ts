@@ -29,6 +29,11 @@ import type {
   ToolLatencyClass,
   ToolSideEffectLevel,
 } from "./inspection-tool-broker";
+import {
+  resolveCatalogForAdaptiveContextTransport,
+  type CatalogDebugSnapshot,
+  type CatalogResolutionResult,
+} from "./context-catalog-bootstrap";
 
 export type ContextPayloadType = string;
 
@@ -399,6 +404,7 @@ export type ContextTransportDebugSnapshot = {
     sourceObservationEligiblePayloadIds: string[];
     alreadyPersistedPayloadIds: string[];
   };
+  catalogDebugSnapshot: CatalogDebugSnapshot | null;
   traceEvents: ContextTransportTrace[];
   noUnavailableToolExecutionClaimed: true;
 };
@@ -417,6 +423,7 @@ export type ContextTransportPlannerInput = {
   modelManifest?: ModelCapabilityManifest | null;
   toolManifests?: ToolOutputManifest[];
   registry?: ContextPayloadRegistry;
+  catalogResolution?: CatalogResolutionResult | null;
   budget?: Partial<ContextTransportBudget>;
   packingKernel?: ContextPackingKernel;
   a03PackingResults?: ContextPackingResult[];
@@ -496,7 +503,7 @@ const FUTURE_UNSUPPORTED_COMPACTION = compactionPolicy(
   "Payload type is representable in the registry, but no executable transport lane exists in A-04h."
 );
 
-const KNOWN_PAYLOAD_TYPE_DEFINITIONS: ContextPayloadTypeDefinition[] = [
+export const LEGACY_A04H_PAYLOAD_TYPE_DEFINITIONS: ContextPayloadTypeDefinition[] = [
   {
     type: "text_excerpt",
     label: "Text excerpt",
@@ -811,7 +818,7 @@ const KNOWN_PAYLOAD_TYPE_DEFINITIONS: ContextPayloadTypeDefinition[] = [
 export class ContextPayloadRegistry {
   private readonly definitions = new Map<ContextPayloadType, ContextPayloadTypeDefinition>();
 
-  constructor(definitions: ContextPayloadTypeDefinition[] = KNOWN_PAYLOAD_TYPE_DEFINITIONS) {
+  constructor(definitions: ContextPayloadTypeDefinition[] = resolveCatalogForAdaptiveContextTransport().payloadTypeDefinitions) {
     this.registerMany(definitions);
   }
 
@@ -845,193 +852,23 @@ export class ContextPayloadRegistry {
 }
 
 export function buildDefaultContextPayloadRegistry() {
-  return new ContextPayloadRegistry();
+  return new ContextPayloadRegistry(resolveCatalogForAdaptiveContextTransport().payloadTypeDefinitions);
 }
 
-const TEXT_MODEL_ACCEPTED_PAYLOAD_TYPES = [
-  "text_excerpt",
-  "knowledge_artifact",
-  "source_observation",
-  "context_debt",
-  "capability_gap",
-  "source_coverage",
-  "inspection_trace",
-  "async_work_summary",
-  "artifact_promotion_candidate",
-  "artifact_promotion_result",
-  "tool_observation",
-  "creation_plan",
-  "validation_result",
-];
+const DEFAULT_CATALOG_RESOLUTION = resolveCatalogForAdaptiveContextTransport();
 
-export const DEFAULT_MODEL_CAPABILITY_MANIFEST = {
-  manifestId: "model:gcp-hub-text-context-v1",
-  consumerId: "gcp-hub-text-context",
-  modelId: "gcp-hub-default-text-model",
-  provider: "configured_llm_provider",
-  acceptedPayloadTypes: TEXT_MODEL_ACCEPTED_PAYLOAD_TYPES,
-  preferredRepresentations: ["text", "summary_text", "json", "debug_trace"],
-  maxTextTokens: null,
-  maxOutputTokens: null,
-  maxImageInputs: 0,
-  maxFileInputs: 0,
-  supportedFileTypes: [],
-  supportsVision: false,
-  supportsNativePdf: false,
-  supportsStructuredOutput: true,
-  supportsToolCalling: true,
-  costClass: "unknown",
-  latencyClass: "sync_safe",
-  policyRestrictions: [
-    "No rendered-page, OCR, vision, document-AI, browser, connector, or external API payload execution in A-04h.",
-  ],
-  notes: [
-    "Default manifest accepts text/debug/JSON context payloads only.",
-    "Richer multimodal payload types must be declared by future model/provider manifests.",
-  ],
-  limitations: [
-    "Vision, native PDF, and native file lanes are not available in this pass.",
-  ],
-} satisfies ModelCapabilityManifest;
+export function buildDefaultContextCatalogResolution(input: {
+  request?: string | null;
+  agentControl?: AgentControlDecision | null;
+} = {}) {
+  return resolveCatalogForAdaptiveContextTransport(input);
+}
 
-export const DEFAULT_TOOL_OUTPUT_MANIFESTS = [
-  {
-    manifestId: "tool-output:existing-parser-text-extraction",
-    producerId: "existing_parser_text_extraction",
-    toolId: "existing_parser_text_extraction",
-    producedPayloadTypes: ["text_excerpt", "source_observation"],
-    requiredInputPayloadTypes: ["native_file_reference"],
-    outputConfidenceSignals: ["parser_extraction_status", "visual_classification_confidence"],
-    outputValidationNeeds: ["source_location", "parser_limitations"],
-    artifactTypesProduced: ["table_candidate", "extraction_warning", "document_summary"],
-    sourceObservationTypesProduced: ["parser_text_excerpt", "extracted_text_chunk", "spreadsheet_range"],
-    costClass: "free_local",
-    latencyClass: "sync_safe",
-    dataEgressClass: "none",
-    sideEffectLevel: "creates_internal_artifact",
-    executionBoundary: "in_process",
-    fallbackCapabilities: ["rendered_page_inspection", "ocr", "vision_page_understanding", "document_ai_table_recovery"],
-    executable: true,
-    notes: [
-      "This manifest describes already-existing parser behavior only.",
-      "It does not execute OCR, vision, rendering, document AI, browser automation, or external APIs.",
-    ],
-  },
-  {
-    manifestId: "tool-output:artifact-reuse",
-    producerId: "artifact_reuse_selector",
-    toolId: "artifact_reuse_selector",
-    producedPayloadTypes: ["knowledge_artifact"],
-    requiredInputPayloadTypes: [],
-    outputConfidenceSignals: ["artifact_status", "artifact_confidence", "artifact_freshness"],
-    outputValidationNeeds: ["source_location", "artifact_status"],
-    artifactTypesProduced: [],
-    sourceObservationTypesProduced: [],
-    costClass: "free_local",
-    latencyClass: "sync_safe",
-    dataEgressClass: "none",
-    sideEffectLevel: "none",
-    executionBoundary: "memory",
-    fallbackCapabilities: [],
-    executable: true,
-    notes: ["Reuses already-persisted KnowledgeArtifacts."],
-  },
-  {
-    manifestId: "tool-output:context-debt-registry",
-    producerId: "context_debt_registry",
-    toolId: "context_debt_registry",
-    producedPayloadTypes: ["context_debt"],
-    requiredInputPayloadTypes: [],
-    outputConfidenceSignals: ["debt_status", "debt_severity"],
-    outputValidationNeeds: ["source_locator", "resolution_path"],
-    artifactTypesProduced: ["open_question"],
-    sourceObservationTypesProduced: [],
-    costClass: "free_local",
-    latencyClass: "sync_safe",
-    dataEgressClass: "none",
-    sideEffectLevel: "writes_internal_state",
-    executionBoundary: "memory",
-    fallbackCapabilities: [],
-    executable: true,
-    notes: ["Uses existing ContextDebtRecord semantics."],
-  },
-  {
-    manifestId: "tool-output:capability-gap-registry",
-    producerId: "capability_gap_registry",
-    toolId: "capability_gap_registry",
-    producedPayloadTypes: ["capability_gap"],
-    requiredInputPayloadTypes: [],
-    outputConfidenceSignals: ["gap_status", "gap_kind"],
-    outputValidationNeeds: ["recommended_resolution"],
-    artifactTypesProduced: ["source_memory"],
-    sourceObservationTypesProduced: [],
-    costClass: "free_local",
-    latencyClass: "sync_safe",
-    dataEgressClass: "none",
-    sideEffectLevel: "writes_internal_state",
-    executionBoundary: "memory",
-    fallbackCapabilities: [],
-    executable: true,
-    notes: ["Uses existing CapabilityGapRecord semantics."],
-  },
-  {
-    manifestId: "tool-output:source-coverage-registry",
-    producerId: "source_coverage_registry",
-    toolId: "source_coverage_registry",
-    producedPayloadTypes: ["source_coverage"],
-    requiredInputPayloadTypes: [],
-    outputConfidenceSignals: ["coverage_status", "selected_candidate_count", "total_candidate_count"],
-    outputValidationNeeds: ["coverage_target"],
-    artifactTypesProduced: ["source_memory"],
-    sourceObservationTypesProduced: [],
-    costClass: "free_local",
-    latencyClass: "sync_safe",
-    dataEgressClass: "none",
-    sideEffectLevel: "writes_internal_state",
-    executionBoundary: "memory",
-    fallbackCapabilities: [],
-    executable: true,
-    notes: ["Uses existing SourceCoverageRecord semantics."],
-  },
-  {
-    manifestId: "tool-output:async-agent-work-queue",
-    producerId: "async_agent_work_queue",
-    toolId: "async_agent_work_queue",
-    producedPayloadTypes: ["async_work_summary"],
-    requiredInputPayloadTypes: ["context_debt", "capability_gap"],
-    outputConfidenceSignals: ["work_status", "deferred_capabilities"],
-    outputValidationNeeds: ["no_unavailable_tool_execution_claimed"],
-    artifactTypesProduced: [],
-    sourceObservationTypesProduced: [],
-    costClass: "free_local",
-    latencyClass: "sync_safe",
-    dataEgressClass: "none",
-    sideEffectLevel: "writes_internal_state",
-    executionBoundary: "memory",
-    fallbackCapabilities: [],
-    executable: true,
-    notes: ["Summarizes existing Async Agent Work Queue state; it does not run missing tools."],
-  },
-  {
-    manifestId: "tool-output:artifact-promotion-seam",
-    producerId: "artifact_promotion_seam",
-    toolId: "artifact_promotion_seam",
-    producedPayloadTypes: ["artifact_promotion_candidate", "artifact_promotion_result"],
-    requiredInputPayloadTypes: ["source_observation"],
-    outputConfidenceSignals: ["promotion_validation_state", "candidate_confidence"],
-    outputValidationNeeds: ["source_observation_refs", "limitations", "confidence"],
-    artifactTypesProduced: ["source_summary", "metric_measurement", "table_structured_data", "source_memory"],
-    sourceObservationTypesProduced: [],
-    costClass: "free_local",
-    latencyClass: "sync_safe",
-    dataEgressClass: "none",
-    sideEffectLevel: "writes_internal_state",
-    executionBoundary: "memory",
-    fallbackCapabilities: [],
-    executable: true,
-    notes: ["Describes the A-05a deterministic promotion seam only; no LLM promotion is claimed."],
-  },
-] satisfies ToolOutputManifest[];
+export const DEFAULT_MODEL_CAPABILITY_MANIFEST =
+  DEFAULT_CATALOG_RESOLUTION.selectedModelManifest satisfies ModelCapabilityManifest;
+
+export const DEFAULT_TOOL_OUTPUT_MANIFESTS =
+  DEFAULT_CATALOG_RESOLUTION.toolOutputManifests satisfies ToolOutputManifest[];
 
 function basePayload(params: {
   id: string;
@@ -1573,6 +1410,7 @@ export function buildDefaultContextPayloadRequirements(input: {
   request?: string | null;
   agentControl?: AgentControlDecision | null;
   availablePayloads?: ContextPayload[];
+  catalogResolution?: CatalogResolutionResult | null;
 }): ContextPayloadRequirement[] {
   const availableTypes = unique((input.availablePayloads ?? []).map((payload) => payload.type));
   const requirements: ContextPayloadRequirement[] = availableTypes.map((payloadType) =>
@@ -1584,7 +1422,11 @@ export function buildDefaultContextPayloadRequirements(input: {
     }
   };
 
-  if (needsVisualTableRecovery(input.request, input.agentControl)) {
+  for (const requirement of input.catalogResolution?.recommendedPayloadRequirements ?? []) {
+    add(requirement.payloadType, requirement.reason, requirement.required);
+  }
+
+  if (!input.catalogResolution && needsVisualTableRecovery(input.request, input.agentControl)) {
     for (const payloadType of [
       "knowledge_artifact",
       "text_excerpt",
@@ -1603,7 +1445,7 @@ export function buildDefaultContextPayloadRequirements(input: {
     }
   }
 
-  if (input.agentControl?.taskFidelityLevel === "highest_fidelity_ingestion") {
+  if (!input.catalogResolution && input.agentControl?.taskFidelityLevel === "highest_fidelity_ingestion") {
     for (const payloadType of [
       "source_observation",
       "text_excerpt",
@@ -1622,7 +1464,7 @@ export function buildDefaultContextPayloadRequirements(input: {
     }
   }
 
-  if (input.agentControl?.taskFidelityLevel === "highest_fidelity_creation") {
+  if (!input.catalogResolution && input.agentControl?.taskFidelityLevel === "highest_fidelity_creation") {
     for (const payloadType of [
       "knowledge_artifact",
       "source_observation",
@@ -1724,13 +1566,18 @@ function buildMissingCapability(params: {
   registry: ContextPayloadRegistry;
   toolManifests: ToolOutputManifest[];
   agentControl?: AgentControlDecision | null;
+  catalogResolution?: CatalogResolutionResult | null;
 }): MissingPayloadCapability {
   const producerToolIds = params.toolManifests
     .filter((manifest) => manifest.producedPayloadTypes.includes(params.payloadType))
     .map((manifest) => manifest.toolId);
   const definition = params.registry.get(params.payloadType);
+  const catalogLaneCapability = params.catalogResolution?.snapshot.transportLaneEntries.find((lane) =>
+    lane.acceptedPayloadTypes.includes(params.payloadType)
+  )?.missingCapabilityGapKind;
   const neededCapability =
-    params.payloadType === "rendered_page_image" || params.payloadType === "page_crop_image"
+    catalogLaneCapability ??
+    (params.payloadType === "rendered_page_image" || params.payloadType === "page_crop_image"
       ? "rendered_page_inspection"
       : params.payloadType === "ocr_text"
         ? "ocr"
@@ -1738,7 +1585,7 @@ function buildMissingCapability(params: {
           ? "vision_page_understanding"
           : params.payloadType === "document_ai_result" || params.payloadType === "structured_table"
             ? "document_ai_table_recovery"
-            : `payload:${params.payloadType}`;
+            : `payload:${params.payloadType}`);
 
   return {
     id: `missing-payload:${params.payloadType}:${shortHash(params.requirement.id)}`,
@@ -1761,30 +1608,41 @@ function buildMissingLaneProposal(params: {
   payloadType: ContextPayloadType;
   registry: ContextPayloadRegistry;
   missingCapability: MissingPayloadCapability;
+  catalogResolution?: CatalogResolutionResult | null;
 }): MissingContextLaneProposal {
   const definition = params.registry.get(params.payloadType);
+  const catalogLanes = params.catalogResolution?.snapshot.transportLaneEntries.filter((lane) =>
+    lane.acceptedPayloadTypes.includes(params.payloadType)
+  ) ?? [];
   const candidateContextLanes =
-    params.payloadType === "rendered_page_image" || params.payloadType === "page_crop_image"
-      ? ["rendered_page_image", "page_crop_image", "model_vision_input"]
-      : params.payloadType === "ocr_text"
-        ? ["ocr_text", "rendered_page_image"]
-        : params.payloadType === "vision_observation"
-          ? ["vision_observation", "model_vision_input"]
-          : params.payloadType === "document_ai_result" || params.payloadType === "structured_table"
-            ? ["document_ai_result", "structured_table"]
-            : [params.payloadType];
+    catalogLanes.length > 0
+      ? catalogLanes.map((lane) => lane.laneId)
+      : params.payloadType === "rendered_page_image" || params.payloadType === "page_crop_image"
+        ? ["rendered_page_image", "page_crop_image", "model_vision_input"]
+        : params.payloadType === "ocr_text"
+          ? ["ocr_text", "rendered_page_image"]
+          : params.payloadType === "vision_observation"
+            ? ["vision_observation", "model_vision_input"]
+            : params.payloadType === "document_ai_result" || params.payloadType === "structured_table"
+              ? ["document_ai_result", "structured_table"]
+              : [params.payloadType];
 
   return {
     id: `missing-lane:${params.payloadType}:${shortHash(params.missingCapability.id)}`,
     missingPayloadType: params.payloadType,
     candidateContextLanes,
-    boundary: definition?.defaultBoundary ?? "future_tool_boundary",
+    boundary: catalogLanes[0]?.executionBoundary ?? definition?.defaultBoundary ?? "future_tool_boundary",
     reason:
-      definition?.status === "unsupported"
+      catalogLanes[0]
+        ? `Catalog lane ${catalogLanes[0].laneId} is ${catalogLanes[0].currentAvailability} for ${params.payloadType}.`
+        : definition?.status === "unsupported"
         ? `Payload lane ${params.payloadType} is known but unsupported in this pass.`
         : `Payload lane ${params.payloadType} needs a registered producer/consumer path.`,
     associatedCapabilities: [params.missingCapability.neededCapability],
-    status: definition?.status === "unsupported" ? "unsupported" : "proposed",
+    status:
+      definition?.status === "unsupported" || catalogLanes[0]?.currentAvailability?.startsWith("unavailable")
+        ? "unsupported"
+        : "proposed",
     noUnavailableToolExecutionClaimed: true,
   };
 }
@@ -1804,6 +1662,7 @@ function debugSnapshot(params: {
   missingPayloadCapabilities: MissingPayloadCapability[];
   missingContextLaneProposals: MissingContextLaneProposal[];
   traceEvents: ContextTransportTrace[];
+  catalogDebugSnapshot?: CatalogDebugSnapshot | null;
 }): ContextTransportDebugSnapshot {
   return {
     planId: params.plan.planId,
@@ -1843,6 +1702,7 @@ function debugSnapshot(params: {
         .filter((payload) => payload.persistence.alreadyPersisted)
         .map((payload) => payload.id),
     },
+    catalogDebugSnapshot: params.catalogDebugSnapshot ?? null,
     traceEvents: params.traceEvents,
     noUnavailableToolExecutionClaimed: true,
   };
@@ -1851,9 +1711,15 @@ function debugSnapshot(params: {
 export function planAdaptiveContextTransport(
   input: ContextTransportPlannerInput
 ): ContextTransportResult {
-  const registry = input.registry ?? buildDefaultContextPayloadRegistry();
-  const modelCapabilityManifest = input.modelManifest ?? DEFAULT_MODEL_CAPABILITY_MANIFEST;
-  const toolOutputManifestsConsidered = input.toolManifests ?? [...DEFAULT_TOOL_OUTPUT_MANIFESTS];
+  const catalogResolution =
+    input.catalogResolution ??
+    resolveCatalogForAdaptiveContextTransport({
+      request: input.request,
+      agentControl: input.agentControl,
+    });
+  const registry = input.registry ?? new ContextPayloadRegistry(catalogResolution.payloadTypeDefinitions);
+  const modelCapabilityManifest = input.modelManifest ?? catalogResolution.selectedModelManifest ?? DEFAULT_MODEL_CAPABILITY_MANIFEST;
+  const toolOutputManifestsConsidered = input.toolManifests ?? [...catalogResolution.toolOutputManifests];
   const budget = defaultBudget(input);
   const requestedPayloads =
     input.requestedPayloads ??
@@ -1861,6 +1727,7 @@ export function planAdaptiveContextTransport(
       request: input.request,
       agentControl: input.agentControl,
       availablePayloads: input.availablePayloads,
+      catalogResolution,
     });
   const availablePayloads = input.availablePayloads ?? [];
   const planId = `context-transport:${input.agentControl?.decisionId ?? shortHash(input.request ?? "default")}`;
@@ -1873,6 +1740,7 @@ export function planAdaptiveContextTransport(
       metadata: {
         planId,
         requestedPayloadTypes: requestedPayloads.map((requirement) => requirement.payloadType),
+        catalogId: catalogResolution.catalogId,
       },
     }, input.now),
   ];
@@ -2159,11 +2027,13 @@ export function planAdaptiveContextTransport(
       registry,
       toolManifests: toolOutputManifestsConsidered,
       agentControl: input.agentControl,
+      catalogResolution,
     });
     const missingLane = buildMissingLaneProposal({
       payloadType: requirement.payloadType,
       registry,
       missingCapability,
+      catalogResolution,
     });
     missingPayloadCapabilities.push(missingCapability);
     missingContextLaneProposals.push(missingLane);
@@ -2277,6 +2147,7 @@ export function planAdaptiveContextTransport(
       missingPayloadCapabilities,
       missingContextLaneProposals,
       traceEvents,
+      catalogDebugSnapshot: catalogResolution.debugSnapshot,
     }),
   };
 }
