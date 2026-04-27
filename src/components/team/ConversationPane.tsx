@@ -881,6 +881,7 @@ type ConversationTranscriptProps = {
   loadingMessages: boolean;
   rawMessageCount: number;
   renderedMessages: ChatMessage[];
+  messagesError: string | null;
   mixedAgentThread: boolean;
   activeAgentParticipantName: string | null;
   activeAgentReady: boolean;
@@ -913,6 +914,7 @@ const ConversationTranscript = memo(
     loadingMessages,
     rawMessageCount,
     renderedMessages,
+    messagesError,
     mixedAgentThread,
     activeAgentParticipantName,
     activeAgentReady,
@@ -951,7 +953,15 @@ const ConversationTranscript = memo(
         onPointerDown={onEngageConversationArea}
         className="chat-scroll flex-1 overflow-y-auto overflow-x-hidden bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.035),transparent_58%)] px-4 py-5 md:min-h-0 md:px-8 md:py-8"
       >
-        {loadingMessages && rawMessageCount === 0 ? (
+        {messagesError && renderedMessages.length === 0 ? (
+          <div className="flex h-full flex-col items-center justify-center px-8 text-center">
+            <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(239,68,68,0.12)] text-[#F2C0C0]">
+              <AlertTriangle size={28} />
+            </div>
+            <p className="text-lg font-semibold text-[#F6F3EE]">Thread is still here</p>
+            <p className="mt-2 max-w-md text-sm leading-6 text-[#A8A29C]">{messagesError}</p>
+          </div>
+        ) : loadingMessages && rawMessageCount === 0 ? (
           <div className="flex h-full items-center justify-center">
             <div className="h-6 w-6 rounded-full border-2 border-[rgba(247,148,29,0.2)] border-t-[#F7941D] animate-spin" />
           </div>
@@ -1030,6 +1040,7 @@ const ConversationTranscript = memo(
       && previousProps.currentUserId === nextProps.currentUserId
       && previousProps.renderedMessages === nextProps.renderedMessages
       && previousProps.rawMessageCount === nextProps.rawMessageCount
+      && previousProps.messagesError === nextProps.messagesError
       && previousProps.loadingMessages === nextProps.loadingMessages
       && previousProps.mixedAgentThread === nextProps.mixedAgentThread
       && previousProps.editingMessageId === nextProps.editingMessageId
@@ -1067,6 +1078,7 @@ export function ConversationPane({
   loadingMessages,
   rawMessageCount,
   renderedMessages,
+  messagesError,
   messageInput,
   sending,
   editingMessageId,
@@ -1113,6 +1125,7 @@ export function ConversationPane({
   loadingMessages: boolean;
   rawMessageCount: number;
   renderedMessages: ChatMessage[];
+  messagesError: string | null;
   messageInput: string;
   sending: boolean;
   editingMessageId: string | null;
@@ -1198,6 +1211,7 @@ export function ConversationPane({
               loadingMessages={loadingMessages}
               rawMessageCount={rawMessageCount}
               renderedMessages={renderedMessages}
+              messagesError={messagesError}
               mixedAgentThread={mixedAgentThread}
               activeAgentParticipantName={activeAgentParticipant?.name ?? null}
               activeAgentReady={activeAgentReady}

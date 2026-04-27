@@ -20,9 +20,10 @@ import {
 import { agentChatTools, executeAgentTool } from "@/lib/agent-tools";
 import { buildOrgContext } from "@/lib/agent-context";
 import {
-  getConversationForUser,
+  getReadableConversationForUser,
   isMissingChatTablesError,
   listMessagesForConversation,
+  resolveConversationMessagesAccessResult,
   resolveConversationRuntimeState,
   serializeConversation,
 } from "@/lib/chat";
@@ -34,6 +35,13 @@ import {
   getSanitizedDatabaseTarget,
   summarizeAgentLlmConnections,
 } from "@/lib/runtime-diagnostics";
+import {
+  buildTruthfulExecutionClaimSnapshot,
+  enforceTruthfulExecutionClaims,
+  renderTruthfulExecutionClaimContext,
+  shouldUseBufferedTruthfulExecutionResponse,
+  type TruthfulExecutionClaimSnapshot,
+} from "@/lib/truthful-execution-claim-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -120,6 +128,11 @@ type RuntimeSnapshot = {
     sourceDecisions: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceDecisions"];
     resolvedSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"];
     documentChunking: Awaited<ReturnType<typeof resolveConversationContextBundle>>["documentChunking"];
+    documentIntelligence: Awaited<ReturnType<typeof resolveConversationContextBundle>>["documentIntelligence"];
+    agentControl: Awaited<ReturnType<typeof resolveConversationContextBundle>>["agentControl"];
+    asyncAgentWork: Awaited<ReturnType<typeof resolveConversationContextBundle>>["asyncAgentWork"];
+    debugTrace: Awaited<ReturnType<typeof resolveConversationContextBundle>>["debugTrace"];
+    truthfulExecutionClaims: TruthfulExecutionClaimSnapshot;
   };
   payload: {
     currentUserName: string | null;
@@ -146,6 +159,11 @@ function buildRuntimeSnapshot(params: {
   sourceDecisions: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceDecisions"];
   resolvedSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"];
   documentChunking: Awaited<ReturnType<typeof resolveConversationContextBundle>>["documentChunking"];
+  documentIntelligence: Awaited<ReturnType<typeof resolveConversationContextBundle>>["documentIntelligence"];
+  agentControl: Awaited<ReturnType<typeof resolveConversationContextBundle>>["agentControl"];
+  asyncAgentWork: Awaited<ReturnType<typeof resolveConversationContextBundle>>["asyncAgentWork"];
+  debugTrace: Awaited<ReturnType<typeof resolveConversationContextBundle>>["debugTrace"];
+  truthfulExecutionClaims: TruthfulExecutionClaimSnapshot;
   currentUserName: string | null;
   history: LlmMessage[];
   orgContext: string;
@@ -163,6 +181,11 @@ function buildRuntimeSnapshot(params: {
       sourceDecisions: params.sourceDecisions,
       resolvedSources: params.resolvedSources,
       documentChunking: params.documentChunking,
+      documentIntelligence: params.documentIntelligence,
+      agentControl: params.agentControl,
+      asyncAgentWork: params.asyncAgentWork,
+      debugTrace: params.debugTrace,
+      truthfulExecutionClaims: params.truthfulExecutionClaims,
     },
     payload: {
       currentUserName: params.currentUserName,
@@ -188,8 +211,8 @@ export async function GET(
   }
 
   try {
-    const conversation = await getConversationForUser(id, session.user.id);
-    await logTeamChatDetailRouteDiagnostics({
+    const conversation = await getReadableConversationForUser(id, session.user.id);
+    const accessDiagnostic = await logTeamChatDetailRouteDiagnostics({
       route: "api/chat/conversations/[id]/messages.GET",
       session: {
         userId: session.user.id,
@@ -197,6 +220,8 @@ export async function GET(
       },
       conversationId: id,
       accessFound: Boolean(conversation),
+      readableHelperPassed: Boolean(conversation),
+      postHelperLookupFailed: false,
     });
 
     if (!conversation) {
@@ -204,9 +229,19 @@ export async function GET(
         "[chat/messages][GET][not_found]",
         JSON.stringify({
           dbTarget: getSanitizedDatabaseTarget(),
+          route: accessDiagnostic.route,
           conversationId: id,
           sessionUserId: session.user.id,
           sessionUserEmail: session.user.email ?? null,
+          conversationExists: accessDiagnostic.conversationExists,
+          archivedAt: accessDiagnostic.archivedAt,
+          projectId: accessDiagnostic.projectId,
+          activeMembershipCountForUser: accessDiagnostic.activeMembershipCountForUser,
+          userMembershipRemovedAt: accessDiagnostic.userMembershipRemovedAt,
+          messageCount: accessDiagnostic.messageCount,
+          notFoundReason: accessDiagnostic.notFoundReason,
+          readableHelperPassed: accessDiagnostic.readableHelperPassed,
+          postHelperLookupFailed: accessDiagnostic.postHelperLookupFailed,
         })
       );
       return NextResponse.json(
@@ -216,6 +251,52 @@ export async function GET(
     }
 
     const messages = await listMessagesForConversation(conversation.id);
+    const messageAccess = resolveConversationMessagesAccessResult({
+      conversation,
+      userId: session.user.id,
+      messageCount: messages.length,
+      readableHelperPassed: true,
+      postHelperLookupFailed: false,
+    });
+    if (messageAccess.status !== 200) {
+      const postHelperDiagnostic = await logTeamChatDetailRouteDiagnostics({
+        route: "api/chat/conversations/[id]/messages.GET",
+        session: {
+          userId: session.user.id,
+          email: session.user.email ?? null,
+        },
+        conversationId: id,
+        accessFound: false,
+        readableHelperPassed: true,
+        postHelperLookupFailed: true,
+      });
+
+      console.warn(
+        "[chat/messages][GET][post_helper_access_mismatch]",
+        JSON.stringify({
+          dbTarget: getSanitizedDatabaseTarget(),
+          route: postHelperDiagnostic.route,
+          conversationId: id,
+          sessionUserId: session.user.id,
+          sessionUserEmail: session.user.email ?? null,
+          conversationExists: postHelperDiagnostic.conversationExists,
+          archivedAt: postHelperDiagnostic.archivedAt,
+          projectId: postHelperDiagnostic.projectId,
+          activeMembershipCountForUser: postHelperDiagnostic.activeMembershipCountForUser,
+          userMembershipRemovedAt: postHelperDiagnostic.userMembershipRemovedAt,
+          messageCount: messages.length,
+          notFoundReason: messageAccess.notFoundReason,
+          readableHelperPassed: true,
+          postHelperLookupFailed: true,
+        })
+      );
+
+      return NextResponse.json(
+        { error: "Conversation not found" },
+        { status: 404, headers: TEAM_CHAT_NO_STORE_HEADERS }
+      );
+    }
+
     if (messages.length === 0) {
       const runtimeState = resolveConversationRuntimeState(conversation);
       const activeAgent = runtimeState.activeAgentMember?.agent ?? null;
@@ -291,7 +372,7 @@ export async function POST(
 
   try {
     const { id } = await params;
-    const conversation = await getConversationForUser(id, session.user.id);
+    const conversation = await getReadableConversationForUser(id, session.user.id);
 
     if (!conversation) {
       return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
@@ -342,6 +423,7 @@ export async function POST(
             controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
           };
           let retrievalSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"] = [];
+          let truthfulExecutionClaims: TruthfulExecutionClaimSnapshot | null = null;
           let selectedTargetSummary: {
             connectionId: string;
             provider: string;
@@ -428,6 +510,20 @@ export async function POST(
             const llmHealth = await probeAgentLlm(selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : agent);
             retrievalSources = contextBundle.sources;
             const currentUserName = senderUser?.displayName || senderUser?.name || null;
+            const runtimeTruthfulExecutionClaims = buildTruthfulExecutionClaimSnapshot({
+              documentIntelligence: contextBundle.documentIntelligence,
+              agentControl: contextBundle.agentControl,
+              progressiveAssembly: contextBundle.progressiveAssembly,
+              asyncAgentWork: contextBundle.asyncAgentWork,
+              debugTrace: contextBundle.debugTrace,
+            });
+            truthfulExecutionClaims = runtimeTruthfulExecutionClaims;
+            const truthfulExecutionContext = renderTruthfulExecutionClaimContext(runtimeTruthfulExecutionClaims);
+            const bufferExecutionSensitiveResponse = shouldUseBufferedTruthfulExecutionResponse({
+              userPrompt: message,
+              snapshot: runtimeTruthfulExecutionClaims,
+              contextText: contextBundle.text,
+            });
             await prisma.conversation.update({
               where: { id: conversation.id },
               data: {
@@ -479,7 +575,7 @@ export async function POST(
               return [{ role: (entry.senderAgentId ? "assistant" : "user") as "assistant" | "user", content: entry.body }];
             });
 
-            const runtimeOrgContext = [orgContext, contextBundle.text].filter(Boolean).join("\n\n");
+            const runtimeOrgContext = [orgContext, contextBundle.text, truthfulExecutionContext].filter(Boolean).join("\n\n");
             const runtimeConfig = {
               ...agent,
               ...(selectedRuntimeConfig ?? {}),
@@ -506,9 +602,14 @@ export async function POST(
               sourceDecisions: contextBundle.sourceDecisions,
               resolvedSources: contextBundle.sources,
               documentChunking: contextBundle.documentChunking,
+              documentIntelligence: contextBundle.documentIntelligence,
+              agentControl: contextBundle.agentControl,
+              asyncAgentWork: contextBundle.asyncAgentWork,
+              debugTrace: contextBundle.debugTrace,
+              truthfulExecutionClaims: runtimeTruthfulExecutionClaims,
               currentUserName,
               history,
-              orgContext,
+              orgContext: runtimeOrgContext,
               resolvedContextText: contextBundle.text,
             });
 
@@ -521,15 +622,23 @@ export async function POST(
             })) {
               if (event.type === "thinking_delta") {
                 finalThinking += event.delta;
-                writeEvent(event);
+                if (!bufferExecutionSensitiveResponse) {
+                  writeEvent(event);
+                }
               } else if (event.type === "content_delta") {
                 finalContent += event.delta;
-                writeEvent(event);
+                if (!bufferExecutionSensitiveResponse) {
+                  writeEvent(event);
+                }
               } else if (event.type === "done") {
                 resolvedModel = event.model;
-                writeEvent(event);
+                if (!bufferExecutionSensitiveResponse) {
+                  writeEvent(event);
+                }
               } else if (event.type === "tool_call" || event.type === "tool_result") {
-                writeEvent(event);
+                if (!bufferExecutionSensitiveResponse) {
+                  writeEvent(event);
+                }
               } else if (event.type === "tool_context") {
                 capturedToolContext = event.messages;
               }
@@ -539,12 +648,31 @@ export async function POST(
             if (!trimmedContent) {
               throw new Error("The LLM returned an empty response");
             }
+            const guarded = truthfulExecutionClaims
+              ? enforceTruthfulExecutionClaims(trimmedContent, truthfulExecutionClaims)
+              : { answer: trimmedContent, validation: { ok: true, violations: [] } };
+            if (!guarded.validation.ok) {
+              console.warn(
+                "[chat/messages][truthful-execution-guard]",
+                JSON.stringify({
+                  conversationId: conversation.id,
+                  agentId: agent.id,
+                  mode: bufferExecutionSensitiveResponse ? "buffer_then_guard" : "post_stream_guard",
+                  violations: guarded.validation.violations,
+                })
+              );
+            }
+
+            if (bufferExecutionSensitiveResponse) {
+              writeEvent({ type: "content_delta", delta: guarded.answer });
+              writeEvent({ type: "done", model: resolvedModel ?? agent.llmModel ?? "unknown" });
+            }
 
             const agentMessage = await prisma.chatMessage.create({
               data: {
                 conversationId: conversation.id,
                 senderAgentId: agent.id,
-                body: trimmedContent,
+                body: guarded.answer,
                 toolContext: capturedToolContext ? JSON.stringify(capturedToolContext) : undefined,
               },
               include: {
@@ -769,12 +897,20 @@ export async function POST(
         const selectedThinkingMode = selectedTarget?.thinkingMode ?? agent.llmThinkingMode;
         const llmHealth = await probeAgentLlm(selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : agent);
         const currentUserName = senderUser?.displayName || senderUser?.name || null;
+        const truthfulExecutionClaims = buildTruthfulExecutionClaimSnapshot({
+          documentIntelligence: contextBundle.documentIntelligence,
+          agentControl: contextBundle.agentControl,
+          progressiveAssembly: contextBundle.progressiveAssembly,
+          asyncAgentWork: contextBundle.asyncAgentWork,
+          debugTrace: contextBundle.debugTrace,
+        });
+        const truthfulExecutionContext = renderTruthfulExecutionClaimContext(truthfulExecutionClaims);
         retrievalSources = contextBundle.sources;
         const history: Array<{ role: "user" | "assistant"; content: string }> = recentMessages.reverse().map((entry) => ({
           role: (entry.senderAgentId ? "assistant" : "user") as "assistant" | "user",
           content: entry.body,
         }));
-        const runtimeOrgContext = [orgContext, contextBundle.text].filter(Boolean).join("\n\n");
+        const runtimeOrgContext = [orgContext, contextBundle.text, truthfulExecutionContext].filter(Boolean).join("\n\n");
         const runtimeConfig = {
           ...agent,
           ...(selectedRuntimeConfig ?? {}),
@@ -797,9 +933,14 @@ export async function POST(
           sourceDecisions: contextBundle.sourceDecisions,
           resolvedSources: contextBundle.sources,
           documentChunking: contextBundle.documentChunking,
+          documentIntelligence: contextBundle.documentIntelligence,
+          agentControl: contextBundle.agentControl,
+          asyncAgentWork: contextBundle.asyncAgentWork,
+          debugTrace: contextBundle.debugTrace,
+          truthfulExecutionClaims,
           currentUserName,
           history,
-          orgContext,
+          orgContext: runtimeOrgContext,
           resolvedContextText: contextBundle.text,
         });
         await prisma.conversation.update({
@@ -829,7 +970,18 @@ export async function POST(
           history,
         });
 
-        agentReply = response.content;
+        const guarded = enforceTruthfulExecutionClaims(response.content, truthfulExecutionClaims);
+        if (!guarded.validation.ok) {
+          console.warn(
+            "[chat/messages][truthful-execution-guard]",
+            JSON.stringify({
+              conversationId: conversation.id,
+              agentId: agent.id,
+              violations: guarded.validation.violations,
+            })
+          );
+        }
+        agentReply = guarded.answer;
 
         await prisma.aIAgent.update({
           where: { id: agent.id },
@@ -940,7 +1092,7 @@ export async function DELETE(
 
   try {
     const { id } = await params;
-    const conversation = await getConversationForUser(id, session.user.id);
+    const conversation = await getReadableConversationForUser(id, session.user.id);
 
     if (!conversation) {
       return NextResponse.json({ error: "Conversation not found" }, { status: 404 });

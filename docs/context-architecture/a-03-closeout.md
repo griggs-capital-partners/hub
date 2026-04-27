@@ -112,6 +112,20 @@ Current strategy outcome:
 
 ## Next-Track Handoff Prompts
 
+### A-04 Agentic Context Backbone Status
+
+Current state:
+
+- A-04a Agentic Context Backbone first slice is complete: durable document memory exists through knowledge artifacts and inspection tasks, learned artifacts are reusable first-class context, parser output is a supporting signal, and the ContextAssembler is artifact-aware rather than parser-specific.
+- A-04b Inspection Tool Broker + Capability Registry is complete: inspection now routes through an approved capability registry, only registered executable tools run, and unavailable/unapproved capabilities are recorded as unmet recommendations.
+- A-04c Capability Governance + Evaluation Harness is current: tool approval status, runtime class, data policy, side effects, cost/latency policy, eligibility reasoning, unmet review items, ToolCards, CapabilityCards, and benchmark fixtures are being layered around the broker.
+
+Next after A-04c:
+
+- Add the first real rendered-page inspection / page snapshot capability behind the broker.
+- Then add OCR and vision capabilities behind the same approval, governance, evaluation, trace, artifact, and memory loop.
+- Do not return to the original agency-first architecture inspection prompt; the active direction is capability-governed source inspection feeding durable artifacts and context assembly.
+
 ### 1. PDF Deep Intelligence
 
 Goal:

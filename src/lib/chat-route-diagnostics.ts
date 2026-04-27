@@ -1,4 +1,6 @@
 import { prisma } from "@/lib/prisma";
+import type { ConversationArchiveScope } from "@/lib/chat";
+import { getReadableConversationAccessReason } from "@/lib/chat";
 
 type TeamChatRouteSessionDiagnostic = {
   userId: string | null;
@@ -16,6 +18,9 @@ type TeamChatDetailRouteDiagnosticParams = {
   session: TeamChatRouteSessionDiagnostic;
   conversationId: string;
   accessFound: boolean;
+  archived?: ConversationArchiveScope;
+  readableHelperPassed?: boolean;
+  postHelperLookupFailed?: boolean;
 };
 
 type ConversationDiagnosticSnapshot = {
@@ -25,7 +30,31 @@ type ConversationDiagnosticSnapshot = {
   projectId: string | null;
   activeMembershipCountForUser: number;
   userMembershipRemovedAt: Array<string | null>;
+  messageCount: number | null;
 };
+
+type TeamChatDetailRouteDiagnostic = ConversationDiagnosticSnapshot & {
+  route: string;
+  sessionUserId: string | null;
+  sessionUserEmail: string | null;
+  requestedConversationId: string;
+  accessFound: boolean;
+  readableHelperPassed: boolean;
+  postHelperLookupFailed: boolean;
+  notFoundReason: string | null;
+};
+
+function emptyConversationSnapshot(conversationId: string): ConversationDiagnosticSnapshot {
+  return {
+    conversationId,
+    conversationExists: false,
+    archivedAt: null,
+    projectId: null,
+    activeMembershipCountForUser: 0,
+    userMembershipRemovedAt: [],
+    messageCount: null,
+  };
+}
 
 function shouldLogTeamChatRouteDiagnostics() {
   return process.env.NODE_ENV !== "production";
@@ -60,6 +89,11 @@ async function loadConversationSnapshots(
           removedAt: true,
         },
       },
+      _count: {
+        select: {
+          messages: true,
+        },
+      },
     },
   });
 
@@ -78,6 +112,7 @@ async function loadConversationSnapshots(
           projectId: conversation.chatProjectId ?? null,
           activeMembershipCountForUser: conversation.members.filter((member) => member.removedAt === null).length,
           userMembershipRemovedAt,
+          messageCount: conversation._count.messages,
         } satisfies ConversationDiagnosticSnapshot,
       ] as const;
     })
@@ -96,14 +131,7 @@ export async function logTeamChatListRouteDiagnostics(
     params.conversationIds
   );
   const diagnostics = params.conversationIds.map((conversationId) => (
-    snapshots.get(conversationId) ?? {
-      conversationId,
-      conversationExists: false,
-      archivedAt: null,
-      projectId: null,
-      activeMembershipCountForUser: 0,
-      userMembershipRemovedAt: [],
-    }
+    snapshots.get(conversationId) ?? emptyConversationSnapshot(conversationId)
   ));
 
   console.info(
@@ -121,32 +149,61 @@ export async function logTeamChatListRouteDiagnostics(
 export async function logTeamChatDetailRouteDiagnostics(
   params: TeamChatDetailRouteDiagnosticParams
 ) {
-  if (!shouldLogTeamChatRouteDiagnostics()) {
-    return;
+  if (!shouldLogTeamChatRouteDiagnostics() && params.accessFound) {
+    return {
+      route: params.route,
+      sessionUserId: params.session.userId,
+      sessionUserEmail: params.session.email,
+      requestedConversationId: params.conversationId,
+      accessFound: true,
+      conversationId: params.conversationId,
+      conversationExists: true,
+      archivedAt: null,
+      projectId: null,
+      activeMembershipCountForUser: 0,
+      userMembershipRemovedAt: [],
+      messageCount: null,
+      readableHelperPassed: params.readableHelperPassed ?? true,
+      postHelperLookupFailed: params.postHelperLookupFailed ?? false,
+      notFoundReason: null,
+    } satisfies TeamChatDetailRouteDiagnostic;
   }
 
   const snapshots = await loadConversationSnapshots(
     params.session.userId,
     [params.conversationId]
   );
-  const snapshot = snapshots.get(params.conversationId) ?? {
-    conversationId: params.conversationId,
-    conversationExists: false,
-    archivedAt: null,
-    projectId: null,
-    activeMembershipCountForUser: 0,
-    userMembershipRemovedAt: [],
+  const snapshot = snapshots.get(params.conversationId) ?? emptyConversationSnapshot(params.conversationId);
+  const notFoundReason = params.accessFound
+    ? null
+    : getReadableConversationAccessReason(
+        snapshot.conversationExists
+          ? {
+              archivedAt: snapshot.archivedAt ? new Date(snapshot.archivedAt) : null,
+              members: snapshot.userMembershipRemovedAt.map((removedAt) => ({
+                userId: params.session.userId,
+                removedAt: removedAt ? new Date(removedAt) : null,
+              })),
+            }
+          : null,
+        params.session.userId ?? "",
+        { archived: params.archived }
+      );
+  const diagnostic: TeamChatDetailRouteDiagnostic = {
+    route: params.route,
+    sessionUserId: params.session.userId,
+    sessionUserEmail: params.session.email,
+    requestedConversationId: params.conversationId,
+    accessFound: params.accessFound,
+    readableHelperPassed: params.readableHelperPassed ?? params.accessFound,
+    postHelperLookupFailed: params.postHelperLookupFailed ?? false,
+    ...snapshot,
+    notFoundReason,
   };
 
-  console.info(
-    "[team-chat-route-diagnostic]",
-    JSON.stringify({
-      route: params.route,
-      sessionUserId: params.session.userId,
-      sessionUserEmail: params.session.email,
-      requestedConversationId: params.conversationId,
-      accessFound: params.accessFound,
-      ...snapshot,
-    })
-  );
+  if (shouldLogTeamChatRouteDiagnostics() || !params.accessFound) {
+    console.info("[team-chat-route-diagnostic]", JSON.stringify(diagnostic));
+  }
+
+  return diagnostic;
 }

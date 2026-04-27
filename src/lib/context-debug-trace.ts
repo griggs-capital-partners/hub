@@ -1,10 +1,17 @@
 import { estimateTextTokens } from "./context-token-budget";
+import {
+  evaluateAgentControlSurface,
+  type AgentControlDebugSnapshot,
+} from "./agent-control-surface";
+import type { AsyncAgentWorkDebugSnapshot } from "./async-agent-work-queue";
 import type {
   ContextBudgetProfile,
   ContextChunkSelection,
   ContextCrossReference,
   ContextDebugChunk,
   ContextDebugDocument,
+  ContextDebugInspectionTask,
+  ContextDebugKnowledgeArtifact,
   ContextDebugTrace,
   ContextLocation,
   ContextSelectionReason,
@@ -14,6 +21,7 @@ import type {
 import type {
   ConversationContextBundle,
   ConversationContextDocumentChunkingDocument,
+  ConversationContextDocumentIntelligenceDocument,
   ConversationContextSourceAuthority,
   ConversationContextSourceDecision,
 } from "./conversation-context";
@@ -24,8 +32,11 @@ type BuildConversationContextDebugTraceParams = {
   currentUserPrompt?: string | null;
   bundle: Pick<
     ConversationContextBundle,
-    "text" | "sourceSelection" | "sourceDecisions" | "documentChunking"
-  >;
+    "text" | "sourceSelection" | "sourceDecisions" | "documentChunking" | "documentIntelligence" | "progressiveAssembly"
+  > & {
+    agentControl?: AgentControlDebugSnapshot | null;
+    asyncAgentWork?: AsyncAgentWorkDebugSnapshot | null;
+  };
 };
 
 function normalizeContextSourceType(value: string | null | undefined): ContextSourceType | string {
@@ -222,6 +233,85 @@ function buildReferencedLocation(params: {
   if (normalizedSourceType === "time_series" || normalizedSourceType === "live_data") {
     return {
       kind: "time_series_location",
+      ...shared,
+    };
+  }
+
+  return {
+    kind: "generic_location",
+    ...shared,
+  };
+}
+
+function buildDocumentIntelligenceLocation(params: {
+  document: ConversationContextDocumentIntelligenceDocument;
+  label: string | null;
+  pageNumberStart: number | null;
+  pageNumberEnd: number | null;
+  pageLabelStart: string | null;
+  pageLabelEnd: string | null;
+  tableId: string | null;
+  figureId: string | null;
+  sectionPath: string[];
+  headingPath: string[];
+}): ContextLocation {
+  const normalizedSourceType = normalizeContextSourceType(params.document.sourceType);
+  const sectionPath = params.sectionPath.filter(Boolean);
+  const shared = {
+    sourceId: params.document.sourceId,
+    sourceType: normalizedSourceType,
+    filename: params.document.filename,
+    title: params.document.filename,
+    pageNumber: params.pageNumberStart,
+    pageRange:
+      params.pageNumberStart != null &&
+      params.pageNumberEnd != null &&
+      params.pageNumberStart !== params.pageNumberEnd
+        ? {
+            start: params.pageNumberStart,
+            end: params.pageNumberEnd,
+          }
+        : undefined,
+    headingPath: params.headingPath.filter(Boolean),
+    sectionPath,
+    articlePath: buildArticlePath(sectionPath),
+    tableId: params.tableId,
+    figureId: params.figureId,
+    label: params.label,
+  };
+
+  if (hasLegalStructure(sectionPath)) {
+    return {
+      kind: "legal_section_location",
+      ...shared,
+    };
+  }
+
+  if (normalizedSourceType === "pptx" || normalizedSourceType === "presentation") {
+    return {
+      kind: "slide_location",
+      ...shared,
+    };
+  }
+
+  if (normalizedSourceType === "spreadsheet") {
+    return {
+      kind: "spreadsheet_range_location",
+      ...shared,
+    };
+  }
+
+  if (
+    normalizedSourceType === "thread_document" ||
+    normalizedSourceType === "company_document" ||
+    normalizedSourceType === "document" ||
+    normalizedSourceType === "text" ||
+    normalizedSourceType === "markdown" ||
+    normalizedSourceType === "pdf" ||
+    normalizedSourceType === "docx"
+  ) {
+    return {
+      kind: "document_location",
       ...shared,
     };
   }
@@ -480,6 +570,205 @@ function buildDebugChunk(params: {
   };
 }
 
+function buildDebugKnowledgeArtifact(params: {
+  document: ConversationContextDocumentIntelligenceDocument;
+  artifact: ConversationContextDocumentIntelligenceDocument["artifacts"][number];
+}): ContextDebugKnowledgeArtifact {
+  return {
+    id: `${params.document.sourceId}:artifact:${params.artifact.artifactKey}`,
+    sourceId: params.document.sourceId,
+    documentId: params.document.attachmentId || params.document.fileId || params.document.sourceId,
+    sourceType: normalizeContextSourceType(params.document.sourceType),
+    kind: params.artifact.kind,
+    status: params.artifact.status,
+    title: params.artifact.title,
+    summary: params.artifact.summary,
+    textPreview: params.artifact.contentPreview,
+    tokenEstimate: params.artifact.approxTokenCount,
+    confidence: params.artifact.confidence,
+    tool: params.artifact.tool,
+    selected: params.artifact.selected,
+    metadata: {
+      artifactKey: params.artifact.artifactKey,
+      pageNumberStart: params.artifact.pageNumberStart,
+      pageNumberEnd: params.artifact.pageNumberEnd,
+      pageLabelStart: params.artifact.pageLabelStart,
+      pageLabelEnd: params.artifact.pageLabelEnd,
+      tableId: params.artifact.tableId,
+      figureId: params.artifact.figureId,
+      sectionPath: params.artifact.sectionPath,
+      headingPath: params.artifact.headingPath,
+      relevanceHints: params.artifact.relevanceHints,
+      payload: params.artifact.payload,
+      updatedAt: params.artifact.updatedAt,
+    },
+    sourceBodyLocation: buildDocumentIntelligenceLocation({
+      document: params.document,
+      label: params.artifact.sourceLocationLabel,
+      pageNumberStart: params.artifact.pageNumberStart,
+      pageNumberEnd: params.artifact.pageNumberEnd,
+      pageLabelStart: params.artifact.pageLabelStart,
+      pageLabelEnd: params.artifact.pageLabelEnd,
+      tableId: params.artifact.tableId,
+      figureId: params.artifact.figureId,
+      sectionPath: params.artifact.sectionPath,
+      headingPath: params.artifact.headingPath,
+    }),
+  };
+}
+
+function isInspectionTraceRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getInspectionTraceRecord(value: Record<string, unknown> | null | undefined, key: string) {
+  const raw = value?.[key];
+  return isInspectionTraceRecord(raw) ? raw : null;
+}
+
+function getInspectionTraceString(value: Record<string, unknown> | null, key: string) {
+  const raw = value?.[key];
+  return typeof raw === "string" ? raw : null;
+}
+
+function getInspectionTraceNumber(value: Record<string, unknown> | null, key: string) {
+  const raw = value?.[key];
+  return typeof raw === "number" ? raw : null;
+}
+
+function getInspectionTraceBoolean(value: Record<string, unknown> | null, key: string) {
+  const raw = value?.[key];
+  return typeof raw === "boolean" ? raw : null;
+}
+
+function getInspectionTraceStringArray(value: Record<string, unknown> | null, key: string) {
+  const raw = value?.[key];
+  return Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function getInspectionTraceRecordArray(value: Record<string, unknown> | null, key: string) {
+  const raw = value?.[key];
+  return Array.isArray(raw)
+    ? raw.filter((entry): entry is Record<string, unknown> => isInspectionTraceRecord(entry))
+    : [];
+}
+
+function buildDebugInspectionTask(params: {
+  document: ConversationContextDocumentIntelligenceDocument;
+  task: ConversationContextDocumentIntelligenceDocument["inspectionTasks"][number];
+}): ContextDebugInspectionTask {
+  const toolTrace = getInspectionTraceRecord(params.task.result, "toolTrace");
+  const requestedCapability =
+    params.task.requestedCapability ?? getInspectionTraceString(toolTrace, "requestedCapability");
+  const selectedTool = params.task.selectedTool ?? getInspectionTraceString(toolTrace, "selectedTool");
+  const selectionReason = params.task.selectionReason ?? getInspectionTraceString(toolTrace, "selectionReason");
+  const candidateTools = params.task.candidateTools ?? getInspectionTraceStringArray(toolTrace, "candidateTools");
+  const eligibleTools = params.task.eligibleTools ?? getInspectionTraceRecordArray(toolTrace, "eligibleTools");
+  const ineligibleTools = params.task.ineligibleTools ?? getInspectionTraceRecordArray(toolTrace, "ineligibleTools");
+  const eligibilityReasons =
+    params.task.eligibilityReasons ?? getInspectionTraceRecordArray(toolTrace, "eligibilityReasons");
+  const approvalStatus = params.task.approvalStatus ?? getInspectionTraceString(toolTrace, "approvalStatus");
+  const runtimeClass = params.task.runtimeClass ?? getInspectionTraceString(toolTrace, "runtimeClass");
+  const dataClassPolicy = params.task.dataClassPolicy ?? getInspectionTraceRecord(toolTrace, "dataClassPolicy");
+  const sideEffectLevel = params.task.sideEffectLevel ?? getInspectionTraceString(toolTrace, "sideEffectLevel");
+  const costClass = params.task.costClass ?? getInspectionTraceString(toolTrace, "costClass");
+  const latencyClass = params.task.latencyClass ?? getInspectionTraceString(toolTrace, "latencyClass");
+  const benchmarkFixtureIds =
+    params.task.benchmarkFixtureIds ?? getInspectionTraceStringArray(toolTrace, "benchmarkFixtureIds");
+  const governanceTrace = params.task.governanceTrace ?? getInspectionTraceRecord(toolTrace, "governanceTrace");
+  const confidence = params.task.confidence ?? getInspectionTraceNumber(toolTrace, "confidence");
+  const limitations = params.task.limitations ?? getInspectionTraceStringArray(toolTrace, "limitations");
+  const fallbackRecommendation =
+    params.task.fallbackRecommendation ?? getInspectionTraceString(toolTrace, "fallbackRecommendation");
+  const recommendedNextCapabilities =
+    params.task.recommendedNextCapabilities ?? getInspectionTraceStringArray(toolTrace, "recommendedNextCapabilities");
+  const reusable = params.task.reusable ?? getInspectionTraceBoolean(toolTrace, "reusable");
+  const unmetCapability = params.task.unmetCapability ?? getInspectionTraceRecord(toolTrace, "unmetCapability");
+  const unmetCapabilityReviewItem =
+    params.task.unmetCapabilityReviewItem ?? getInspectionTraceRecord(toolTrace, "unmetCapabilityReviewItem");
+  const toolTraceEvents = params.task.toolTraceEvents ?? getInspectionTraceRecordArray(toolTrace, "traceEvents");
+
+  return {
+    id: `${params.document.sourceId}:inspection:${params.task.taskKey}`,
+    sourceId: params.document.sourceId,
+    documentId: params.document.attachmentId || params.document.fileId || params.document.sourceId,
+    sourceType: normalizeContextSourceType(params.document.sourceType),
+    kind: params.task.kind,
+    status: params.task.status,
+    tool: params.task.tool,
+    requestedCapability: requestedCapability ?? null,
+    selectedTool: selectedTool ?? null,
+    selectionReason: selectionReason ?? null,
+    candidateTools: [...candidateTools],
+    eligibleTools: [...eligibleTools],
+    ineligibleTools: [...ineligibleTools],
+    eligibilityReasons: [...eligibilityReasons],
+    approvalStatus: approvalStatus ?? null,
+    runtimeClass: runtimeClass ?? null,
+    dataClassPolicy: dataClassPolicy ?? null,
+    sideEffectLevel: sideEffectLevel ?? null,
+    costClass: costClass ?? null,
+    latencyClass: latencyClass ?? null,
+    benchmarkFixtureIds: [...benchmarkFixtureIds],
+    governanceTrace: governanceTrace ?? null,
+    confidence: confidence ?? null,
+    limitations: [...limitations],
+    fallbackRecommendation: fallbackRecommendation ?? null,
+    recommendedNextCapabilities: [...recommendedNextCapabilities],
+    reusable: reusable ?? null,
+    unmetCapability: unmetCapability ?? null,
+    unmetCapabilityReviewItem: unmetCapabilityReviewItem ?? null,
+    rationale: params.task.rationale,
+    resultSummary: params.task.resultSummary,
+    unresolved: [...params.task.unresolved],
+    createdArtifactKeys: [...params.task.createdArtifactKeys],
+    createdArtifactIds: params.task.createdArtifactKeys.map(
+      (artifactKey) => `${params.document.sourceId}:artifact:${artifactKey}`
+    ),
+    toolTraceEvents: [...toolTraceEvents],
+    sourceBodyLocation: buildDocumentIntelligenceLocation({
+      document: params.document,
+      label: params.task.sourceLocationLabel,
+      pageNumberStart: params.task.pageNumberStart,
+      pageNumberEnd: params.task.pageNumberEnd,
+      pageLabelStart: params.task.pageLabelStart,
+      pageLabelEnd: params.task.pageLabelEnd,
+      tableId: params.task.tableId,
+      figureId: params.task.figureId,
+      sectionPath: params.task.sectionPath,
+      headingPath: params.task.headingPath,
+    }),
+    metadata: {
+      taskKey: params.task.taskKey,
+      completedAt: params.task.completedAt,
+      updatedAt: params.task.updatedAt,
+      result: params.task.result,
+      requestedCapability: requestedCapability ?? null,
+      selectedTool: selectedTool ?? null,
+      selectionReason: selectionReason ?? null,
+      candidateTools,
+      eligibleTools,
+      ineligibleTools,
+      eligibilityReasons,
+      approvalStatus: approvalStatus ?? null,
+      runtimeClass: runtimeClass ?? null,
+      dataClassPolicy: dataClassPolicy ?? null,
+      sideEffectLevel: sideEffectLevel ?? null,
+      costClass: costClass ?? null,
+      latencyClass: latencyClass ?? null,
+      benchmarkFixtureIds,
+      governanceTrace: governanceTrace ?? null,
+      confidence: confidence ?? null,
+      limitations,
+      fallbackRecommendation: fallbackRecommendation ?? null,
+      recommendedNextCapabilities,
+      reusable: reusable ?? null,
+      unmetCapability: unmetCapability ?? null,
+      unmetCapabilityReviewItem: unmetCapabilityReviewItem ?? null,
+    },
+  };
+}
+
 function buildBudgetProfile(
   documentChunking: ConversationContextBundle["documentChunking"]
 ): ContextBudgetProfile | null {
@@ -531,8 +820,10 @@ function buildInspectorParityKey(params: {
   requestedSourceIds: string[];
   selectedChunkIds: string[];
   skippedChunkIds: string[];
+  selectedArtifactIds: string[];
   estimatedTokens: number;
   documentStrategy: string;
+  agentControlKey: string;
 }) {
   return [
     params.conversationId,
@@ -541,7 +832,9 @@ function buildInspectorParityKey(params: {
     `requested=${params.requestedSourceIds.join(",")}`,
     `selected=${params.selectedChunkIds.join(",")}`,
     `skipped=${params.skippedChunkIds.join(",")}`,
+    `artifacts=${params.selectedArtifactIds.join(",")}`,
     `tokens=${params.estimatedTokens}`,
+    `agentControl=${params.agentControlKey}`,
   ].join("|");
 }
 
@@ -563,15 +856,50 @@ export function buildConversationContextDebugTrace(
   const skippedChunkIds = params.bundle.documentChunking.documents.flatMap((document) =>
     document.skippedChunkIndexes.map((chunkIndex) => buildChunkId(document, chunkIndex))
   );
+  const selectedArtifactIds = params.bundle.documentIntelligence.documents.flatMap((document) =>
+    document.artifacts
+      .filter((artifact) => artifact.selected)
+      .map((artifact) => `${document.sourceId}:artifact:${artifact.artifactKey}`)
+  );
+  const knowledgeArtifacts = params.bundle.documentIntelligence.documents.flatMap((document) =>
+    document.artifacts.map((artifact) =>
+      buildDebugKnowledgeArtifact({
+        document,
+        artifact,
+      })
+    )
+  );
+  const inspections = params.bundle.documentIntelligence.documents.flatMap((document) =>
+    document.inspectionTasks.map((task) =>
+      buildDebugInspectionTask({
+        document,
+        task,
+      })
+    )
+  );
   const renderedContextEstimatedTokens = estimateTextTokens(params.bundle.text);
+  const agentControl =
+    params.bundle.agentControl ??
+    evaluateAgentControlSurface({
+      conversationId: params.conversationId,
+      request: params.currentUserPrompt ?? null,
+    });
   const inspectorParityKey = buildInspectorParityKey({
     conversationId: params.conversationId,
     requestMode: params.bundle.sourceSelection.requestMode,
     requestedSourceIds: params.bundle.sourceSelection.requestedSourceIds,
     selectedChunkIds,
     skippedChunkIds,
+    selectedArtifactIds,
     estimatedTokens: renderedContextEstimatedTokens,
     documentStrategy: params.bundle.documentChunking.strategy,
+    agentControlKey: [
+      agentControl.taskFidelityLevel,
+      agentControl.runtimeBudgetProfile,
+      agentControl.executionMode,
+      agentControl.approvalRequired ? "approval" : "no-approval",
+      agentControl.blockedByPolicy ? "blocked" : "not-blocked",
+    ].join(":"),
   });
 
   return {
@@ -586,9 +914,13 @@ export function buildConversationContextDebugTrace(
       activeAgentIds: [...params.authority.activeAgentIds],
     },
     budgetProfile: buildBudgetProfile(params.bundle.documentChunking),
+    agentControl,
+    asyncAgentWork: params.bundle.asyncAgentWork ?? null,
     sourceEligibility: params.bundle.sourceDecisions.map(buildSourceEligibility),
     documents,
     chunks,
+    knowledgeArtifacts,
+    inspections,
     occurrence: buildOccurrenceTrace(params.bundle.documentChunking),
     retrieval: params.bundle.sourceDecisions
       .filter((sourceDecision) => sourceDecision.execution.status === "executed")
@@ -612,11 +944,13 @@ export function buildConversationContextDebugTrace(
     assembly: {
       selectedChunkIds,
       skippedChunkIds,
+      selectedArtifactIds,
       estimatedTokens: renderedContextEstimatedTokens,
       estimatedSelectedTokens: documents.reduce(
         (sum, document) => sum + (document.selectedTokenEstimate ?? 0),
         0
       ),
+      estimatedArtifactTokens: params.bundle.documentIntelligence.selectedApproxTokenCount,
       documentChunkBudgetTokens: params.bundle.documentChunking.budget.budgetInputProvided
         ? params.bundle.documentChunking.budget.documentContextBudgetTokens
         : null,
@@ -631,6 +965,7 @@ export function buildConversationContextDebugTrace(
         ? params.bundle.documentChunking.budget.fallbackProfileUsed
         : null,
       detail: params.bundle.documentChunking.budget.detail,
+      progressive: params.bundle.progressiveAssembly ?? null,
     },
     renderedContext: {
       text: null,

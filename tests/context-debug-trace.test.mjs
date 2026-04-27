@@ -182,6 +182,11 @@ function makeBundle(overrides = {}) {
     occurrence: null,
     documents: [],
   };
+  const defaultDocumentIntelligence = {
+    selectedArtifactKeys: [],
+    selectedApproxTokenCount: 0,
+    documents: [],
+  };
 
   return {
     text: overrides.text ?? "",
@@ -205,6 +210,11 @@ function makeBundle(overrides = {}) {
       ...defaultDocumentChunking,
       ...(overrides.documentChunking ?? {}),
     },
+    documentIntelligence: {
+      ...defaultDocumentIntelligence,
+      ...(overrides.documentIntelligence ?? {}),
+    },
+    progressiveAssembly: overrides.progressiveAssembly,
   };
 }
 
@@ -246,12 +256,241 @@ await runTest("maps an empty executed bundle without mutating the input", async 
   assert.equal(trace.retrieval[0].sourceId, "thread_documents");
   assert.deepEqual(trace.retrieval[0].selectedChunkIds, []);
   assert.deepEqual(trace.retrieval[0].skippedChunkIds, []);
+  assert.deepEqual(trace.knowledgeArtifacts, []);
+  assert.deepEqual(trace.inspections, []);
   assert.equal(trace.budgetProfile, null);
   assert.equal(trace.assembly.documentChunkBudgetTokens, null);
+  assert.deepEqual(trace.assembly.selectedArtifactIds, []);
+  assert.equal(trace.assembly.estimatedArtifactTokens, 0);
   assert.equal(trace.occurrence, null);
   assert.equal(trace.renderedContext.text, null);
   assert.equal(trace.renderedContext.safeTextPreview, null);
   assert.equal(trace.inspectorParity.payloadMatchesRenderedContext, true);
+});
+
+await runTest("maps progressive assembly metadata into the debug trace", async () => {
+  const progressiveAssembly = {
+    plan: {
+      id: "assembly:decision-1",
+      controlDecisionId: "decision-1",
+      passes: [
+        { name: "artifact_reuse", status: "completed" },
+        { name: "raw_source_excerpt_expansion", status: "completed" },
+      ],
+      stopReason: "sufficient_context",
+    },
+    passResults: [
+      {
+        pass: { name: "artifact_reuse", status: "completed" },
+        reusedArtifactIds: ["doc-t5:artifact:table_candidate:15"],
+        expandedExcerptIds: [],
+      },
+      {
+        pass: { name: "raw_source_excerpt_expansion", status: "completed" },
+        reusedArtifactIds: [],
+        expandedExcerptIds: ["doc-t5:15"],
+      },
+    ],
+    packingRequests: [{ passName: "artifact_reuse", sourceCoverageTarget: "relevant_artifacts_only" }],
+    packingResults: [
+      {
+        passName: "artifact_reuse",
+        selectedCandidates: [{ id: "doc-t5:artifact:table_candidate:15", kind: "artifact" }],
+        excludedCandidates: [],
+      },
+    ],
+    gaps: [{ id: "missing_table_body:doc-t5:artifact", kind: "missing_table_body" }],
+    sufficiency: { status: "sufficient_with_limitations" },
+    stopReason: "sufficient_context",
+    recommendedNextAction: "answer_with_limitations",
+    traceEvents: [{ type: "sufficiency_assessed" }],
+  };
+  const trace = buildConversationContextDebugTrace({
+    conversationId: "thread-progressive",
+    authority: makeAuthority(),
+    currentUserPrompt: "What is in the page 15 table?",
+    bundle: makeBundle({ progressiveAssembly }),
+  });
+
+  assert.deepEqual(
+    trace.assembly.progressive.plan.passes.map((pass) => pass.name),
+    ["artifact_reuse", "raw_source_excerpt_expansion"]
+  );
+  assert.deepEqual(
+    trace.assembly.progressive.passResults[0].reusedArtifactIds,
+    ["doc-t5:artifact:table_candidate:15"]
+  );
+  assert.equal(trace.assembly.progressive.sufficiency.status, "sufficient_with_limitations");
+  assert.equal(trace.renderedContext.text, null);
+});
+
+await runTest("maps learned document artifacts and inspection tasks into the trace", async () => {
+  const bundle = makeBundle({
+    documentIntelligence: {
+      selectedArtifactKeys: ["table_candidate:15", "extraction_warning:15:table_body_missing"],
+      selectedApproxTokenCount: 66,
+      documents: [
+        {
+          sourceId: "doc-t5",
+          attachmentId: "doc-t5",
+          fileId: "doc-t5",
+          filename: "T5 Summary Deck V1.7ext.pdf",
+          sourceType: "pdf",
+          state: {
+            sourceDocumentId: "doc-t5",
+            sourceType: "pdf",
+            filename: "T5 Summary Deck V1.7ext.pdf",
+            stateStatus: "partial",
+            artifactCount: 2,
+            warningArtifactCount: 1,
+            openQuestionArtifactCount: 0,
+            selectedArtifactKeys: ["table_candidate:15", "extraction_warning:15:table_body_missing"],
+            lastInspectedAt: "2026-04-26T12:00:00.000Z",
+            lastInspectionTool: "pdf_page_structure_classification",
+          },
+          artifacts: [
+            {
+              artifactKey: "table_candidate:15",
+              kind: "table_candidate",
+              status: "partial",
+              title: "Likely table detected on page 15",
+              summary: "Sparse table body extraction.",
+              contentPreview: "Probable true data table detected on page 15.",
+              tool: "pdf_page_structure_classification",
+              confidence: 0.45,
+              approxTokenCount: 30,
+              sourceLocationLabel: "T5 Summary Deck V1.7ext.pdf - page 15 - Smackover Water Chemistry",
+              pageNumberStart: 15,
+              pageNumberEnd: 15,
+              pageLabelStart: null,
+              pageLabelEnd: null,
+              tableId: null,
+              figureId: null,
+              sectionPath: [],
+              headingPath: [],
+              relevanceHints: ["table", "Smackover Water Chemistry"],
+              selected: true,
+              payload: { reasonCodes: ["table_title_keyword", "title_only_table_inference"] },
+              createdAt: "2026-04-26T12:00:00.000Z",
+              updatedAt: "2026-04-26T12:00:00.000Z",
+            },
+          ],
+          inspectionTasks: [
+            {
+              taskKey: "inspect_table_candidate:15",
+              kind: "inspect_table",
+              status: "completed",
+              tool: "pdf_page_structure_classification",
+              rationale: "Likely table detected from PDF page classification.",
+              resultSummary: "Sparse table body extraction.",
+              unresolved: ["No structured row or column body was recovered from the current parser output."],
+              createdArtifactKeys: ["table_candidate:15"],
+              sourceLocationLabel: "T5 Summary Deck V1.7ext.pdf - page 15 - Smackover Water Chemistry",
+              pageNumberStart: 15,
+              pageNumberEnd: 15,
+              pageLabelStart: null,
+              pageLabelEnd: null,
+              tableId: null,
+              figureId: null,
+              sectionPath: [],
+              headingPath: [],
+              completedAt: "2026-04-26T12:00:00.000Z",
+              createdAt: "2026-04-26T12:00:00.000Z",
+              updatedAt: "2026-04-26T12:00:00.000Z",
+              result: {
+                reasonCodes: ["table_title_keyword", "title_only_table_inference"],
+                toolTrace: {
+                  requestedCapability: "pdf_table_detection",
+                  selectedTool: "pdf_table_candidate_detection",
+                  selectionReason: "Selected approved built-in table detector.",
+                  candidateTools: ["pdf_table_candidate_detection"],
+                  eligibleTools: [
+                    {
+                      toolId: "pdf_table_candidate_detection",
+                      eligible: true,
+                      approvalStatus: "built_in",
+                      runtimeClass: "local",
+                    },
+                  ],
+                  ineligibleTools: [],
+                  eligibilityReasons: [
+                    {
+                      toolId: "pdf_table_candidate_detection",
+                      eligible: true,
+                      reasons: ["Approval status built_in permits execution."],
+                    },
+                  ],
+                  approvalStatus: "built_in",
+                  runtimeClass: "local",
+                  dataClassPolicy: {
+                    allowedDataClasses: ["public", "internal", "confidential"],
+                    tenantScoped: true,
+                    leavesTenantBoundary: false,
+                    storesExternalCopy: false,
+                  },
+                  sideEffectLevel: "creates_internal_artifact",
+                  costClass: "free_local",
+                  latencyClass: "sync_safe",
+                  benchmarkFixtureIds: ["t5_pdf_page_15_visible_table"],
+                  governanceTrace: {
+                    requestedCapability: "pdf_table_detection",
+                    candidateTools: ["pdf_table_candidate_detection"],
+                    eligibleTools: ["pdf_table_candidate_detection"],
+                    ineligibleTools: [],
+                    selectedTool: "pdf_table_candidate_detection",
+                    executedUnapprovedTool: false,
+                  },
+                  confidence: 0.45,
+                  limitations: ["Detected the table candidate, but did not recover missing body cells."],
+                  fallbackRecommendation: "Request approval for OCR or vision page understanding.",
+                  recommendedNextCapabilities: ["ocr", "vision_page_understanding"],
+                  reusable: true,
+                  unmetCapability: null,
+                  unmetCapabilityReviewItem: null,
+                  createdArtifactKeys: ["table_candidate:15"],
+                  traceEvents: [
+                    {
+                      type: "tool_selected",
+                      capability: "pdf_table_detection",
+                      toolId: "pdf_table_candidate_detection",
+                      detail: "Selected approved built-in table detector.",
+                    },
+                  ],
+                  executedUnapprovedTool: false,
+                },
+              },
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  const trace = buildConversationContextDebugTrace({
+    conversationId: "thread-1",
+    authority: makeAuthority(),
+    currentUserPrompt: "What do we know about the water chemistry table?",
+    bundle,
+  });
+
+  assert.equal(trace.knowledgeArtifacts.length, 1);
+  assert.equal(trace.knowledgeArtifacts[0].kind, "table_candidate");
+  assert.equal(trace.knowledgeArtifacts[0].selected, true);
+  assert.equal(trace.knowledgeArtifacts[0].sourceBodyLocation?.pageNumber, 15);
+  assert.equal(trace.inspections.length, 1);
+  assert.equal(trace.inspections[0].kind, "inspect_table");
+  assert.equal(trace.inspections[0].tool, "pdf_page_structure_classification");
+  assert.equal(trace.inspections[0].requestedCapability, "pdf_table_detection");
+  assert.equal(trace.inspections[0].selectedTool, "pdf_table_candidate_detection");
+  assert.equal(trace.inspections[0].approvalStatus, "built_in");
+  assert.equal(trace.inspections[0].runtimeClass, "local");
+  assert.equal(trace.inspections[0].sideEffectLevel, "creates_internal_artifact");
+  assert.equal(trace.inspections[0].benchmarkFixtureIds.includes("t5_pdf_page_15_visible_table"), true);
+  assert.equal(trace.inspections[0].governanceTrace?.selectedTool, "pdf_table_candidate_detection");
+  assert.equal(trace.inspections[0].recommendedNextCapabilities.includes("ocr"), true);
+  assert.equal(trace.inspections[0].toolTraceEvents.length, 1);
+  assert.equal(trace.assembly.selectedArtifactIds.length, 1);
+  assert.equal(trace.assembly.estimatedArtifactTokens, 66);
 });
 
 await runTest("maps plan-mode exclusions from source decisions without changing execution ownership", async () => {

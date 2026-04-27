@@ -25,12 +25,57 @@ import {
   CHAT_THREAD_DOCUMENT_CONTEXT_CHARS,
 } from "./chat-runtime-budgets";
 import { buildConversationContextDebugTrace } from "./context-debug-trace";
+import {
+  planAsyncAgentWorkItems,
+  runAsyncAgentWorkItem,
+  toAsyncAgentWorkDebugSnapshot,
+  upsertAsyncAgentWorkItem,
+  type AsyncAgentWorkDebugSnapshot,
+  type AsyncAgentWorkItem,
+} from "./async-agent-work-queue";
+import {
+  buildArtifactPackingCandidate,
+  buildRawExcerptPackingCandidate,
+  type ContextPackingCandidate,
+} from "./context-packing-kernel";
 import { joinMarkdownSections } from "./context-formatting";
 import {
   buildPdfContextExtractionResult,
   formatPdfVisualClassificationLabel,
   type PdfContextExtractionResult,
 } from "./context-pdf";
+import {
+  buildDocumentIntelligenceState,
+  buildKnowledgeArtifactSourceLocationLabel,
+  materializeDocumentKnowledgeArtifactRecord,
+  mergeDocumentInspectionTasks,
+  mergeDocumentKnowledgeArtifacts,
+  parseDocumentIntelligenceJsonValue,
+  selectDocumentKnowledgeArtifactsWithinBudget,
+  stringifyDocumentIntelligenceJsonValue,
+  synthesizePdfDocumentIntelligence,
+  type DocumentInspectionTaskRecord,
+  type DocumentIntelligenceLocation,
+  type DocumentIntelligenceState,
+  type DocumentKnowledgeArtifactRecord,
+  type InspectionTaskKind,
+  type InspectionTaskStatus,
+  type InspectionTool,
+  type KnowledgeArtifactKind,
+  type KnowledgeArtifactStatus,
+  type UpsertDocumentInspectionTaskInput,
+  type UpsertDocumentKnowledgeArtifactInput,
+} from "./document-intelligence";
+import {
+  evaluateAgentControlSurface,
+  type AgentControlDebugSnapshot,
+  type AgentControlSourceSignal,
+} from "./agent-control-surface";
+import type { InspectionCapability } from "./inspection-tool-broker";
+import {
+  assembleProgressiveContext,
+  type ProgressiveContextAssemblyResult,
+} from "./progressive-context-assembly";
 import { DEFAULT_APPROX_CHARS_PER_TOKEN } from "./context-token-budget";
 import {
   DEFAULT_MODEL_BUDGET_PROFILE,
@@ -196,6 +241,10 @@ export type ConversationContextBundle = {
   sourceSelection: ConversationContextSourceSelection;
   sourceDecisions: ConversationContextSourceDecision[];
   documentChunking: ConversationContextDocumentChunkingDebug;
+  documentIntelligence: ConversationContextDocumentIntelligenceDebug;
+  agentControl: AgentControlDebugSnapshot;
+  progressiveAssembly: ProgressiveContextAssemblyResult;
+  asyncAgentWork: AsyncAgentWorkDebugSnapshot | null;
   debugTrace?: ContextDebugTrace | null;
 };
 
@@ -327,6 +376,96 @@ export type ConversationContextDocumentChunkingDebug = {
     detail: string | null;
   } | null;
   documents: ConversationContextDocumentChunkingDocument[];
+};
+
+export type ConversationContextKnowledgeArtifactDebug = {
+  artifactKey: string;
+  kind: KnowledgeArtifactKind;
+  status: KnowledgeArtifactStatus;
+  title: string | null;
+  summary: string | null;
+  contentPreview: string;
+  tool: InspectionTool | null;
+  confidence: number | null;
+  approxTokenCount: number;
+  sourceLocationLabel: string | null;
+  pageNumberStart: number | null;
+  pageNumberEnd: number | null;
+  pageLabelStart: string | null;
+  pageLabelEnd: string | null;
+  tableId: string | null;
+  figureId: string | null;
+  sectionPath: string[];
+  headingPath: string[];
+  relevanceHints: string[];
+  selected: boolean;
+  payload: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ConversationContextInspectionTaskDebug = {
+  taskKey: string;
+  kind: InspectionTaskKind;
+  status: InspectionTaskStatus;
+  tool: InspectionTool;
+  requestedCapability: string | null;
+  selectedTool: string | null;
+  selectionReason: string | null;
+  candidateTools: string[];
+  eligibleTools: Array<Record<string, unknown>>;
+  ineligibleTools: Array<Record<string, unknown>>;
+  eligibilityReasons: Array<Record<string, unknown>>;
+  approvalStatus: string | null;
+  runtimeClass: string | null;
+  dataClassPolicy: Record<string, unknown> | null;
+  sideEffectLevel: string | null;
+  costClass: string | null;
+  latencyClass: string | null;
+  benchmarkFixtureIds: string[];
+  governanceTrace: Record<string, unknown> | null;
+  confidence: number | null;
+  limitations: string[];
+  fallbackRecommendation: string | null;
+  recommendedNextCapabilities: string[];
+  reusable: boolean | null;
+  unmetCapability: Record<string, unknown> | null;
+  unmetCapabilityReviewItem: Record<string, unknown> | null;
+  rationale: string | null;
+  resultSummary: string | null;
+  unresolved: string[];
+  createdArtifactKeys: string[];
+  toolTraceEvents: Array<Record<string, unknown>>;
+  sourceLocationLabel: string | null;
+  pageNumberStart: number | null;
+  pageNumberEnd: number | null;
+  pageLabelStart: string | null;
+  pageLabelEnd: string | null;
+  tableId: string | null;
+  figureId: string | null;
+  sectionPath: string[];
+  headingPath: string[];
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  result: Record<string, unknown> | null;
+};
+
+export type ConversationContextDocumentIntelligenceDocument = {
+  sourceId: string;
+  attachmentId: string;
+  fileId: string;
+  filename: string;
+  sourceType: string;
+  state: DocumentIntelligenceState;
+  artifacts: ConversationContextKnowledgeArtifactDebug[];
+  inspectionTasks: ConversationContextInspectionTaskDebug[];
+};
+
+export type ConversationContextDocumentIntelligenceDebug = {
+  selectedArtifactKeys: string[];
+  selectedApproxTokenCount: number;
+  documents: ConversationContextDocumentIntelligenceDocument[];
 };
 
 function formatThreadDocumentPageRangeLabel(chunk: {
@@ -710,6 +849,55 @@ type ConversationContextDocumentRecord = {
   mimeType: string | null;
   fileType: string;
   storagePath: string;
+  createdAt?: Date | null;
+};
+
+type ConversationDocumentKnowledgeArtifactStoreRecord = {
+  id: string;
+  conversationDocumentId: string;
+  artifactKey: string;
+  kind: string;
+  status: string;
+  title: string | null;
+  summary: string | null;
+  content: string;
+  tool: string | null;
+  sourcePageNumber: number | null;
+  sourcePageLabel: string | null;
+  tableId: string | null;
+  figureId: string | null;
+  sectionPath: string;
+  headingPath: string;
+  sourceLocationLabel: string | null;
+  payloadJson: string | null;
+  relevanceHints: string;
+  confidence: number | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type ConversationDocumentInspectionTaskStoreRecord = {
+  id: string;
+  conversationDocumentId: string;
+  taskKey: string;
+  kind: string;
+  status: string;
+  tool: string;
+  rationale: string | null;
+  sourcePageNumber: number | null;
+  sourcePageLabel: string | null;
+  tableId: string | null;
+  figureId: string | null;
+  sectionPath: string;
+  headingPath: string;
+  sourceLocationLabel: string | null;
+  resultSummary: string | null;
+  resultJson: string | null;
+  unresolvedJson: string | null;
+  createdArtifactKeys: string;
+  createdAt: Date;
+  updatedAt: Date;
+  completedAt: Date | null;
 };
 
 type ConversationContextResolverDependencies = {
@@ -723,6 +911,21 @@ type ConversationContextResolverDependencies = {
     fileBuffer: Buffer,
     document: Pick<ConversationContextDocumentRecord, "filename" | "mimeType">
   ) => Promise<string>;
+  persistDocumentIntelligence?: boolean;
+  listKnowledgeArtifacts?: (
+    conversationDocumentIds: string[]
+  ) => Promise<ConversationDocumentKnowledgeArtifactStoreRecord[]>;
+  upsertKnowledgeArtifact?: (
+    artifact: UpsertDocumentKnowledgeArtifactInput
+  ) => Promise<ConversationDocumentKnowledgeArtifactStoreRecord>;
+  listInspectionTasks?: (
+    conversationDocumentIds: string[]
+  ) => Promise<ConversationDocumentInspectionTaskStoreRecord[]>;
+  upsertInspectionTask?: (
+    task: UpsertDocumentInspectionTaskInput
+  ) => Promise<ConversationDocumentInspectionTaskStoreRecord>;
+  persistAsyncAgentWork?: boolean;
+  upsertAsyncAgentWorkItem?: (item: AsyncAgentWorkItem) => Promise<AsyncAgentWorkItem>;
 };
 
 export const MAX_THREAD_DOCUMENT_CONTEXT_CHARS = CHAT_THREAD_DOCUMENT_CONTEXT_CHARS;
@@ -970,19 +1173,26 @@ function buildUsedThreadDocumentDetail(params: {
   fullyIncluded: boolean;
   occurrenceInventoryOnly?: boolean;
   extractionDetail?: string | null;
+  artifactCount?: number;
 }) {
   const readableChars = params.charCount.toLocaleString("en-US");
   const extractionDetailSuffix = params.extractionDetail?.trim()
     ? ` ${params.extractionDetail.trim()}`
     : "";
+  const artifactDetailSuffix =
+    params.artifactCount && params.artifactCount > 0
+      ? ` ${params.artifactCount} learned artifact${params.artifactCount === 1 ? "" : "s"} from document inspection ${
+          params.artifactCount === 1 ? "was" : "were"
+        } also included as durable context.`
+      : "";
 
   if (params.occurrenceInventoryOnly) {
-    return `Read ${readableChars} readable characters from this thread attachment and included a deterministic exact-phrase occurrence inventory in the active runtime context. No explanatory excerpt from this file fit within the current thread-document context budget.${extractionDetailSuffix}`;
+    return `Read ${readableChars} readable characters from this thread attachment and included a deterministic exact-phrase occurrence inventory in the active runtime context. No explanatory excerpt from this file fit within the current thread-document context budget.${artifactDetailSuffix}${extractionDetailSuffix}`;
   }
 
   return params.fullyIncluded
-    ? `Read ${readableChars} readable characters from this thread attachment and included the extracted text in the active runtime context.${extractionDetailSuffix}`
-    : `Read ${readableChars} readable characters from this thread attachment and included selected excerpts in the active runtime context to stay within the thread-document context budget. If you caveat the answer, describe it as based on the excerpts available in the current context, not as though the uploaded file was unavailable.${extractionDetailSuffix}`;
+    ? `Read ${readableChars} readable characters from this thread attachment and included the extracted text in the active runtime context.${artifactDetailSuffix}${extractionDetailSuffix}`
+    : `Read ${readableChars} readable characters from this thread attachment and included selected excerpts in the active runtime context to stay within the thread-document context budget. If you caveat the answer, describe it as based on the excerpts available in the current context, not as though the uploaded file was unavailable.${artifactDetailSuffix}${extractionDetailSuffix}`;
 }
 
 function isPdfContextExtractionResult(value: unknown): value is PdfContextExtractionResult {
@@ -1021,6 +1231,409 @@ function buildPdfSourceMetadata(metadata: PdfContextExtractionResult["metadata"]
     classificationCounts: metadata.classificationCounts,
     detail: metadata.detail,
   } satisfies Record<string, unknown>;
+}
+
+function buildDocumentIntelligenceLocation(params: {
+  pageNumberStart?: number | null;
+  pageLabelStart?: string | null;
+  tableId?: string | null;
+  figureId?: string | null;
+  sectionPath?: string[] | null;
+  headingPath?: string[] | null;
+}): DocumentIntelligenceLocation {
+  return {
+    pageNumberStart: params.pageNumberStart ?? null,
+    pageNumberEnd: params.pageNumberStart ?? null,
+    pageLabelStart: params.pageLabelStart ?? null,
+    pageLabelEnd: params.pageLabelStart ?? null,
+    tableId: params.tableId ?? null,
+    figureId: params.figureId ?? null,
+    sectionPath: [...(params.sectionPath ?? [])],
+    headingPath: [...(params.headingPath ?? [])],
+  };
+}
+
+function buildArtifactContentPreview(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 160) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, 157)}...`;
+}
+
+function buildStoredKnowledgeArtifactRecord(
+  record: ConversationDocumentKnowledgeArtifactStoreRecord
+): DocumentKnowledgeArtifactRecord {
+  return materializeDocumentKnowledgeArtifactRecord({
+    id: record.id,
+    sourceDocumentId: record.conversationDocumentId,
+    artifactKey: record.artifactKey,
+    kind: record.kind as KnowledgeArtifactKind,
+    status: record.status as KnowledgeArtifactStatus,
+    title: record.title,
+    summary: record.summary,
+    content: record.content,
+    tool: (record.tool ?? null) as InspectionTool | null,
+    confidence: record.confidence,
+    location: buildDocumentIntelligenceLocation({
+      pageNumberStart: record.sourcePageNumber,
+      pageLabelStart: record.sourcePageLabel,
+      tableId: record.tableId,
+      figureId: record.figureId,
+      sectionPath: parseDocumentIntelligenceJsonValue<string[]>(record.sectionPath, []),
+      headingPath: parseDocumentIntelligenceJsonValue<string[]>(record.headingPath, []),
+    }),
+    sourceLocationLabel: record.sourceLocationLabel,
+    payload: parseDocumentIntelligenceJsonValue<Record<string, unknown> | null>(record.payloadJson, null),
+    relevanceHints: parseDocumentIntelligenceJsonValue<string[]>(record.relevanceHints, []),
+    createdAt: record.createdAt.toISOString(),
+    updatedAt: record.updatedAt.toISOString(),
+  });
+}
+
+function buildStoredInspectionTaskRecord(
+  record: ConversationDocumentInspectionTaskStoreRecord
+): DocumentInspectionTaskRecord {
+  return {
+    id: record.id,
+    sourceDocumentId: record.conversationDocumentId,
+    taskKey: record.taskKey,
+    kind: record.kind as InspectionTaskKind,
+    status: record.status as InspectionTaskStatus,
+    tool: record.tool as InspectionTool,
+    rationale: record.rationale,
+    location: buildDocumentIntelligenceLocation({
+      pageNumberStart: record.sourcePageNumber,
+      pageLabelStart: record.sourcePageLabel,
+      tableId: record.tableId,
+      figureId: record.figureId,
+      sectionPath: parseDocumentIntelligenceJsonValue<string[]>(record.sectionPath, []),
+      headingPath: parseDocumentIntelligenceJsonValue<string[]>(record.headingPath, []),
+    }),
+    sourceLocationLabel: record.sourceLocationLabel,
+    resultSummary: record.resultSummary,
+    result: parseDocumentIntelligenceJsonValue<Record<string, unknown> | null>(record.resultJson, null),
+    unresolved: parseDocumentIntelligenceJsonValue<string[]>(record.unresolvedJson, []),
+    createdArtifactKeys: parseDocumentIntelligenceJsonValue<string[]>(record.createdArtifactKeys, []),
+    createdAt: record.createdAt.toISOString(),
+    updatedAt: record.updatedAt.toISOString(),
+    completedAt: record.completedAt?.toISOString() ?? null,
+  };
+}
+
+function buildKnowledgeArtifactDebugRecord(params: {
+  artifact: DocumentKnowledgeArtifactRecord;
+  selectedArtifactKeys: Set<string>;
+}): ConversationContextKnowledgeArtifactDebug {
+  return {
+    artifactKey: params.artifact.artifactKey,
+    kind: params.artifact.kind,
+    status: params.artifact.status,
+    title: params.artifact.title,
+    summary: params.artifact.summary,
+    contentPreview: buildArtifactContentPreview(params.artifact.content),
+    tool: params.artifact.tool,
+    confidence: params.artifact.confidence,
+    approxTokenCount: params.artifact.approxTokenCount,
+    sourceLocationLabel: params.artifact.sourceLocationLabel,
+    pageNumberStart: params.artifact.location.pageNumberStart,
+    pageNumberEnd: params.artifact.location.pageNumberEnd,
+    pageLabelStart: params.artifact.location.pageLabelStart,
+    pageLabelEnd: params.artifact.location.pageLabelEnd,
+    tableId: params.artifact.location.tableId,
+    figureId: params.artifact.location.figureId,
+    sectionPath: [...params.artifact.location.sectionPath],
+    headingPath: [...params.artifact.location.headingPath],
+    relevanceHints: [...params.artifact.relevanceHints],
+    selected: params.selectedArtifactKeys.has(params.artifact.artifactKey),
+    payload: params.artifact.payload,
+    createdAt: params.artifact.createdAt,
+    updatedAt: params.artifact.updatedAt,
+  };
+}
+
+function isInspectionTraceRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function getInspectionTraceString(value: Record<string, unknown> | null, key: string) {
+  const raw = value?.[key];
+  return typeof raw === "string" ? raw : null;
+}
+
+function getInspectionTraceNumber(value: Record<string, unknown> | null, key: string) {
+  const raw = value?.[key];
+  return typeof raw === "number" ? raw : null;
+}
+
+function getInspectionTraceBoolean(value: Record<string, unknown> | null, key: string) {
+  const raw = value?.[key];
+  return typeof raw === "boolean" ? raw : null;
+}
+
+function getInspectionTraceStringArray(value: Record<string, unknown> | null, key: string) {
+  const raw = value?.[key];
+  return Array.isArray(raw) ? raw.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function getInspectionTraceRecord(value: Record<string, unknown> | null, key: string) {
+  const raw = value?.[key];
+  return isInspectionTraceRecord(raw) ? raw : null;
+}
+
+function getInspectionTraceRecordArray(value: Record<string, unknown> | null, key: string) {
+  const raw = value?.[key];
+  return Array.isArray(raw)
+    ? raw.filter((entry): entry is Record<string, unknown> => isInspectionTraceRecord(entry))
+    : [];
+}
+
+function getInspectionTaskToolTrace(task: DocumentInspectionTaskRecord) {
+  return getInspectionTraceRecord(task.result, "toolTrace");
+}
+
+function buildInspectionTaskDebugRecord(task: DocumentInspectionTaskRecord): ConversationContextInspectionTaskDebug {
+  const toolTrace = getInspectionTaskToolTrace(task);
+
+  return {
+    taskKey: task.taskKey,
+    kind: task.kind,
+    status: task.status,
+    tool: task.tool,
+    requestedCapability: getInspectionTraceString(toolTrace, "requestedCapability"),
+    selectedTool: getInspectionTraceString(toolTrace, "selectedTool"),
+    selectionReason: getInspectionTraceString(toolTrace, "selectionReason"),
+    candidateTools: getInspectionTraceStringArray(toolTrace, "candidateTools"),
+    eligibleTools: getInspectionTraceRecordArray(toolTrace, "eligibleTools"),
+    ineligibleTools: getInspectionTraceRecordArray(toolTrace, "ineligibleTools"),
+    eligibilityReasons: getInspectionTraceRecordArray(toolTrace, "eligibilityReasons"),
+    approvalStatus: getInspectionTraceString(toolTrace, "approvalStatus"),
+    runtimeClass: getInspectionTraceString(toolTrace, "runtimeClass"),
+    dataClassPolicy: getInspectionTraceRecord(toolTrace, "dataClassPolicy"),
+    sideEffectLevel: getInspectionTraceString(toolTrace, "sideEffectLevel"),
+    costClass: getInspectionTraceString(toolTrace, "costClass"),
+    latencyClass: getInspectionTraceString(toolTrace, "latencyClass"),
+    benchmarkFixtureIds: getInspectionTraceStringArray(toolTrace, "benchmarkFixtureIds"),
+    governanceTrace: getInspectionTraceRecord(toolTrace, "governanceTrace"),
+    confidence: getInspectionTraceNumber(toolTrace, "confidence"),
+    limitations: getInspectionTraceStringArray(toolTrace, "limitations"),
+    fallbackRecommendation: getInspectionTraceString(toolTrace, "fallbackRecommendation"),
+    recommendedNextCapabilities: getInspectionTraceStringArray(toolTrace, "recommendedNextCapabilities"),
+    reusable: getInspectionTraceBoolean(toolTrace, "reusable"),
+    unmetCapability: getInspectionTraceRecord(toolTrace, "unmetCapability"),
+    unmetCapabilityReviewItem: getInspectionTraceRecord(toolTrace, "unmetCapabilityReviewItem"),
+    rationale: task.rationale,
+    resultSummary: task.resultSummary,
+    unresolved: [...task.unresolved],
+    createdArtifactKeys: [...task.createdArtifactKeys],
+    toolTraceEvents: getInspectionTraceRecordArray(toolTrace, "traceEvents"),
+    sourceLocationLabel: task.sourceLocationLabel,
+    pageNumberStart: task.location.pageNumberStart,
+    pageNumberEnd: task.location.pageNumberEnd,
+    pageLabelStart: task.location.pageLabelStart,
+    pageLabelEnd: task.location.pageLabelEnd,
+    tableId: task.location.tableId,
+    figureId: task.location.figureId,
+    sectionPath: [...task.location.sectionPath],
+    headingPath: [...task.location.headingPath],
+    completedAt: task.completedAt,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    result: task.result,
+  };
+}
+
+function buildArtifactSourceMetadata(params: {
+  existingSourceMetadata: Record<string, unknown> | null;
+  artifacts: DocumentKnowledgeArtifactRecord[];
+  inspectionTasks: DocumentInspectionTaskRecord[];
+  selectedArtifacts: DocumentKnowledgeArtifactRecord[];
+}) {
+  return {
+    ...(params.existingSourceMetadata ?? {}),
+    learnedArtifactCount: params.artifacts.length,
+    selectedArtifactCount: params.selectedArtifacts.length,
+    inspectionTaskCount: params.inspectionTasks.length,
+  };
+}
+
+function buildDocumentIntelligenceDebugDocument(params: {
+  document: Pick<ConversationContextDocumentRecord, "id" | "filename" | "fileType">;
+  sourceType: string;
+  artifacts: DocumentKnowledgeArtifactRecord[];
+  inspectionTasks: DocumentInspectionTaskRecord[];
+  selectedArtifacts?: DocumentKnowledgeArtifactRecord[];
+}): ConversationContextDocumentIntelligenceDocument {
+  const selectedArtifactKeys = new Set(
+    (params.selectedArtifacts ?? []).map((artifact) => artifact.artifactKey)
+  );
+
+  return {
+    sourceId: params.document.id,
+    attachmentId: params.document.id,
+    fileId: params.document.id,
+    filename: params.document.filename,
+    sourceType: params.sourceType || params.document.fileType || "unknown",
+    state: buildDocumentIntelligenceState({
+      sourceDocumentId: params.document.id,
+      sourceType: params.sourceType || params.document.fileType || "unknown",
+      filename: params.document.filename,
+      artifacts: params.artifacts,
+      inspectionTasks: params.inspectionTasks,
+      selectedArtifactKeys: [...selectedArtifactKeys],
+    }),
+    artifacts: params.artifacts.map((artifact) =>
+      buildKnowledgeArtifactDebugRecord({
+        artifact,
+        selectedArtifactKeys,
+      })
+    ),
+    inspectionTasks: params.inspectionTasks.map(buildInspectionTaskDebugRecord),
+  };
+}
+
+const AGENT_CONTROL_INSPECTION_CAPABILITIES = [
+  "text_extraction",
+  "pdf_page_classification",
+  "pdf_table_detection",
+  "pdf_table_body_recovery",
+  "rendered_page_inspection",
+  "ocr",
+  "vision_page_understanding",
+  "document_ai_table_recovery",
+  "geometry_layout_extraction",
+  "spreadsheet_inventory",
+  "spreadsheet_formula_map",
+  "docx_structure_extraction",
+  "pptx_slide_inventory",
+  "web_snapshot",
+  "source_connector_read",
+  "code_repository_inspection",
+  "artifact_summarization",
+  "artifact_validation",
+] as const satisfies readonly InspectionCapability[];
+
+function isInspectionCapability(value: unknown): value is InspectionCapability {
+  return (
+    typeof value === "string" &&
+    (AGENT_CONTROL_INSPECTION_CAPABILITIES as readonly string[]).includes(value)
+  );
+}
+
+function getArtifactUpdatedAt(document: ConversationContextDocumentIntelligenceDocument) {
+  const timestamps = document.artifacts
+    .map((artifact) => Date.parse(artifact.updatedAt))
+    .filter((timestamp) => Number.isFinite(timestamp));
+
+  if (timestamps.length === 0) {
+    return null;
+  }
+
+  return new Date(Math.max(...timestamps)).toISOString();
+}
+
+function isSourceNewerThanArtifacts(params: {
+  sourceUpdatedAt: string | null;
+  artifactUpdatedAt: string | null;
+}) {
+  if (!params.sourceUpdatedAt || !params.artifactUpdatedAt) {
+    return false;
+  }
+
+  const sourceTimestamp = Date.parse(params.sourceUpdatedAt);
+  const artifactTimestamp = Date.parse(params.artifactUpdatedAt);
+
+  return Number.isFinite(sourceTimestamp) &&
+    Number.isFinite(artifactTimestamp) &&
+    sourceTimestamp > artifactTimestamp;
+}
+
+function getInspectionRecommendedCapabilities(document: ConversationContextDocumentIntelligenceDocument) {
+  return document.inspectionTasks.flatMap((task) => [
+    ...task.recommendedNextCapabilities.filter(isInspectionCapability),
+    ...getInspectionTraceCapabilityArray(task.result, "toolTrace", "recommendedNextCapabilities"),
+  ]);
+}
+
+function getInspectionTraceCapabilityArray(
+  result: Record<string, unknown> | null,
+  traceKey: string,
+  arrayKey: string
+) {
+  const trace = result?.[traceKey];
+  if (typeof trace !== "object" || trace === null || Array.isArray(trace)) {
+    return [] as InspectionCapability[];
+  }
+
+  const value = (trace as Record<string, unknown>)[arrayKey];
+  return Array.isArray(value) ? value.filter(isInspectionCapability) : [];
+}
+
+function getInspectionUnmetCapabilities(document: ConversationContextDocumentIntelligenceDocument) {
+  return document.inspectionTasks.flatMap((task) => {
+    const unmetCapability = task.unmetCapability?.capability;
+    const reviewCapability = task.unmetCapabilityReviewItem?.requestedCapability;
+
+    return [unmetCapability, reviewCapability].filter(isInspectionCapability);
+  });
+}
+
+function buildAgentControlSourceSignals(params: {
+  sourceDocuments: ConversationContextDocumentRecord[];
+  documentChunkingDocuments: ConversationContextDocumentChunkingDocument[];
+  documentIntelligenceDocuments: ConversationContextDocumentIntelligenceDocument[];
+}): AgentControlSourceSignal[] {
+  const sourceDocumentById = new Map(params.sourceDocuments.map((document) => [document.id, document]));
+  const chunkingDocumentById = new Map(params.documentChunkingDocuments.map((document) => [document.sourceId, document]));
+
+  return params.documentIntelligenceDocuments.map((document) => {
+    const sourceDocument = sourceDocumentById.get(document.sourceId);
+    const chunkingDocument = chunkingDocumentById.get(document.sourceId);
+    const artifactKinds = document.artifacts.map((artifact) => artifact.kind);
+    const warningArtifactKinds = document.artifacts
+      .filter((artifact) => artifact.status === "warning" || artifact.kind === "extraction_warning")
+      .map((artifact) => artifact.kind);
+    const hasWeakArtifact = document.artifacts.some(
+      (artifact) =>
+        artifact.status === "partial" ||
+        artifact.status === "warning" ||
+        artifact.status === "open" ||
+        artifact.kind === "table_candidate" ||
+        artifact.kind === "extraction_warning"
+    );
+    const sourceUpdatedAt = sourceDocument?.createdAt?.toISOString() ?? null;
+    const artifactUpdatedAt = getArtifactUpdatedAt(document);
+    const recommendedNextCapabilities = [
+      ...getInspectionRecommendedCapabilities(document),
+      ...(hasWeakArtifact
+        ? (["rendered_page_inspection", "ocr", "vision_page_understanding", "document_ai_table_recovery"] satisfies InspectionCapability[])
+        : []),
+    ].filter((capability, index, capabilities) => capabilities.indexOf(capability) === index);
+
+    return {
+      sourceId: document.sourceId,
+      sourceType: document.sourceType,
+      filename: document.filename,
+      sourceVersion: sourceUpdatedAt ? `created:${sourceUpdatedAt}` : null,
+      sourceUpdatedAt,
+      artifactUpdatedAt,
+      hasWeakArtifact,
+      hasStaleArtifact: isSourceNewerThanArtifacts({ sourceUpdatedAt, artifactUpdatedAt }),
+      artifactKinds,
+      warningArtifactKinds,
+      recommendedNextCapabilities,
+      unmetCapabilities: getInspectionUnmetCapabilities(document),
+      sourceCoverageHints: artifactKinds.includes("table_candidate") ? ["all_tables"] : undefined,
+      dataClass: "internal",
+      containsUntrustedInstructions: chunkingDocument?.chunkCharRanges.some((chunk) =>
+        /\b(ignore previous|system prompt|developer instructions|override instructions)\b/i.test(chunk.textPreview)
+      ) ?? false,
+      detail: hasWeakArtifact
+        ? "Document has partial or warning artifacts that can be reused but may need deeper inspection."
+        : null,
+    };
+  });
 }
 
 function resolvePdfExtractionResult(value: string | PdfContextExtractionResult) {
@@ -2079,9 +2692,13 @@ function buildThreadDocumentSection(params: {
   selection: ContextDocumentChunkSelectionResult;
   ranking?: ContextDocumentChunkRankingResult | null;
   occurrence?: ConversationContextDocumentOccurrenceDebug | null;
+  selectedArtifacts?: DocumentKnowledgeArtifactRecord[];
 }) {
   const displayChunks = [...params.selection.selectedChunks].sort(
     (left, right) => left.charStart - right.charStart || left.chunkIndex - right.chunkIndex
+  );
+  const displayArtifacts = [...(params.selectedArtifacts ?? [])].sort(
+    (left, right) => right.approxTokenCount - left.approxTokenCount || left.artifactKey.localeCompare(right.artifactKey)
   );
   const occurrence = params.occurrence ?? null;
   const occurrenceListingHint =
@@ -2106,9 +2723,34 @@ function buildThreadDocumentSection(params: {
               : "- No exact-match occurrence inventory was available for this attachment.",
         ])
       : null;
+  const artifactSection = displayArtifacts.length > 0
+    ? joinMarkdownSections([
+        "### Learned Artifacts",
+        "These artifacts were learned from prior or current inspection passes and are durable document memory for this source.",
+        ...displayArtifacts.map((artifact, index) =>
+          joinMarkdownSections([
+            `#### Artifact ${index + 1}: ${(artifact.title ?? artifact.kind).trim()}`,
+            `ARTIFACT TYPE: ${artifact.kind.replace(/_/g, " ")}`,
+            `ARTIFACT STATUS: ${artifact.status}`,
+            artifact.sourceLocationLabel
+              ? `SOURCE BODY LOCATION: ${artifact.sourceLocationLabel}`
+              : `SOURCE BODY LOCATION: ${buildKnowledgeArtifactSourceLocationLabel(
+                  params.filename,
+                  artifact.location,
+                  artifact.title
+                )}`,
+            artifact.confidence != null ? `CONFIDENCE: ${artifact.confidence.toFixed(2)}` : null,
+            artifact.summary ? `SUMMARY: ${artifact.summary}` : null,
+            "DETAIL:",
+            artifact.content,
+          ])
+        ),
+      ])
+    : null;
 
   if (
     occurrenceInventorySection == null &&
+    artifactSection == null &&
     params.selection.selectedChunks.length === 1 &&
     params.selection.skippedChunks.length === 0 &&
     !params.selection.usedBudgetClamp
@@ -2122,6 +2764,7 @@ function buildThreadDocumentSection(params: {
   return joinMarkdownSections([
     `## Thread Document: ${params.filename}`,
     occurrenceInventorySection,
+    artifactSection,
     displayChunks.length > 0
       ? params.fullyIncluded
         ? "The extracted text available for this attachment in the current runtime context is included below in document order. Use the excerpt provenance labels for exact article, section, exhibit, or schedule references. Treat each provenance header as the body location where the excerpt appears; references mentioned inside the excerpt do not change that location."
@@ -2671,6 +3314,7 @@ export async function resolveConversationContextBundle(params: {
       mimeType: true,
       fileType: true,
       storagePath: true,
+      createdAt: true,
     },
   }));
   const readTextFile = dependencies.readTextFile ?? ((storagePath: string) => readFile(storagePath, "utf8"));
@@ -2679,6 +3323,279 @@ export async function resolveConversationContextBundle(params: {
   const extractDocxText = dependencies.extractDocxText ?? extractThreadDocxText;
   const extractPptxText = dependencies.extractPptxText ?? extractThreadPptxText;
   const extractSpreadsheetText = dependencies.extractSpreadsheetText ?? extractThreadSpreadsheetText;
+  const persistDocumentIntelligence = dependencies.persistDocumentIntelligence ?? !dependencies.listDocuments;
+  const listKnowledgeArtifacts = dependencies.listKnowledgeArtifacts ?? (
+    persistDocumentIntelligence
+      ? async (conversationDocumentIds: string[]) => prisma.conversationDocumentKnowledgeArtifact.findMany({
+          where: {
+            conversationDocumentId: {
+              in: conversationDocumentIds,
+            },
+          },
+          orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+          select: {
+            id: true,
+            conversationDocumentId: true,
+            artifactKey: true,
+            kind: true,
+            status: true,
+            title: true,
+            summary: true,
+            content: true,
+            tool: true,
+            sourcePageNumber: true,
+            sourcePageLabel: true,
+            tableId: true,
+            figureId: true,
+            sectionPath: true,
+            headingPath: true,
+            sourceLocationLabel: true,
+            payloadJson: true,
+            relevanceHints: true,
+            confidence: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        })
+      : async () => []
+  );
+  const upsertKnowledgeArtifact = dependencies.upsertKnowledgeArtifact ?? (
+    persistDocumentIntelligence
+      ? async (artifact: UpsertDocumentKnowledgeArtifactInput) => prisma.conversationDocumentKnowledgeArtifact.upsert({
+          where: {
+            conversationDocumentId_artifactKey: {
+              conversationDocumentId: artifact.sourceDocumentId,
+              artifactKey: artifact.artifactKey,
+            },
+          },
+          create: {
+            conversationDocumentId: artifact.sourceDocumentId,
+            artifactKey: artifact.artifactKey,
+            kind: artifact.kind,
+            status: artifact.status,
+            title: artifact.title,
+            summary: artifact.summary,
+            content: artifact.content,
+            tool: artifact.tool,
+            sourcePageNumber: artifact.location.pageNumberStart,
+            sourcePageLabel: artifact.location.pageLabelStart,
+            tableId: artifact.location.tableId,
+            figureId: artifact.location.figureId,
+            sectionPath: stringifyDocumentIntelligenceJsonValue(artifact.location.sectionPath),
+            headingPath: stringifyDocumentIntelligenceJsonValue(artifact.location.headingPath),
+            sourceLocationLabel: artifact.sourceLocationLabel,
+            payloadJson: stringifyDocumentIntelligenceJsonValue(artifact.payload),
+            relevanceHints: stringifyDocumentIntelligenceJsonValue(artifact.relevanceHints),
+            confidence: artifact.confidence,
+          },
+          update: {
+            kind: artifact.kind,
+            status: artifact.status,
+            title: artifact.title,
+            summary: artifact.summary,
+            content: artifact.content,
+            tool: artifact.tool,
+            sourcePageNumber: artifact.location.pageNumberStart,
+            sourcePageLabel: artifact.location.pageLabelStart,
+            tableId: artifact.location.tableId,
+            figureId: artifact.location.figureId,
+            sectionPath: stringifyDocumentIntelligenceJsonValue(artifact.location.sectionPath),
+            headingPath: stringifyDocumentIntelligenceJsonValue(artifact.location.headingPath),
+            sourceLocationLabel: artifact.sourceLocationLabel,
+            payloadJson: stringifyDocumentIntelligenceJsonValue(artifact.payload),
+            relevanceHints: stringifyDocumentIntelligenceJsonValue(artifact.relevanceHints),
+            confidence: artifact.confidence,
+          },
+          select: {
+            id: true,
+            conversationDocumentId: true,
+            artifactKey: true,
+            kind: true,
+            status: true,
+            title: true,
+            summary: true,
+            content: true,
+            tool: true,
+            sourcePageNumber: true,
+            sourcePageLabel: true,
+            tableId: true,
+            figureId: true,
+            sectionPath: true,
+            headingPath: true,
+            sourceLocationLabel: true,
+            payloadJson: true,
+            relevanceHints: true,
+            confidence: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        })
+      : async (artifact: UpsertDocumentKnowledgeArtifactInput) => {
+          const now = new Date();
+          return {
+            id: `${artifact.sourceDocumentId}:${artifact.artifactKey}`,
+            conversationDocumentId: artifact.sourceDocumentId,
+            artifactKey: artifact.artifactKey,
+            kind: artifact.kind,
+            status: artifact.status,
+            title: artifact.title,
+            summary: artifact.summary,
+            content: artifact.content,
+            tool: artifact.tool,
+            sourcePageNumber: artifact.location.pageNumberStart,
+            sourcePageLabel: artifact.location.pageLabelStart,
+            tableId: artifact.location.tableId,
+            figureId: artifact.location.figureId,
+            sectionPath: stringifyDocumentIntelligenceJsonValue(artifact.location.sectionPath),
+            headingPath: stringifyDocumentIntelligenceJsonValue(artifact.location.headingPath),
+            sourceLocationLabel: artifact.sourceLocationLabel,
+            payloadJson: stringifyDocumentIntelligenceJsonValue(artifact.payload),
+            relevanceHints: stringifyDocumentIntelligenceJsonValue(artifact.relevanceHints),
+            confidence: artifact.confidence,
+            createdAt: now,
+            updatedAt: now,
+          } satisfies ConversationDocumentKnowledgeArtifactStoreRecord;
+        }
+  );
+  const listInspectionTasks = dependencies.listInspectionTasks ?? (
+    persistDocumentIntelligence
+      ? async (conversationDocumentIds: string[]) => prisma.conversationDocumentInspectionTask.findMany({
+          where: {
+            conversationDocumentId: {
+              in: conversationDocumentIds,
+            },
+          },
+          orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+          select: {
+            id: true,
+            conversationDocumentId: true,
+            taskKey: true,
+            kind: true,
+            status: true,
+            tool: true,
+            rationale: true,
+            sourcePageNumber: true,
+            sourcePageLabel: true,
+            tableId: true,
+            figureId: true,
+            sectionPath: true,
+            headingPath: true,
+            sourceLocationLabel: true,
+            resultSummary: true,
+            resultJson: true,
+            unresolvedJson: true,
+            createdArtifactKeys: true,
+            createdAt: true,
+            updatedAt: true,
+            completedAt: true,
+          },
+        })
+      : async () => []
+  );
+  const upsertInspectionTask = dependencies.upsertInspectionTask ?? (
+    persistDocumentIntelligence
+      ? async (task: UpsertDocumentInspectionTaskInput) => prisma.conversationDocumentInspectionTask.upsert({
+          where: {
+            conversationDocumentId_taskKey: {
+              conversationDocumentId: task.sourceDocumentId,
+              taskKey: task.taskKey,
+            },
+          },
+          create: {
+            conversationDocumentId: task.sourceDocumentId,
+            taskKey: task.taskKey,
+            kind: task.kind,
+            status: task.status,
+            tool: task.tool,
+            rationale: task.rationale,
+            sourcePageNumber: task.location.pageNumberStart,
+            sourcePageLabel: task.location.pageLabelStart,
+            tableId: task.location.tableId,
+            figureId: task.location.figureId,
+            sectionPath: stringifyDocumentIntelligenceJsonValue(task.location.sectionPath),
+            headingPath: stringifyDocumentIntelligenceJsonValue(task.location.headingPath),
+            sourceLocationLabel: task.sourceLocationLabel,
+            resultSummary: task.resultSummary,
+            resultJson: stringifyDocumentIntelligenceJsonValue(task.result),
+            unresolvedJson: stringifyDocumentIntelligenceJsonValue(task.unresolved),
+            createdArtifactKeys: stringifyDocumentIntelligenceJsonValue(task.createdArtifactKeys),
+            completedAt: task.completedAt ? new Date(task.completedAt) : null,
+          },
+          update: {
+            kind: task.kind,
+            status: task.status,
+            tool: task.tool,
+            rationale: task.rationale,
+            sourcePageNumber: task.location.pageNumberStart,
+            sourcePageLabel: task.location.pageLabelStart,
+            tableId: task.location.tableId,
+            figureId: task.location.figureId,
+            sectionPath: stringifyDocumentIntelligenceJsonValue(task.location.sectionPath),
+            headingPath: stringifyDocumentIntelligenceJsonValue(task.location.headingPath),
+            sourceLocationLabel: task.sourceLocationLabel,
+            resultSummary: task.resultSummary,
+            resultJson: stringifyDocumentIntelligenceJsonValue(task.result),
+            unresolvedJson: stringifyDocumentIntelligenceJsonValue(task.unresolved),
+            createdArtifactKeys: stringifyDocumentIntelligenceJsonValue(task.createdArtifactKeys),
+            completedAt: task.completedAt ? new Date(task.completedAt) : null,
+          },
+          select: {
+            id: true,
+            conversationDocumentId: true,
+            taskKey: true,
+            kind: true,
+            status: true,
+            tool: true,
+            rationale: true,
+            sourcePageNumber: true,
+            sourcePageLabel: true,
+            tableId: true,
+            figureId: true,
+            sectionPath: true,
+            headingPath: true,
+            sourceLocationLabel: true,
+            resultSummary: true,
+            resultJson: true,
+            unresolvedJson: true,
+            createdArtifactKeys: true,
+            createdAt: true,
+            updatedAt: true,
+            completedAt: true,
+          },
+        })
+      : async (task: UpsertDocumentInspectionTaskInput) => {
+          const now = new Date();
+          return {
+            id: `${task.sourceDocumentId}:${task.taskKey}`,
+            conversationDocumentId: task.sourceDocumentId,
+            taskKey: task.taskKey,
+            kind: task.kind,
+            status: task.status,
+            tool: task.tool,
+            rationale: task.rationale,
+            sourcePageNumber: task.location.pageNumberStart,
+            sourcePageLabel: task.location.pageLabelStart,
+            tableId: task.location.tableId,
+            figureId: task.location.figureId,
+            sectionPath: stringifyDocumentIntelligenceJsonValue(task.location.sectionPath),
+            headingPath: stringifyDocumentIntelligenceJsonValue(task.location.headingPath),
+            sourceLocationLabel: task.sourceLocationLabel,
+            resultSummary: task.resultSummary,
+            resultJson: stringifyDocumentIntelligenceJsonValue(task.result),
+            unresolvedJson: stringifyDocumentIntelligenceJsonValue(task.unresolved),
+            createdArtifactKeys: stringifyDocumentIntelligenceJsonValue(task.createdArtifactKeys),
+            createdAt: now,
+            updatedAt: now,
+            completedAt: task.completedAt ? new Date(task.completedAt) : now,
+          } satisfies ConversationDocumentInspectionTaskStoreRecord;
+        }
+  );
+  const persistAsyncAgentWork = dependencies.persistAsyncAgentWork ?? persistDocumentIntelligence;
+  const persistAsyncWorkItem = dependencies.upsertAsyncAgentWorkItem ?? (
+    persistAsyncAgentWork
+      ? upsertAsyncAgentWorkItem
+      : async (item: AsyncAgentWorkItem) => item
+  );
   const requestedSources = resolveRequestedConversationContextSourcePlan(params.sourcePlan);
   const sourceDecisions = resolveConversationContextSourceDecisions({
     conversationId: params.conversationId,
@@ -2695,11 +3612,37 @@ export async function resolveConversationContextBundle(params: {
     : [];
   const resolvedBudget = resolveConversationContextBudget(params.budget, documents.length);
   const occurrenceQuery = analyzeDocumentOccurrenceQuery(params.currentUserPrompt);
+  const documentIds = documents.map((document) => document.id);
+  const [storedKnowledgeArtifacts, storedInspectionTasks] = documentIds.length > 0
+    ? await Promise.all([
+        listKnowledgeArtifacts(documentIds),
+        listInspectionTasks(documentIds),
+      ])
+    : [[], []];
+  const storedKnowledgeArtifactsByDocument = new Map<string, DocumentKnowledgeArtifactRecord[]>();
+  const storedInspectionTasksByDocument = new Map<string, DocumentInspectionTaskRecord[]>();
+
+  for (const artifact of storedKnowledgeArtifacts.map(buildStoredKnowledgeArtifactRecord)) {
+    const existing = storedKnowledgeArtifactsByDocument.get(artifact.sourceDocumentId) ?? [];
+    existing.push(artifact);
+    storedKnowledgeArtifactsByDocument.set(artifact.sourceDocumentId, existing);
+  }
+
+  for (const task of storedInspectionTasks.map(buildStoredInspectionTaskRecord)) {
+    const existing = storedInspectionTasksByDocument.get(task.sourceDocumentId) ?? [];
+    existing.push(task);
+    storedInspectionTasksByDocument.set(task.sourceDocumentId, existing);
+  }
 
   const sources: ConversationContextSource[] = [];
   const sections: string[] = [];
   const availabilityNotes: string[] = [];
   const documentChunkingDocuments: ConversationContextDocumentChunkingDocument[] = [];
+  const documentIntelligenceDocuments: ConversationContextDocumentIntelligenceDocument[] = [];
+  const progressiveArtifactCandidates: ContextPackingCandidate[] = [];
+  const progressiveRawExcerptCandidates: ContextPackingCandidate[] = [];
+  const selectedArtifactKeys: string[] = [];
+  let selectedArtifactTokenCount = 0;
   let remainingDocumentTokens = resolvedBudget.totalDocumentContextBudgetTokens;
   let usedCount = 0;
   let unsupportedCount = 0;
@@ -2709,6 +3652,8 @@ export async function resolveConversationContextBundle(params: {
 
   for (const [documentIndex, document] of documents.entries()) {
     const contextKind = resolveThreadDocumentContextKind(document);
+    const existingArtifacts = storedKnowledgeArtifactsByDocument.get(document.id) ?? [];
+    const existingInspectionTasks = storedInspectionTasksByDocument.get(document.id) ?? [];
 
     if (!contextKind) {
       unsupportedCount += 1;
@@ -2723,6 +3668,14 @@ export async function resolveConversationContextBundle(params: {
           parentSourceStatus: "unsupported",
           extractionStatus: "unsupported",
           occurrenceQuery,
+        })
+      );
+      documentIntelligenceDocuments.push(
+        buildDocumentIntelligenceDebugDocument({
+          document,
+          sourceType: document.fileType || "unknown",
+          artifacts: existingArtifacts,
+          inspectionTasks: existingInspectionTasks,
         })
       );
       continue;
@@ -2743,6 +3696,14 @@ export async function resolveConversationContextBundle(params: {
           occurrenceQuery,
         })
       );
+      documentIntelligenceDocuments.push(
+        buildDocumentIntelligenceDebugDocument({
+          document,
+          sourceType: contextKind,
+          artifacts: existingArtifacts,
+          inspectionTasks: existingInspectionTasks,
+        })
+      );
       continue;
     }
 
@@ -2759,6 +3720,14 @@ export async function resolveConversationContextBundle(params: {
           parentSourceStatus: "unavailable",
           extractionStatus: "unavailable",
           occurrenceQuery,
+        })
+      );
+      documentIntelligenceDocuments.push(
+        buildDocumentIntelligenceDebugDocument({
+          document,
+          sourceType: contextKind,
+          artifacts: existingArtifacts,
+          inspectionTasks: existingInspectionTasks,
         })
       );
       continue;
@@ -2778,6 +3747,14 @@ export async function resolveConversationContextBundle(params: {
           parentSourceStatus: "unavailable",
           extractionStatus: "unavailable",
           occurrenceQuery,
+        })
+      );
+      documentIntelligenceDocuments.push(
+        buildDocumentIntelligenceDebugDocument({
+          document,
+          sourceType: contextKind,
+          artifacts: existingArtifacts,
+          inspectionTasks: existingInspectionTasks,
         })
       );
       continue;
@@ -2808,6 +3785,14 @@ export async function resolveConversationContextBundle(params: {
           occurrenceQuery,
         })
       );
+        documentIntelligenceDocuments.push(
+          buildDocumentIntelligenceDebugDocument({
+            document,
+            sourceType: contextKind,
+            artifacts: existingArtifacts,
+            inspectionTasks: existingInspectionTasks,
+          })
+        );
         continue;
       }
 
@@ -2843,6 +3828,14 @@ export async function resolveConversationContextBundle(params: {
             occurrenceQuery,
           })
         );
+        documentIntelligenceDocuments.push(
+          buildDocumentIntelligenceDebugDocument({
+            document,
+            sourceType: contextKind,
+            artifacts: existingArtifacts,
+            inspectionTasks: existingInspectionTasks,
+          })
+        );
         continue;
       }
     } else {
@@ -2860,6 +3853,14 @@ export async function resolveConversationContextBundle(params: {
             parentSourceStatus: "failed",
             extractionStatus: "failed",
             occurrenceQuery,
+          })
+        );
+        documentIntelligenceDocuments.push(
+          buildDocumentIntelligenceDebugDocument({
+            document,
+            sourceType: contextKind,
+            artifacts: existingArtifacts,
+            inspectionTasks: existingInspectionTasks,
           })
         );
         continue;
@@ -2889,6 +3890,14 @@ export async function resolveConversationContextBundle(params: {
           extractionDetail: detail,
           sourceMetadata,
           occurrenceQuery,
+        })
+      );
+      documentIntelligenceDocuments.push(
+        buildDocumentIntelligenceDebugDocument({
+          document,
+          sourceType: contextKind,
+          artifacts: existingArtifacts,
+          inspectionTasks: existingInspectionTasks,
         })
       );
       continue;
@@ -2921,20 +3930,99 @@ export async function resolveConversationContextBundle(params: {
           occurrenceQuery,
         })
       );
+      documentIntelligenceDocuments.push(
+        buildDocumentIntelligenceDebugDocument({
+          document,
+          sourceType: contextKind,
+          artifacts: existingArtifacts,
+          inspectionTasks: existingInspectionTasks,
+        })
+      );
       continue;
     }
+
+    let learnedArtifacts = existingArtifacts;
+    let inspectionTasks = existingInspectionTasks;
+
+    if (contextKind === "pdf" && pdfExtractionMetadata) {
+      const synthesizedIntelligence = synthesizePdfDocumentIntelligence({
+        sourceDocumentId: document.id,
+        filename: document.filename,
+        extractionMetadata: pdfExtractionMetadata,
+        structuredRanges: pdfStructuredRanges,
+      });
+      const persistedArtifacts = await Promise.all(
+        synthesizedIntelligence.artifacts.map(async (artifact) =>
+          buildStoredKnowledgeArtifactRecord(await upsertKnowledgeArtifact(artifact))
+        )
+      );
+      const persistedInspectionTasks = await Promise.all(
+        synthesizedIntelligence.inspectionTasks.map(async (task) =>
+          buildStoredInspectionTaskRecord(await upsertInspectionTask(task))
+        )
+      );
+
+      learnedArtifacts = mergeDocumentKnowledgeArtifacts(existingArtifacts, persistedArtifacts);
+      inspectionTasks = mergeDocumentInspectionTasks(existingInspectionTasks, persistedInspectionTasks);
+      storedKnowledgeArtifactsByDocument.set(document.id, learnedArtifacts);
+      storedInspectionTasksByDocument.set(document.id, inspectionTasks);
+    }
+
+    progressiveArtifactCandidates.push(
+      ...learnedArtifacts.map((artifact) =>
+        buildArtifactPackingCandidate({
+          artifact,
+          sourceType: contextKind,
+          priority:
+            artifact.kind === "table_extraction"
+              ? 90
+              : artifact.kind === "table_candidate" || artifact.kind === "extraction_warning"
+                ? 80
+                : 50,
+          required: artifact.status === "warning" || artifact.kind === "extraction_warning",
+        })
+      )
+    );
 
     const ranking = rankDocumentChunks({
       chunks: chunkCandidates,
       query: params.currentUserPrompt,
     });
+    const rankingPriorityByChunkKey = new Map(
+      ranking.details.map((detail) => [
+        `${detail.sourceId}:${detail.chunkIndex}`,
+        Math.max(0, 1000 - detail.rankingOrder),
+      ])
+    );
+    progressiveRawExcerptCandidates.push(
+      ...ranking.rankedChunks.map((chunk) =>
+        buildRawExcerptPackingCandidate({
+          chunk,
+          priority: rankingPriorityByChunkKey.get(`${chunk.sourceId}:${chunk.chunkIndex}`) ?? 0,
+        })
+      )
+    );
     const availableDocumentTokens = Math.min(
       resolvedBudget.perDocumentBudgetTokens,
       remainingDocumentTokens
     );
+    const artifactSelection = selectDocumentKnowledgeArtifactsWithinBudget({
+      artifacts: learnedArtifacts,
+      query: params.currentUserPrompt,
+      maxTokens: Math.max(0, Math.min(256, Math.floor(availableDocumentTokens * 0.5))),
+      maxArtifacts: 3,
+    });
+    const sourceMetadataWithArtifacts = buildArtifactSourceMetadata({
+      existingSourceMetadata: sourceMetadata,
+      artifacts: learnedArtifacts,
+      inspectionTasks,
+      selectedArtifacts: artifactSelection.selectedArtifacts,
+    });
     const documentBudgetTokens = Math.max(
       0,
-      availableDocumentTokens - THREAD_DOCUMENT_SECTION_TOKEN_RESERVE
+      availableDocumentTokens -
+        artifactSelection.selectedApproxTokenCount -
+        THREAD_DOCUMENT_SECTION_TOKEN_RESERVE
     );
     const selection = selectRankedDocumentChunksWithinBudget({
       chunks: ranking.rankedChunks,
@@ -2945,10 +4033,13 @@ export async function resolveConversationContextBundle(params: {
     const documentChunkingDebugDocument = buildThreadDocumentChunkingDebugDocument({
       document,
       sourceType: contextKind,
-      parentSourceStatus: selection.selectedChunks.length > 0 ? "used" : "unavailable",
+      parentSourceStatus:
+        selection.selectedChunks.length > 0 || artifactSelection.selectedArtifacts.length > 0
+          ? "used"
+          : "unavailable",
       extractionStatus: "extracted",
       extractionDetail,
-      sourceMetadata,
+      sourceMetadata: sourceMetadataWithArtifacts,
       occurrenceQuery,
       documentBudgetTokens: resolvedBudget.budgetInputProvided ? documentBudgetTokens : null,
       chunks: chunkCandidates,
@@ -2958,9 +4049,14 @@ export async function resolveConversationContextBundle(params: {
     const shouldIncludeOccurrenceInventoryOnly =
       documentChunkingDebugDocument.occurrence.searchStatus === "searched" &&
       documentChunkingDebugDocument.occurrence.locations.length > 0 &&
-      selection.selectedChunks.length === 0;
+      selection.selectedChunks.length === 0 &&
+      artifactSelection.selectedArtifacts.length === 0;
 
-    if (selection.selectedChunks.length === 0 && !shouldIncludeOccurrenceInventoryOnly) {
+    if (
+      selection.selectedChunks.length === 0 &&
+      artifactSelection.selectedArtifacts.length === 0 &&
+      !shouldIncludeOccurrenceInventoryOnly
+    ) {
       unavailableCount += 1;
       threadDocumentExcludedCategories.add("budget");
       const detail =
@@ -2971,6 +4067,15 @@ export async function resolveConversationContextBundle(params: {
         ...documentChunkingDebugDocument,
         parentSourceStatus: "unavailable",
       });
+      documentIntelligenceDocuments.push(
+        buildDocumentIntelligenceDebugDocument({
+          document,
+          sourceType: contextKind,
+          artifacts: learnedArtifacts,
+          inspectionTasks,
+          selectedArtifacts: artifactSelection.selectedArtifacts,
+        })
+      );
       continue;
     }
 
@@ -2979,9 +4084,14 @@ export async function resolveConversationContextBundle(params: {
       selection.skippedChunks.length === 0 &&
       !selection.usedBudgetClamp;
     usedCount += 1;
+    selectedArtifactKeys.push(
+      ...artifactSelection.selectedArtifacts.map((artifact) => artifact.artifactKey)
+    );
+    selectedArtifactTokenCount += artifactSelection.selectedApproxTokenCount;
     remainingDocumentTokens = Math.max(
       0,
       remainingDocumentTokens -
+        artifactSelection.selectedApproxTokenCount -
         selection.selectedApproxTokenCount -
         THREAD_DOCUMENT_SECTION_TOKEN_RESERVE
     );
@@ -2995,6 +4105,7 @@ export async function resolveConversationContextBundle(params: {
         selection,
         ranking,
         occurrence: documentChunkingDebugDocument.occurrence,
+        selectedArtifacts: artifactSelection.selectedArtifacts,
       })
     );
     sources.push(buildContextSource(
@@ -3005,12 +4116,22 @@ export async function resolveConversationContextBundle(params: {
         fullyIncluded,
         occurrenceInventoryOnly: shouldIncludeOccurrenceInventoryOnly,
         extractionDetail,
+        artifactCount: artifactSelection.selectedArtifacts.length,
       })
     ));
     documentChunkingDocuments.push({
       ...documentChunkingDebugDocument,
       parentSourceStatus: "used",
     });
+    documentIntelligenceDocuments.push(
+      buildDocumentIntelligenceDebugDocument({
+        document,
+        sourceType: contextKind,
+        artifacts: learnedArtifacts,
+        inspectionTasks,
+        selectedArtifacts: artifactSelection.selectedArtifacts,
+      })
+    );
   }
 
   const summarySources: ConversationContextSummarySource[] = [];
@@ -3051,39 +4172,76 @@ export async function resolveConversationContextBundle(params: {
   const documentChunkingOccurrence = buildThreadDocumentOccurrenceSummary(
     documentChunkingDocuments
   );
+  const agentControl = evaluateAgentControlSurface({
+    conversationId: params.conversationId,
+    request: params.currentUserPrompt ?? null,
+    model: resolvedBudget.budgetInputProvided
+      ? {
+          provider: resolvedBudget.provider,
+          protocol: resolvedBudget.protocol,
+          model: resolvedBudget.model,
+          mode: resolvedBudget.mode ?? "standard",
+        }
+      : null,
+    sourceSignals: buildAgentControlSourceSignals({
+      sourceDocuments: documents,
+      documentChunkingDocuments,
+      documentIntelligenceDocuments,
+    }),
+  });
+
+  const renderedText = joinMarkdownSections([
+    documentChunkingOccurrence
+      ? joinMarkdownSections([
+          "## Thread Document Occurrence Scan",
+          documentChunkingOccurrence.detail,
+          documentChunkingOccurrence.unsearchableDocuments.length > 0
+            ? joinMarkdownSections([
+                "Files that could not be searched in this runtime:",
+                documentChunkingOccurrence.unsearchableDocuments
+                  .map((document) => `- ${document.filename}: ${document.detail}`)
+                  .join("\n"),
+                "Only the files listed above fall outside this occurrence scan coverage.",
+              ])
+            : null,
+        ])
+      : null,
+    sections.length > 0
+      ? joinMarkdownSections([
+        "## Thread-Attached Documents (Current Conversation Only)",
+        "Use these files as supporting thread context. Recent thread messages and the user's current request remain higher authority.",
+        ...sections,
+      ])
+      : null,
+    availabilityNotes.length > 0
+      ? joinMarkdownSections([
+          "## Thread Document Availability",
+          "These attachments are present on the current thread but were not loaded into this runtime context:",
+          availabilityNotes.join("\n"),
+        ])
+      : null,
+  ]);
+  const progressiveAssembly = assembleProgressiveContext({
+    request: params.currentUserPrompt ?? null,
+    agentControl,
+    artifactCandidates: progressiveArtifactCandidates,
+    rawExcerptCandidates: progressiveRawExcerptCandidates,
+  });
+  const asyncWorkItems = planAsyncAgentWorkItems({
+    conversationId: params.conversationId,
+    conversationDocumentId: documents.length === 1 ? documents[0].id : null,
+    createdById: params.authority.requestingUserId,
+    request: params.currentUserPrompt ?? null,
+    controlDecision: agentControl,
+    assembly: progressiveAssembly,
+  });
+  const asyncAgentWorkItem = asyncWorkItems[0]
+    ? await persistAsyncWorkItem(runAsyncAgentWorkItem(asyncWorkItems[0]))
+    : null;
+  const asyncAgentWork = toAsyncAgentWorkDebugSnapshot(asyncAgentWorkItem);
 
   const bundle = {
-    text: joinMarkdownSections([
-      documentChunkingOccurrence
-        ? joinMarkdownSections([
-            "## Thread Document Occurrence Scan",
-            documentChunkingOccurrence.detail,
-            documentChunkingOccurrence.unsearchableDocuments.length > 0
-              ? joinMarkdownSections([
-                  "Files that could not be searched in this runtime:",
-                  documentChunkingOccurrence.unsearchableDocuments
-                    .map((document) => `- ${document.filename}: ${document.detail}`)
-                    .join("\n"),
-                  "Only the files listed above fall outside this occurrence scan coverage.",
-                ])
-              : null,
-          ])
-        : null,
-      sections.length > 0
-        ? joinMarkdownSections([
-          "## Thread-Attached Documents (Current Conversation Only)",
-          "Use these files as supporting thread context. Recent thread messages and the user's current request remain higher authority.",
-          ...sections,
-        ])
-        : null,
-      availabilityNotes.length > 0
-        ? joinMarkdownSections([
-            "## Thread Document Availability",
-            "These attachments are present on the current thread but were not loaded into this runtime context:",
-            availabilityNotes.join("\n"),
-          ])
-        : null,
-    ]),
+    text: renderedText,
     sources,
     summarySources,
     sourceSelection: buildConversationContextSourceSelection({
@@ -3097,6 +4255,14 @@ export async function resolveConversationContextBundle(params: {
       occurrence: documentChunkingOccurrence,
       documents: documentChunkingDocuments,
     },
+    documentIntelligence: {
+      selectedArtifactKeys: Array.from(new Set(selectedArtifactKeys)),
+      selectedApproxTokenCount: selectedArtifactTokenCount,
+      documents: documentIntelligenceDocuments,
+    },
+    agentControl,
+    progressiveAssembly,
+    asyncAgentWork,
   };
 
   return {

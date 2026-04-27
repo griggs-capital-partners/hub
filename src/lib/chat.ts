@@ -167,6 +167,93 @@ type ChatProjectSummary = {
   name: string;
 };
 
+export type ReadableConversationAccessReason =
+  | "readable"
+  | "conversation_missing"
+  | "conversation_archived"
+  | "conversation_not_archived"
+  | "user_has_no_active_membership";
+
+export type ReadableConversationAccessSnapshot = {
+  archivedAt: Date | null;
+  members: ReadonlyArray<{
+    userId: string | null;
+    removedAt: Date | null;
+  }>;
+};
+
+export type ConversationMessagesAccessResult = {
+  status: 200 | 404;
+  notFoundReason: ReadableConversationAccessReason | null;
+  readableHelperPassed: boolean;
+  postHelperLookupFailed: boolean;
+  messageCount: number;
+};
+
+function isArchivedInScope(archivedAt: Date | null, scope: ConversationArchiveScope = "exclude") {
+  if (scope === "include") {
+    return true;
+  }
+
+  if (scope === "only") {
+    return archivedAt !== null;
+  }
+
+  return archivedAt === null;
+}
+
+export function getReadableConversationAccessReason(
+  conversation: ReadableConversationAccessSnapshot | null | undefined,
+  userId: string,
+  options: { archived?: ConversationArchiveScope } = {}
+): ReadableConversationAccessReason {
+  if (!conversation) {
+    return "conversation_missing";
+  }
+
+  if (!isArchivedInScope(conversation.archivedAt, options.archived)) {
+    return options.archived === "only" ? "conversation_not_archived" : "conversation_archived";
+  }
+
+  const hasActiveUserMembership = conversation.members.some(
+    (member) => member.userId === userId && member.removedAt === null
+  );
+
+  return hasActiveUserMembership ? "readable" : "user_has_no_active_membership";
+}
+
+export function isConversationReadableByUser(
+  conversation: ReadableConversationAccessSnapshot | null | undefined,
+  userId: string,
+  options: { archived?: ConversationArchiveScope } = {}
+) {
+  return getReadableConversationAccessReason(conversation, userId, options) === "readable";
+}
+
+export function resolveConversationMessagesAccessResult(params: {
+  conversation: ReadableConversationAccessSnapshot | null | undefined;
+  userId: string;
+  messageCount?: number | null;
+  archived?: ConversationArchiveScope;
+  readableHelperPassed?: boolean;
+  postHelperLookupFailed?: boolean;
+}): ConversationMessagesAccessResult {
+  const notFoundReason = getReadableConversationAccessReason(
+    params.conversation,
+    params.userId,
+    { archived: params.archived }
+  );
+  const isReadable = notFoundReason === "readable";
+
+  return {
+    status: isReadable ? 200 : 404,
+    notFoundReason: isReadable ? null : notFoundReason,
+    readableHelperPassed: params.readableHelperPassed ?? isReadable,
+    postHelperLookupFailed: params.postHelperLookupFailed ?? false,
+    messageCount: params.messageCount ?? 0,
+  };
+}
+
 function sortConversationMemberships<T extends Pick<ConversationMembershipRecord, "joinedAt">>(members: readonly T[]) {
   return [...members].sort((left, right) => left.joinedAt.getTime() - right.joinedAt.getTime());
 }
@@ -721,7 +808,9 @@ export async function listConversationsForUserWithOptions(
       orderBy: [{ updatedAt: "desc" }],
     });
 
-    return conversations.map(serializeConversation);
+    return conversations
+      .filter((conversation) => isConversationReadableByUser(conversation, userId, options))
+      .map(serializeConversation);
   } catch (error) {
     if (isMissingChatTablesError(error)) {
       return [];
@@ -736,21 +825,21 @@ export async function getConversationForUser(
   userId: string,
   options: { memberScope?: ConversationMemberScope; archived?: ConversationArchiveScope } = {}
 ) {
+  return getReadableConversationForUser(conversationId, userId, options);
+}
+
+export async function getReadableConversationForUser(
+  conversationId: string,
+  userId: string,
+  options: { memberScope?: ConversationMemberScope; archived?: ConversationArchiveScope } = {}
+) {
   try {
-    return await prisma.conversation.findFirst({
-      where: {
-        id: conversationId,
-        ...(options.archived === "only"
-          ? { archivedAt: { not: null } }
-          : options.archived === "include"
-            ? {}
-            : { archivedAt: null }),
-        members: {
-          some: { userId, removedAt: null },
-        },
-      },
+    const conversation = await prisma.conversation.findUnique({
+      where: { id: conversationId },
       include: options.memberScope === "all" ? allConversationInclude : activeConversationInclude,
     });
+
+    return isConversationReadableByUser(conversation, userId, options) ? conversation : null;
   } catch (error) {
     if (isMissingChatTablesError(error)) {
       return null;

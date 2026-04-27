@@ -338,6 +338,12 @@ export interface AgentInspectorData {
       domain?: string;
       scope?: string;
     }>;
+    documentChunking?: unknown;
+    documentIntelligence?: unknown;
+    agentControl?: unknown;
+    asyncAgentWork?: unknown;
+    truthfulExecutionClaims?: unknown;
+    debugTrace?: unknown;
   };
   payload: {
     currentUserName: string | null;

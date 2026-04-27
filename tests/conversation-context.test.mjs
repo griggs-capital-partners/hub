@@ -61,6 +61,106 @@ function resolveConversationContextBundle(params, dependencies) {
   );
 }
 
+function createDocumentIntelligenceMemory() {
+  const knowledgeArtifacts = [];
+  const inspectionTasks = [];
+
+  return {
+    knowledgeArtifacts,
+    inspectionTasks,
+    dependencies: {
+      listKnowledgeArtifacts: async (conversationDocumentIds) =>
+        knowledgeArtifacts.filter((artifact) => conversationDocumentIds.includes(artifact.conversationDocumentId)),
+      upsertKnowledgeArtifact: async (artifact) => {
+        const existingIndex = knowledgeArtifacts.findIndex(
+          (entry) =>
+            entry.conversationDocumentId === artifact.sourceDocumentId &&
+            entry.artifactKey === artifact.artifactKey
+        );
+        const now = new Date();
+        const stored = {
+          id:
+            existingIndex >= 0
+              ? knowledgeArtifacts[existingIndex].id
+              : `${artifact.sourceDocumentId}:${artifact.artifactKey}`,
+          conversationDocumentId: artifact.sourceDocumentId,
+          artifactKey: artifact.artifactKey,
+          kind: artifact.kind,
+          status: artifact.status,
+          title: artifact.title,
+          summary: artifact.summary,
+          content: artifact.content,
+          tool: artifact.tool,
+          sourcePageNumber: artifact.location.pageNumberStart,
+          sourcePageLabel: artifact.location.pageLabelStart,
+          tableId: artifact.location.tableId,
+          figureId: artifact.location.figureId,
+          sectionPath: JSON.stringify(artifact.location.sectionPath),
+          headingPath: JSON.stringify(artifact.location.headingPath),
+          sourceLocationLabel: artifact.sourceLocationLabel,
+          payloadJson: JSON.stringify(artifact.payload),
+          relevanceHints: JSON.stringify(artifact.relevanceHints),
+          confidence: artifact.confidence,
+          createdAt: existingIndex >= 0 ? knowledgeArtifacts[existingIndex].createdAt : now,
+          updatedAt: now,
+        };
+
+        if (existingIndex >= 0) {
+          knowledgeArtifacts[existingIndex] = stored;
+        } else {
+          knowledgeArtifacts.push(stored);
+        }
+
+        return stored;
+      },
+      listInspectionTasks: async (conversationDocumentIds) =>
+        inspectionTasks.filter((task) => conversationDocumentIds.includes(task.conversationDocumentId)),
+      upsertInspectionTask: async (task) => {
+        const existingIndex = inspectionTasks.findIndex(
+          (entry) =>
+            entry.conversationDocumentId === task.sourceDocumentId &&
+            entry.taskKey === task.taskKey
+        );
+        const now = new Date();
+        const stored = {
+          id:
+            existingIndex >= 0
+              ? inspectionTasks[existingIndex].id
+              : `${task.sourceDocumentId}:${task.taskKey}`,
+          conversationDocumentId: task.sourceDocumentId,
+          taskKey: task.taskKey,
+          kind: task.kind,
+          status: task.status,
+          tool: task.tool,
+          rationale: task.rationale,
+          sourcePageNumber: task.location.pageNumberStart,
+          sourcePageLabel: task.location.pageLabelStart,
+          tableId: task.location.tableId,
+          figureId: task.location.figureId,
+          sectionPath: JSON.stringify(task.location.sectionPath),
+          headingPath: JSON.stringify(task.location.headingPath),
+          sourceLocationLabel: task.sourceLocationLabel,
+          resultSummary: task.resultSummary,
+          resultJson: JSON.stringify(task.result),
+          unresolvedJson: JSON.stringify(task.unresolved),
+          createdArtifactKeys: JSON.stringify(task.createdArtifactKeys),
+          createdAt: existingIndex >= 0 ? inspectionTasks[existingIndex].createdAt : now,
+          updatedAt: now,
+          completedAt: task.completedAt ? new Date(task.completedAt) : now,
+        };
+
+        if (existingIndex >= 0) {
+          inspectionTasks[existingIndex] = stored;
+        } else {
+          inspectionTasks.push(stored);
+        }
+
+        return stored;
+      },
+    },
+  };
+}
+
 function findSourceDecision(bundle, sourceId) {
   return bundle.sourceDecisions.find((source) => source.sourceId === sourceId) ?? null;
 }
@@ -627,6 +727,185 @@ await runTest("classifies T5 deck table and visual excerpts without inventing fa
   assert.match(bundle.text, /PDF STRUCTURE CLASSIFICATION: table-like schedule\/timeline visual/i);
   assert.equal(bundle.documentChunking.documents[0].sourceMetadata?.classificationCounts?.true_table, 1);
   assert.equal(bundle.debugTrace?.documents[0]?.metadata?.pageStructures?.find((page) => page.pageNumber === 15)?.primaryClassification, "true_table");
+});
+
+await runTest("creates durable T5 page 15 table artifacts and preserves sparse extraction warnings", async () => {
+  const expectations = getT5DeckExpectations();
+  const intelligenceMemory = createDocumentIntelligenceMemory();
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: expectations.tableQuery,
+    },
+    {
+      listDocuments: async () => [
+        makeDocument({
+          id: expectations.sourceId,
+          filename: expectations.filename,
+          mimeType: "application/pdf",
+          fileType: "pdf",
+          storagePath: "C:\\GitHub\\hub\\uploads\\thread-1\\t5.pdf",
+        }),
+      ],
+      readBinaryFile: async () => Buffer.from("%PDF-1.4\nt5 fixture", "utf8"),
+      extractPdfText: async () =>
+        buildPdfContextExtractionResult(getT5DeckPdfExtractionFixture()),
+      ...intelligenceMemory.dependencies,
+    }
+  );
+
+  assert.equal(
+    intelligenceMemory.knowledgeArtifacts.some(
+      (artifact) =>
+        artifact.conversationDocumentId === expectations.sourceId &&
+        artifact.artifactKey === "table_candidate:15" &&
+        artifact.kind === "table_candidate"
+    ),
+    true
+  );
+  assert.equal(
+    intelligenceMemory.knowledgeArtifacts.some(
+      (artifact) =>
+        artifact.conversationDocumentId === expectations.sourceId &&
+        artifact.artifactKey === "extraction_warning:15:table_body_missing" &&
+        artifact.kind === "extraction_warning"
+    ),
+    true
+  );
+  const storedInspectionTask = intelligenceMemory.inspectionTasks.find(
+    (task) =>
+      task.conversationDocumentId === expectations.sourceId &&
+      task.taskKey === "inspect_table_candidate:15"
+  );
+  assert.ok(storedInspectionTask);
+  const storedInspectionResult = JSON.parse(storedInspectionTask.resultJson);
+  assert.equal(storedInspectionResult.toolTrace.requestedCapability, "pdf_table_detection");
+  assert.equal(storedInspectionResult.toolTrace.selectedTool, "pdf_table_candidate_detection");
+  assert.equal(storedInspectionResult.toolTrace.approvalStatus, "built_in");
+  assert.equal(storedInspectionResult.toolTrace.runtimeClass, "local");
+  assert.equal(storedInspectionResult.toolTrace.sideEffectLevel, "creates_internal_artifact");
+  assert.equal(
+    storedInspectionResult.toolTrace.benchmarkFixtureIds.includes("t5_pdf_page_15_visible_table"),
+    true
+  );
+  assert.equal(storedInspectionResult.toolTrace.recommendedNextCapabilities.includes("ocr"), true);
+  assert.equal(storedInspectionResult.toolTrace.executedUnapprovedTool, false);
+  assert.equal(bundle.documentIntelligence.documents[0]?.state.stateStatus, "partial");
+  assert.equal(bundle.documentIntelligence.documents[0]?.state.warningArtifactCount, 1);
+  assert.equal(
+    bundle.documentIntelligence.documents[0]?.artifacts.some(
+      (artifact) => artifact.artifactKey === "table_candidate:15" && artifact.selected
+    ),
+    true
+  );
+  assert.match(bundle.text, /### Learned Artifacts/);
+  assert.match(bundle.text, /Likely table detected on page 15/i);
+  assert.match(bundle.text, /Do not infer missing columns, cell values, or headers/i);
+  assert.doesNotMatch(bundle.text, /\bSodium\b|\bChloride\b|\bCalcium\b/i);
+  assert.equal(
+    bundle.debugTrace?.knowledgeArtifacts.some((artifact) => artifact.kind === "table_candidate"),
+    true
+  );
+  assert.equal(
+    bundle.debugTrace?.inspections.some((inspection) => inspection.kind === "inspect_table"),
+    true
+  );
+  const traceInspection = bundle.debugTrace?.inspections.find(
+    (inspection) => inspection.metadata?.taskKey === "inspect_table_candidate:15"
+  );
+  assert.equal(traceInspection?.requestedCapability, "pdf_table_detection");
+  assert.equal(traceInspection?.selectedTool, "pdf_table_candidate_detection");
+  assert.equal(traceInspection?.approvalStatus, "built_in");
+  assert.equal(traceInspection?.runtimeClass, "local");
+  assert.equal(traceInspection?.governanceTrace?.selectedTool, "pdf_table_candidate_detection");
+  assert.equal(traceInspection?.recommendedNextCapabilities.includes("vision_page_understanding"), true);
+  assert.equal(bundle.progressiveAssembly.plan.passes[0]?.name, "artifact_reuse");
+  assert.equal(
+    bundle.progressiveAssembly.passResults
+      .find((pass) => pass.pass.name === "artifact_reuse")
+      ?.reusedArtifactIds.some((artifactId) => artifactId.includes("table_candidate:15")),
+    true
+  );
+  assert.equal(
+    bundle.progressiveAssembly.gaps.some((gap) => gap.kind === "missing_table_body"),
+    true
+  );
+  assert.equal(
+    ["sufficient_with_limitations", "insufficient_needs_approval", "insufficient_needs_async"].includes(
+      bundle.progressiveAssembly.sufficiency.status
+    ),
+    true
+  );
+});
+
+await runTest("reuses stored artifacts ahead of weaker raw parser text for follow-up T5 table questions", async () => {
+  const expectations = getT5DeckExpectations();
+  const intelligenceMemory = createDocumentIntelligenceMemory();
+  const dependencies = {
+    listDocuments: async () => [
+      makeDocument({
+        id: expectations.sourceId,
+        filename: expectations.filename,
+        mimeType: "application/pdf",
+        fileType: "pdf",
+        storagePath: "C:\\GitHub\\hub\\uploads\\thread-1\\t5.pdf",
+      }),
+    ],
+    readBinaryFile: async () => Buffer.from("%PDF-1.4\nt5 fixture", "utf8"),
+    extractPdfText: async () =>
+      buildPdfContextExtractionResult(getT5DeckPdfExtractionFixture()),
+    ...intelligenceMemory.dependencies,
+  };
+
+  await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: expectations.tableQuery,
+    },
+    dependencies
+  );
+
+  const artifactCountAfterFirstPass = intelligenceMemory.knowledgeArtifacts.length;
+  const followUpBundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "What do we already know about the water chemistry table on page 15?",
+    },
+    dependencies
+  );
+
+  assert.equal(intelligenceMemory.knowledgeArtifacts.length, artifactCountAfterFirstPass);
+  assert.equal(
+    followUpBundle.documentIntelligence.documents[0]?.state.selectedArtifactKeys.includes("table_candidate:15"),
+    true
+  );
+  assert.equal(
+    followUpBundle.documentIntelligence.selectedArtifactKeys.includes("table_candidate:15"),
+    true
+  );
+  const selectedTableArtifact = followUpBundle.documentIntelligence.documents[0]?.artifacts.find(
+    (artifact) => artifact.artifactKey === "table_candidate:15"
+  );
+  assert.equal(selectedTableArtifact?.selected, true);
+  assert.equal(selectedTableArtifact?.tool, "pdf_table_candidate_detection");
+  assert.equal(
+    followUpBundle.text.indexOf("### Learned Artifacts") >= 0 &&
+      followUpBundle.text.indexOf("### Excerpt 1") >= 0 &&
+      followUpBundle.text.indexOf("### Learned Artifacts") < followUpBundle.text.indexOf("### Excerpt 1"),
+    true
+  );
+  assert.equal(
+    followUpBundle.progressiveAssembly.packingResults[0]?.selectedCandidates.some(
+      (candidate) => candidate.metadata?.artifactKey === "table_candidate:15"
+    ),
+    true
+  );
+  assert.equal(
+    followUpBundle.progressiveAssembly.expandedContextBundle.selectedCandidates[0]?.kind,
+    "artifact"
+  );
+  assert.match(followUpBundle.text, /Smackover Water Chemistry/i);
+  assert.match(followUpBundle.text, /Probable true data table detected on page 15/i);
 });
 
 await runTest("uses supported DOCX attachments when extraction succeeds", async () => {

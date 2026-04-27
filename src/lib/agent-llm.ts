@@ -13,6 +13,7 @@ import {
   estimateTextTokens,
   estimateThreadMessagesTokens,
 } from "./context-token-budget";
+import { TRUTHFUL_EXECUTION_CLAIM_SYSTEM_INSTRUCTIONS } from "./truthful-execution-claim-guard";
 
 type LlmEndpointKind = "ollama" | "openai";
 
@@ -602,6 +603,7 @@ export function buildSystemPrompt(config: AgentLlmConfig) {
     "- Distinguish 'located in' from 'references.' If an excerpt references Exhibit C, Exhibit D, or another provision, that does not make the excerpt located there.\n" +
     "- If a legal excerpt's body location is unclear, say the location is unclear rather than inventing an article title or exhibit location."
   );
+  sections.push(TRUTHFUL_EXECUTION_CLAIM_SYSTEM_INSTRUCTIONS);
   sections.push(
     "Task and tool routing rules:\n" +
     "- When the user asks about tasks, planner items, kanban cards, board status, backlog, priorities, assignees, or recent work, treat that as a request about the internal planner/kanban system.\n" +

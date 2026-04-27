@@ -13,7 +13,7 @@ import {
 } from "@/lib/agent-llm-config";
 import { buildOrgContext } from "@/lib/agent-context";
 import {
-  getConversationForUser,
+  getReadableConversationForUser,
   isMissingChatTablesError,
   resolveConversationRuntimeState,
   serializeConversationActiveMembership,
@@ -25,6 +25,10 @@ import {
   getSanitizedDatabaseTarget,
   summarizeAgentLlmConnections,
 } from "@/lib/runtime-diagnostics";
+import {
+  buildTruthfulExecutionClaimSnapshot,
+  renderTruthfulExecutionClaimContext,
+} from "@/lib/truthful-execution-claim-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -74,8 +78,8 @@ export async function GET(
   }
 
   try {
-    const conversation = await getConversationForUser(id, session.user.id);
-    await logTeamChatDetailRouteDiagnostics({
+    const conversation = await getReadableConversationForUser(id, session.user.id);
+    const accessDiagnostic = await logTeamChatDetailRouteDiagnostics({
       route: "api/chat/conversations/[id]/inspect.GET",
       session: {
         userId: session.user.id,
@@ -90,9 +94,16 @@ export async function GET(
         "[chat/inspect][GET][not_found]",
         JSON.stringify({
           dbTarget: getSanitizedDatabaseTarget(),
+          route: accessDiagnostic.route,
           conversationId: id,
           sessionUserId: session.user.id,
           sessionUserEmail: session.user.email ?? null,
+          conversationExists: accessDiagnostic.conversationExists,
+          archivedAt: accessDiagnostic.archivedAt,
+          projectId: accessDiagnostic.projectId,
+          activeMembershipCountForUser: accessDiagnostic.activeMembershipCountForUser,
+          userMembershipRemovedAt: accessDiagnostic.userMembershipRemovedAt,
+          notFoundReason: accessDiagnostic.notFoundReason,
         })
       );
       return NextResponse.json(
@@ -225,9 +236,18 @@ export async function GET(
       role: entry.senderAgentId ? ("assistant" as const) : ("user" as const),
       content: entry.body,
     }));
+    const truthfulExecutionClaims = buildTruthfulExecutionClaimSnapshot({
+      documentIntelligence: contextBundle.documentIntelligence,
+      agentControl: contextBundle.agentControl,
+      progressiveAssembly: contextBundle.progressiveAssembly,
+      asyncAgentWork: contextBundle.asyncAgentWork,
+      debugTrace: contextBundle.debugTrace,
+    });
+    const truthfulExecutionContext = renderTruthfulExecutionClaimContext(truthfulExecutionClaims);
+    const runtimeOrgContext = [orgContext, contextBundle.text, truthfulExecutionContext].filter(Boolean).join("\n\n");
     const runtimePreview = buildAgentRuntimePreview({
       ...agent,
-      orgContext: [orgContext, contextBundle.text].filter(Boolean).join("\n\n"),
+      orgContext: runtimeOrgContext,
       contextSources: contextBundle.summarySources,
       resolvedSources: contextBundle.sources,
       currentUserName,
@@ -269,12 +289,17 @@ export async function GET(
           sourceDecisions: contextBundle.sourceDecisions,
           resolvedSources: contextBundle.sources,
           documentChunking: contextBundle.documentChunking,
+          documentIntelligence: contextBundle.documentIntelligence,
+          agentControl: contextBundle.agentControl,
+          asyncAgentWork: contextBundle.asyncAgentWork,
+          truthfulExecutionClaims,
+          debugTrace: contextBundle.debugTrace,
         },
         payload: {
           currentUserName,
           systemPrompt: runtimePreview.systemPrompt,
           history: runtimePreview.history,
-          orgContext,
+          orgContext: runtimeOrgContext,
           resolvedContextText: contextBundle.text,
         },
       },

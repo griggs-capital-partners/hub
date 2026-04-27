@@ -14,7 +14,10 @@ const jiti = createJiti(import.meta.url, {
 });
 const {
   filterActiveConversationMemberships,
+  getReadableConversationAccessReason,
+  isConversationReadableByUser,
   planConversationMembershipMutation,
+  resolveConversationMessagesAccessResult,
   serializeConversation,
 } = jiti(path.join(__dirname, "..", "src", "lib", "chat.ts"));
 
@@ -264,6 +267,196 @@ await runTest("normalizes pinned active agents when a member agent is removed", 
 
   assert.equal(withReplacement.invalidRequestedActiveAgentId, false);
   assert.equal(withReplacement.nextPinnedActiveAgentId, "agent-2");
+});
+
+await runTest("readable access allows listed projectless active-member threads", async () => {
+  const conversation = {
+    id: "cmodp896a000575bkq7sbx6v5",
+    archivedAt: null,
+    chatProjectId: null,
+    members: [
+      makeMembershipRecord({
+        id: "member-self",
+        conversationId: "cmodp896a000575bkq7sbx6v5",
+        userId: "user-1",
+        removedAt: null,
+      }),
+    ],
+  };
+
+  assert.equal(isConversationReadableByUser(conversation, "user-1"), true);
+  assert.equal(getReadableConversationAccessReason(conversation, "user-1"), "readable");
+});
+
+await runTest("readable access denies removed memberships and archived default reads", async () => {
+  const removedMembershipConversation = {
+    archivedAt: null,
+    members: [
+      makeMembershipRecord({
+        userId: "user-1",
+        removedAt: new Date("2026-04-01T00:00:00.000Z"),
+      }),
+    ],
+  };
+  const archivedConversation = {
+    archivedAt: new Date("2026-04-02T00:00:00.000Z"),
+    members: [makeMembershipRecord({ userId: "user-1" })],
+  };
+
+  assert.equal(getReadableConversationAccessReason(removedMembershipConversation, "user-1"), "user_has_no_active_membership");
+  assert.equal(getReadableConversationAccessReason(archivedConversation, "user-1"), "conversation_archived");
+  assert.equal(getReadableConversationAccessReason(archivedConversation, "user-1", { archived: "include" }), "readable");
+});
+
+await runTest("readable access supports direct-agent and mixed shared conversations", async () => {
+  const directAgentConversation = {
+    archivedAt: null,
+    members: [
+      makeMembershipRecord({ userId: "user-1" }),
+      makeMembershipRecord({ id: "member-agent", userId: null, agentId: "agent-1" }),
+    ],
+  };
+  const mixedSharedConversation = {
+    archivedAt: null,
+    members: [
+      makeMembershipRecord({ id: "member-self", userId: "user-1" }),
+      makeMembershipRecord({ id: "member-user-2", userId: "user-2" }),
+      makeMembershipRecord({ id: "member-agent", userId: null, agentId: "agent-1" }),
+    ],
+  };
+
+  assert.equal(isConversationReadableByUser(directAgentConversation, "user-1"), true);
+  assert.equal(isConversationReadableByUser(mixedSharedConversation, "user-1"), true);
+  assert.equal(isConversationReadableByUser(mixedSharedConversation, "user-3"), false);
+});
+
+await runTest("messages route access returns 200 for listed projectless active-member thread with zero messages", async () => {
+  const conversation = {
+    id: "cmoeojun9000175q05ay279fj",
+    archivedAt: null,
+    chatProjectId: null,
+    members: [
+      makeMembershipRecord({
+        id: "member-self",
+        conversationId: "cmoeojun9000175q05ay279fj",
+        userId: "user-1",
+        removedAt: null,
+      }),
+    ],
+  };
+
+  assert.equal(isConversationReadableByUser(conversation, "user-1"), true);
+
+  const result = resolveConversationMessagesAccessResult({
+    conversation,
+    userId: "user-1",
+    messageCount: 0,
+  });
+
+  assert.deepEqual(result, {
+    status: 200,
+    notFoundReason: null,
+    readableHelperPassed: true,
+    postHelperLookupFailed: false,
+    messageCount: 0,
+  });
+});
+
+await runTest("messages route access returns 200 for projectless active-member thread with messages", async () => {
+  const conversation = {
+    archivedAt: null,
+    chatProjectId: null,
+    members: [
+      makeMembershipRecord({
+        userId: "user-1",
+        removedAt: null,
+      }),
+    ],
+  };
+
+  const result = resolveConversationMessagesAccessResult({
+    conversation,
+    userId: "user-1",
+    messageCount: 2,
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(result.messageCount, 2);
+  assert.equal(result.notFoundReason, null);
+});
+
+await runTest("messages route access supports direct-agent and mixed shared threads", async () => {
+  const directAgentConversation = {
+    archivedAt: null,
+    members: [
+      makeMembershipRecord({ userId: "user-1" }),
+      makeMembershipRecord({ id: "member-agent", userId: null, agentId: "agent-1" }),
+    ],
+  };
+  const mixedSharedConversation = {
+    archivedAt: null,
+    members: [
+      makeMembershipRecord({ id: "member-self", userId: "user-1" }),
+      makeMembershipRecord({ id: "member-user-2", userId: "user-2" }),
+      makeMembershipRecord({ id: "member-agent", userId: null, agentId: "agent-1" }),
+    ],
+  };
+
+  assert.equal(
+    resolveConversationMessagesAccessResult({
+      conversation: directAgentConversation,
+      userId: "user-1",
+      messageCount: 1,
+    }).status,
+    200
+  );
+  assert.equal(
+    resolveConversationMessagesAccessResult({
+      conversation: mixedSharedConversation,
+      userId: "user-1",
+      messageCount: 1,
+    }).status,
+    200
+  );
+});
+
+await runTest("messages route access denies removed memberships and archived default reads", async () => {
+  const removedMembershipConversation = {
+    archivedAt: null,
+    members: [
+      makeMembershipRecord({
+        userId: "user-1",
+        removedAt: new Date("2026-04-01T00:00:00.000Z"),
+      }),
+    ],
+  };
+  const archivedConversation = {
+    archivedAt: new Date("2026-04-02T00:00:00.000Z"),
+    members: [makeMembershipRecord({ userId: "user-1" })],
+  };
+
+  assert.deepEqual(
+    resolveConversationMessagesAccessResult({
+      conversation: removedMembershipConversation,
+      userId: "user-1",
+      messageCount: 0,
+    }),
+    {
+      status: 404,
+      notFoundReason: "user_has_no_active_membership",
+      readableHelperPassed: false,
+      postHelperLookupFailed: false,
+      messageCount: 0,
+    }
+  );
+  assert.equal(
+    resolveConversationMessagesAccessResult({
+      conversation: archivedConversation,
+      userId: "user-1",
+      messageCount: 0,
+    }).notFoundReason,
+    "conversation_archived"
+  );
 });
 
 if (failures.length > 0) {

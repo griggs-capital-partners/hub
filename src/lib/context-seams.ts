@@ -5,6 +5,10 @@
  * swapped without surrendering provenance, permissions, budgeting, or Inspector parity.
  */
 
+import type { AgentControlDebugSnapshot } from "./agent-control-surface";
+import type { AsyncAgentWorkDebugSnapshot } from "./async-agent-work-queue";
+import type { ProgressiveContextAssemblyResult } from "./progressive-context-assembly";
+
 export type ContextSourceType =
   | "thread_document"
   | "company_document"
@@ -377,6 +381,64 @@ export interface ContextDebugChunk {
   };
 }
 
+export interface ContextDebugKnowledgeArtifact {
+  id: string;
+  sourceId: string;
+  documentId: string;
+  sourceType: ContextSourceType | string;
+  kind: string;
+  status: string;
+  title?: string | null;
+  summary?: string | null;
+  textPreview?: string | null;
+  tokenEstimate?: number | null;
+  confidence?: number | null;
+  tool?: string | null;
+  selected: boolean;
+  metadata: Record<string, unknown>;
+  sourceBodyLocation?: ContextLocation | null;
+}
+
+export interface ContextDebugInspectionTask {
+  id: string;
+  sourceId: string;
+  documentId: string;
+  sourceType: ContextSourceType | string;
+  kind: string;
+  status: string;
+  tool: string;
+  requestedCapability?: string | null;
+  selectedTool?: string | null;
+  selectionReason?: string | null;
+  candidateTools?: string[];
+  eligibleTools?: Array<Record<string, unknown>>;
+  ineligibleTools?: Array<Record<string, unknown>>;
+  eligibilityReasons?: Array<Record<string, unknown>>;
+  approvalStatus?: string | null;
+  runtimeClass?: string | null;
+  dataClassPolicy?: Record<string, unknown> | null;
+  sideEffectLevel?: string | null;
+  costClass?: string | null;
+  latencyClass?: string | null;
+  benchmarkFixtureIds?: string[];
+  governanceTrace?: Record<string, unknown> | null;
+  confidence?: number | null;
+  limitations?: string[];
+  fallbackRecommendation?: string | null;
+  recommendedNextCapabilities?: string[];
+  reusable?: boolean | null;
+  unmetCapability?: Record<string, unknown> | null;
+  unmetCapabilityReviewItem?: Record<string, unknown> | null;
+  rationale?: string | null;
+  resultSummary?: string | null;
+  unresolved: string[];
+  createdArtifactKeys?: string[];
+  createdArtifactIds: string[];
+  toolTraceEvents?: Array<Record<string, unknown>>;
+  sourceBodyLocation?: ContextLocation | null;
+  metadata: Record<string, unknown>;
+}
+
 export interface ContextDebugTrace {
   traceId: string;
   conversationId: string;
@@ -384,9 +446,13 @@ export interface ContextDebugTrace {
   requestedSourceIds: string[];
   authority: ContextSourceAuthority;
   budgetProfile: ContextBudgetProfile | null;
+  agentControl: AgentControlDebugSnapshot;
+  asyncAgentWork?: AsyncAgentWorkDebugSnapshot | null;
   sourceEligibility: ContextSourceEligibility[];
   documents: ContextDebugDocument[];
   chunks: ContextDebugChunk[];
+  knowledgeArtifacts: ContextDebugKnowledgeArtifact[];
+  inspections: ContextDebugInspectionTask[];
   occurrence?: {
     intentDetected: boolean;
     targetPhrase: string | null;
@@ -417,14 +483,17 @@ export interface ContextDebugTrace {
   assembly: {
     selectedChunkIds: string[];
     skippedChunkIds: string[];
+    selectedArtifactIds: string[];
     estimatedTokens?: number | null;
     estimatedSelectedTokens?: number | null;
+    estimatedArtifactTokens?: number | null;
     documentChunkBudgetTokens?: number | null;
     skippedDueToBudgetCount?: number | null;
     budgetMode?: ContextBudgetMode | null;
     modelProfileId?: string | null;
     fallbackProfileUsed?: boolean | null;
     detail?: string | null;
+    progressive?: ProgressiveContextAssemblyResult | null;
   };
   renderedContext: {
     text?: string | null;

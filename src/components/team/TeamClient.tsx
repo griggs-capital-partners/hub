@@ -60,6 +60,7 @@ import {
   getMemberDisplayName,
   getOnlineStatus,
 } from "@/components/team/team-chat-shared";
+import { resolveConversationDetail404State } from "@/components/team/team-chat-client-state";
 import { buildDirectConversationShortcutMaps } from "@/components/team/team-chat-thread-shortcuts";
 import { validateConversationDocument } from "@/lib/conversation-documents";
 
@@ -874,6 +875,7 @@ export function TeamClient({
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messagesError, setMessagesError] = useState<string | null>(null);
   const [messageInput, setMessageInput] = useState("");
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
@@ -1755,7 +1757,9 @@ export function TeamClient({
     return () => clearInterval(interval);
   }, []);
 
-  const refreshConversations = useCallback(async (trigger: "mount" | "interval") => {
+  const refreshConversations = useCallback(async (
+    trigger: "mount" | "interval" | "detail_not_found"
+  ): Promise<ConversationSummary[] | null> => {
     try {
       const response = await fetch("/api/chat/conversations", {
         headers: { Accept: "application/json" },
@@ -1764,14 +1768,17 @@ export function TeamClient({
       const data = await parseApiResponse(response);
 
       if (!response.ok || !Array.isArray(data.conversations)) {
-        return;
+        return null;
       }
 
+      const nextConversations = data.conversations as ConversationSummary[];
       incrementTeamChatPerfCounter(`conversations_refresh:${trigger}`, {
-        conversationCount: data.conversations.length,
+        conversationCount: nextConversations.length,
       });
-      setConversations(data.conversations as ConversationSummary[]);
+      setConversations(nextConversations);
+      return nextConversations;
     } catch {
+      return null;
     }
   }, []);
 
@@ -1841,13 +1848,37 @@ export function TeamClient({
     [activeConversation]
   );
   const renderedMessages = useMemo(() => dedupeChatMessages(messages), [messages]);
-  const invalidateConversationAccessRef = useRef<(conversationId: string) => void>(() => {});
+  const handleConversationDetailNotFoundRef = useRef<(
+    conversationId: string,
+    route: "messages" | "inspect" | "refresh"
+  ) => void>(() => {});
 
   conversationsRef.current = conversations;
   selectedConversationIdRef.current = activeConversationId;
-  invalidateConversationAccessRef.current = (conversationId: string) => {
-    clearConversationInspectorState();
-    removeConversationFromVisibleState(conversationId);
+  handleConversationDetailNotFoundRef.current = (conversationId, route) => {
+    void (async () => {
+      const refreshedConversations = await refreshConversations("detail_not_found");
+      const resolution = resolveConversationDetail404State({
+        conversationId,
+        currentConversations: conversationsRef.current,
+        refreshedConversations,
+        route,
+      });
+
+      if (resolution.action === "remove") {
+        clearConversationInspectorState();
+        removeConversationFromVisibleState(conversationId);
+        return;
+      }
+
+      if (isConversationStillSelected(conversationId)) {
+        if (route === "inspect") {
+          setInspectorErrorForConversation(conversationId, resolution.errorMessage);
+        } else {
+          setMessagesError(resolution.errorMessage);
+        }
+      }
+    })();
   };
 
   useEffect(() => {
@@ -1884,7 +1915,7 @@ export function TeamClient({
           finishThreadSwitchMeasurement(resolvedConversationId, "not_found", {
             trigger: "thread_open",
           });
-          invalidateConversationAccessRef.current(resolvedConversationId);
+          handleConversationDetailNotFoundRef.current(resolvedConversationId, "messages");
           return;
         }
 
@@ -1897,6 +1928,7 @@ export function TeamClient({
         }
 
         if (Array.isArray(data.messages)) {
+          setMessagesError(null);
           replaceMessagesForConversation(
             resolvedConversationId,
             data.messages as ChatMessage[],
@@ -1949,7 +1981,7 @@ export function TeamClient({
         const data = await parseApiResponse(response);
 
         if (response.status === 404) {
-          invalidateConversationAccessRef.current(resolvedConversationId);
+          handleConversationDetailNotFoundRef.current(resolvedConversationId, "messages");
           return;
         }
 
@@ -1958,6 +1990,7 @@ export function TeamClient({
         }
 
         if (Array.isArray(data.messages)) {
+          setMessagesError(null);
           replaceMessagesForConversation(
             resolvedConversationId,
             data.messages as ChatMessage[],
@@ -2037,6 +2070,7 @@ export function TeamClient({
     bottomRef.current?.scrollIntoView({ behavior: "instant" });
     setEditingMessageId(null);
     setEditingDraft("");
+    setMessagesError(null);
     setShowContextInspector(false);
     setShowAddParticipantsModal(false);
     setParticipantActionError(null);
@@ -2089,7 +2123,7 @@ export function TeamClient({
 
       if (response.status === 404) {
         finishTeamChatPerfSpan(inspectorSpanId, { status: "not_found" });
-        invalidateConversationAccessRef.current(conversationId);
+        handleConversationDetailNotFoundRef.current(conversationId, "inspect");
         return;
       }
 
@@ -3565,7 +3599,7 @@ export function TeamClient({
           }))
           .then((data) => {
             if (data.status === 404) {
-              invalidateConversationAccessRef.current(conversationId);
+              handleConversationDetailNotFoundRef.current(conversationId, "inspect");
               return;
             }
 
@@ -3646,7 +3680,7 @@ export function TeamClient({
       }
 
       if (messagesResponse.status === 404) {
-        invalidateConversationAccessRef.current(conversationId);
+        handleConversationDetailNotFoundRef.current(conversationId, "refresh");
         return;
       }
 
@@ -3655,6 +3689,7 @@ export function TeamClient({
       }
 
       if (Array.isArray(messagesData.messages)) {
+        setMessagesError(null);
         replaceMessagesForConversation(
           conversationId,
           messagesData.messages as ChatMessage[],
@@ -4158,6 +4193,7 @@ export function TeamClient({
                   loadingMessages={loadingMessages}
                   rawMessageCount={messages.length}
                   renderedMessages={renderedMessages}
+                  messagesError={messagesError}
                   messageInput={messageInput}
                   sending={sending}
                   editingMessageId={editingMessageId}

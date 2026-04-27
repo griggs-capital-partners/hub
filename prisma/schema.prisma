@@ -40,11 +40,12 @@ model User {
   createdAgents     AIAgent[]       @relation("AgentCreatedBy")
   agentMessages     AgentMessage[]  @relation("UserAgentMessages")
   calendarEvents    CalendarEvent[] @relation("CalendarEventCreator")
-    createdConversations Conversation[]      @relation("ConversationCreatedBy")
-    conversationMembers ConversationMember[] @relation("ConversationUserMembers")
-    chatMessages       ChatMessage[]         @relation("ChatMessageSenderUser")
-    conversationDocuments ConversationDocument[]
-    triggeredExecutions AgentTaskExecution[] @relation("ExecutionTriggeredBy")
+  createdConversations Conversation[]      @relation("ConversationCreatedBy")
+  conversationMembers ConversationMember[] @relation("ConversationUserMembers")
+  chatMessages       ChatMessage[]         @relation("ChatMessageSenderUser")
+  conversationDocuments ConversationDocument[]
+  triggeredExecutions AgentTaskExecution[] @relation("ExecutionTriggeredBy")
+  asyncAgentWorkItems AsyncAgentWorkItem[] @relation("AsyncAgentWorkCreatedBy")
   notificationSettings UserNotificationSettings?
   pushSubscriptions    PushSubscription[]
 
@@ -574,7 +575,7 @@ model ChatProject {
   id        String   @id @default(cuid())
   name      String
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  updatedAt DateTime @default(now()) @updatedAt
 
   conversations Conversation[]
 
@@ -599,6 +600,7 @@ model Conversation {
     members   ConversationMember[]
     messages  ChatMessage[]
     documents ConversationDocument[]
+    asyncAgentWorkItems AsyncAgentWorkItem[]
 
   @@index([type, updatedAt])
   @@index([archivedAt, updatedAt])
@@ -618,12 +620,116 @@ model ConversationDocument {
   storagePath    String
   createdAt      DateTime @default(now())
 
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  uploader     User         @relation(fields: [uploadedBy], references: [id])
+  conversation       Conversation                          @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  uploader           User                                  @relation(fields: [uploadedBy], references: [id])
+  knowledgeArtifacts ConversationDocumentKnowledgeArtifact[]
+  inspectionTasks    ConversationDocumentInspectionTask[]
+  asyncAgentWorkItems AsyncAgentWorkItem[]
 
   @@index([conversationId, createdAt])
   @@index([uploadedBy, createdAt])
   @@map("conversation_documents")
+}
+
+model ConversationDocumentKnowledgeArtifact {
+  id                     String   @id @default(cuid())
+  conversationDocumentId String
+  artifactKey            String
+  kind                   String
+  status                 String   @default("active")
+  title                  String?
+  summary                String?
+  content                String
+  tool                   String?
+  sourcePageNumber       Int?
+  sourcePageLabel        String?
+  tableId                String?
+  figureId               String?
+  sectionPath            String   @default("[]")
+  headingPath            String   @default("[]")
+  sourceLocationLabel    String?
+  payloadJson            String?
+  relevanceHints         String   @default("[]")
+  confidence             Float?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @default(now()) @updatedAt
+
+  conversationDocument ConversationDocument @relation(fields: [conversationDocumentId], references: [id], onDelete: Cascade, map: "conversation_document_knowledge_artifacts_conversationDocumentI")
+
+  @@unique([conversationDocumentId, artifactKey], map: "conversation_document_artifact_key_unique")
+  @@index([conversationDocumentId, kind, updatedAt], map: "conversation_document_artifact_kind_updated_idx")
+  @@index([conversationDocumentId, createdAt], map: "conversation_document_artifact_created_idx")
+  @@map("conversation_document_knowledge_artifacts")
+}
+
+model ConversationDocumentInspectionTask {
+  id                     String   @id @default(cuid())
+  conversationDocumentId String
+  taskKey                String
+  kind                   String
+  status                 String   @default("completed")
+  tool                   String
+  rationale              String?
+  sourcePageNumber       Int?
+  sourcePageLabel        String?
+  tableId                String?
+  figureId               String?
+  sectionPath            String   @default("[]")
+  headingPath            String   @default("[]")
+  sourceLocationLabel    String?
+  resultSummary          String?
+  resultJson             String?
+  unresolvedJson         String?
+  createdArtifactKeys    String   @default("[]")
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @default(now()) @updatedAt
+  completedAt            DateTime?
+
+  conversationDocument ConversationDocument @relation(fields: [conversationDocumentId], references: [id], onDelete: Cascade, map: "conversation_document_inspection_tasks_conversationDocumentId_f")
+
+  @@unique([conversationDocumentId, taskKey], map: "conversation_document_inspection_task_key_unique")
+  @@index([conversationDocumentId, kind, updatedAt], map: "conversation_document_inspection_task_kind_updated_idx")
+  @@index([conversationDocumentId, createdAt], map: "conversation_document_inspection_task_created_idx")
+  @@map("conversation_document_inspection_tasks")
+}
+
+model AsyncAgentWorkItem {
+  id                         String   @id @default(cuid())
+  workKey                    String   @unique
+  conversationId             String?
+  conversationDocumentId     String?
+  createdById                String?
+  status                     String   @default("queued")
+  type                       String
+  trigger                    String
+  priority                   String   @default("normal")
+  planJson                   String   @default("{}")
+  resumePolicyJson           String   @default("{}")
+  retryPolicyJson            String   @default("{}")
+  budgetSnapshotJson         String   @default("{}")
+  controlSnapshotJson        String   @default("{}")
+  assemblySnapshotJson       String?
+  contextGapsJson            String   @default("[]")
+  deferredCapabilitiesJson   String   @default("[]")
+  artifactLinksJson          String   @default("[]")
+  sourceLinksJson            String   @default("[]")
+  resultJson                 String?
+  traceJson                  String   @default("[]")
+  errorJson                  String?
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @default(now()) @updatedAt
+  completedAt                DateTime?
+
+  conversation         Conversation?         @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationDocument ConversationDocument? @relation(fields: [conversationDocumentId], references: [id], onDelete: Cascade)
+  createdBy            User?                 @relation("AsyncAgentWorkCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, status, type], map: "async_agent_work_conversation_status_type_idx")
+  @@index([conversationDocumentId, status, type], map: "async_agent_work_document_status_type_idx")
+  @@index([status, priority, createdAt], map: "async_agent_work_status_priority_created_idx")
+  @@index([trigger, createdAt], map: "async_agent_work_trigger_created_idx")
+  @@index([createdById, createdAt], map: "async_agent_work_created_by_idx")
+  @@map("async_agent_work_items")
 }
 
 model ConversationMember {
