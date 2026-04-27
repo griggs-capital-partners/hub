@@ -13,7 +13,7 @@ const jiti = createJiti(import.meta.url, {
   },
 });
 
-const { resolveConversationDetail404State } = jiti(
+const { resolveConversationDetail404State, shouldShowThreadStillHereState } = jiti(
   path.join(__dirname, "..", "src", "components", "team", "team-chat-client-state.ts")
 );
 
@@ -99,6 +99,33 @@ await runTest("detail 404 with failed list verification keeps current rail state
 
   assert.equal(resolution.action, "unknown");
   assert.equal(resolution.conversations[0].id, thread.id);
+});
+
+await runTest("valid readable thread with loaded messages does not show still-here state", async () => {
+  assert.equal(
+    shouldShowThreadStillHereState({
+      messagesError: null,
+      renderedMessageCount: 20,
+    }),
+    false
+  );
+});
+
+await runTest("still-here state only renders when a kept thread has no loaded messages", async () => {
+  assert.equal(
+    shouldShowThreadStillHereState({
+      messagesError: "The thread is still visible, but messages could not be loaded yet.",
+      renderedMessageCount: 0,
+    }),
+    true
+  );
+  assert.equal(
+    shouldShowThreadStillHereState({
+      messagesError: "The thread is still visible, but messages could not be loaded yet.",
+      renderedMessageCount: 2,
+    }),
+    false
+  );
 });
 
 if (failures.length > 0) {

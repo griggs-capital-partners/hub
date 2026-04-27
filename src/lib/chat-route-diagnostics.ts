@@ -1,6 +1,14 @@
-import { prisma } from "@/lib/prisma";
-import type { ConversationArchiveScope } from "@/lib/chat";
-import { getReadableConversationAccessReason } from "@/lib/chat";
+import type {
+  ConversationArchiveScope,
+  TeamChatConversationAccessSnapshot,
+} from "@/lib/chat";
+import {
+  getTeamChatConversationAccessSnapshot,
+  resolveTeamChatConversationAccessSnapshot,
+} from "@/lib/chat";
+
+export const TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION = "messages-route-parity-v1";
+export const TEAM_CHAT_MESSAGES_ROUTE = "api/chat/conversations/[id]/messages.GET";
 
 type TeamChatRouteSessionDiagnostic = {
   userId: string | null;
@@ -18,12 +26,19 @@ type TeamChatDetailRouteDiagnosticParams = {
   session: TeamChatRouteSessionDiagnostic;
   conversationId: string;
   accessFound: boolean;
+  accessSnapshot?: TeamChatConversationAccessSnapshot;
   archived?: ConversationArchiveScope;
   readableHelperPassed?: boolean;
   postHelperLookupFailed?: boolean;
+  routeTopMarkerReached?: boolean;
+  routeHandlerTopMarkerReached?: boolean;
+  serializationFailed?: boolean;
+  sourceRouteFile?: string;
+  routeHandlerMarker?: string;
+  notFoundReason?: string | null;
 };
 
-type ConversationDiagnosticSnapshot = {
+export type ConversationDiagnosticSnapshot = {
   conversationId: string;
   conversationExists: boolean;
   archivedAt: string | null;
@@ -33,90 +48,92 @@ type ConversationDiagnosticSnapshot = {
   messageCount: number | null;
 };
 
+export function buildTeamChatMessagesRouteTopMarker(params: {
+  conversationId: string;
+  sessionUserId: string | null;
+  sessionUserEmail: string | null;
+  timestamp?: string;
+}) {
+  return {
+    route: TEAM_CHAT_MESSAGES_ROUTE,
+    diagnosticVersion: TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION,
+    conversationId: params.conversationId,
+    sessionUserId: params.sessionUserId,
+    sessionUserEmail: params.sessionUserEmail,
+    timestamp: params.timestamp ?? new Date().toISOString(),
+    routeTopMarkerReached: true,
+    routeHandlerTopMarkerReached: true,
+  };
+}
+
 type TeamChatDetailRouteDiagnostic = ConversationDiagnosticSnapshot & {
+  diagnosticVersion: string;
   route: string;
   sessionUserId: string | null;
   sessionUserEmail: string | null;
   requestedConversationId: string;
   accessFound: boolean;
+  accessStatus: 200 | 404;
+  readable: boolean;
   readableHelperPassed: boolean;
   postHelperLookupFailed: boolean;
+  routeTopMarkerReached: boolean;
+  routeHandlerTopMarkerReached: boolean;
+  serializationFailed: boolean;
+  sourceRouteFile: string | null;
+  routeHandlerMarker: string | null;
   notFoundReason: string | null;
 };
-
-function emptyConversationSnapshot(conversationId: string): ConversationDiagnosticSnapshot {
-  return {
-    conversationId,
-    conversationExists: false,
-    archivedAt: null,
-    projectId: null,
-    activeMembershipCountForUser: 0,
-    userMembershipRemovedAt: [],
-    messageCount: null,
-  };
-}
 
 function shouldLogTeamChatRouteDiagnostics() {
   return process.env.NODE_ENV !== "production";
 }
 
-function serializeRemovedAt(values: Array<Date | null>) {
-  return values.map((value) => value?.toISOString() ?? null);
+function accessSnapshotToConversationDiagnosticSnapshot(
+  snapshot: TeamChatConversationAccessSnapshot
+): ConversationDiagnosticSnapshot {
+  return {
+    conversationId: snapshot.conversationId,
+    conversationExists: snapshot.conversationExists,
+    archivedAt: snapshot.archivedAt,
+    projectId: snapshot.projectId,
+    activeMembershipCountForUser: snapshot.activeMembershipCountForUser,
+    userMembershipRemovedAt: snapshot.userMembershipRemovedAt,
+    messageCount: snapshot.messageCount,
+  };
 }
 
-async function loadConversationSnapshots(
+function emptyAccessSnapshot(
+  conversationId: string,
+  sessionUserId: string | null
+): TeamChatConversationAccessSnapshot {
+  return resolveTeamChatConversationAccessSnapshot({
+    conversationId,
+    sessionUserId: sessionUserId ?? "",
+    conversation: null,
+  });
+}
+
+async function loadAccessSnapshots(
   userId: string | null,
-  conversationIds: string[]
+  conversationIds: string[],
+  archived?: ConversationArchiveScope
 ) {
   if (!userId || conversationIds.length === 0) {
-    return new Map<string, ConversationDiagnosticSnapshot>();
+    return new Map<string, TeamChatConversationAccessSnapshot>();
   }
 
-  const conversations = await prisma.conversation.findMany({
-    where: {
-      id: {
-        in: conversationIds,
-      },
-    },
-    select: {
-      id: true,
-      archivedAt: true,
-      chatProjectId: true,
-      members: {
-        where: { userId },
-        orderBy: { joinedAt: "asc" },
-        select: {
-          removedAt: true,
-        },
-      },
-      _count: {
-        select: {
-          messages: true,
-        },
-      },
-    },
-  });
-
-  return new Map(
-    conversations.map((conversation) => {
-      const userMembershipRemovedAt = serializeRemovedAt(
-        conversation.members.map((member) => member.removedAt)
-      );
-
-      return [
-        conversation.id,
-        {
-          conversationId: conversation.id,
-          conversationExists: true,
-          archivedAt: conversation.archivedAt?.toISOString() ?? null,
-          projectId: conversation.chatProjectId ?? null,
-          activeMembershipCountForUser: conversation.members.filter((member) => member.removedAt === null).length,
-          userMembershipRemovedAt,
-          messageCount: conversation._count.messages,
-        } satisfies ConversationDiagnosticSnapshot,
-      ] as const;
-    })
+  const snapshots = await Promise.all(
+    conversationIds.map((conversationId) => (
+      getTeamChatConversationAccessSnapshot({
+        conversationId,
+        sessionUserId: userId,
+        archived,
+      })
+    ))
   );
+
+  return new Map(snapshots.map((snapshot) => [snapshot.conversationId, snapshot]));
 }
 
 export async function logTeamChatListRouteDiagnostics(
@@ -126,17 +143,27 @@ export async function logTeamChatListRouteDiagnostics(
     return;
   }
 
-  const snapshots = await loadConversationSnapshots(
+  const snapshots = await loadAccessSnapshots(
     params.session.userId,
     params.conversationIds
   );
-  const diagnostics = params.conversationIds.map((conversationId) => (
-    snapshots.get(conversationId) ?? emptyConversationSnapshot(conversationId)
-  ));
+  const diagnostics = params.conversationIds.map((conversationId) => {
+    const snapshot = snapshots.get(conversationId) ?? emptyAccessSnapshot(conversationId, params.session.userId);
+
+    return {
+      ...accessSnapshotToConversationDiagnosticSnapshot(snapshot),
+      accessStatus: snapshot.status,
+      readable: snapshot.readable,
+      notFoundReason: snapshot.notFoundReason,
+      readableHelperPassed: snapshot.readableHelperPassed,
+      postHelperLookupFailed: snapshot.postHelperLookupFailed,
+    };
+  });
 
   console.info(
     "[team-chat-route-diagnostic]",
     JSON.stringify({
+      diagnosticVersion: TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION,
       route: params.route,
       sessionUserId: params.session.userId,
       sessionUserEmail: params.session.email,
@@ -149,57 +176,45 @@ export async function logTeamChatListRouteDiagnostics(
 export async function logTeamChatDetailRouteDiagnostics(
   params: TeamChatDetailRouteDiagnosticParams
 ) {
-  if (!shouldLogTeamChatRouteDiagnostics() && params.accessFound) {
-    return {
-      route: params.route,
-      sessionUserId: params.session.userId,
-      sessionUserEmail: params.session.email,
-      requestedConversationId: params.conversationId,
-      accessFound: true,
-      conversationId: params.conversationId,
-      conversationExists: true,
-      archivedAt: null,
-      projectId: null,
-      activeMembershipCountForUser: 0,
-      userMembershipRemovedAt: [],
-      messageCount: null,
-      readableHelperPassed: params.readableHelperPassed ?? true,
-      postHelperLookupFailed: params.postHelperLookupFailed ?? false,
-      notFoundReason: null,
-    } satisfies TeamChatDetailRouteDiagnostic;
-  }
-
-  const snapshots = await loadConversationSnapshots(
-    params.session.userId,
-    [params.conversationId]
-  );
-  const snapshot = snapshots.get(params.conversationId) ?? emptyConversationSnapshot(params.conversationId);
-  const notFoundReason = params.accessFound
-    ? null
-    : getReadableConversationAccessReason(
-        snapshot.conversationExists
-          ? {
-              archivedAt: snapshot.archivedAt ? new Date(snapshot.archivedAt) : null,
-              members: snapshot.userMembershipRemovedAt.map((removedAt) => ({
-                userId: params.session.userId,
-                removedAt: removedAt ? new Date(removedAt) : null,
-              })),
-            }
-          : null,
-        params.session.userId ?? "",
-        { archived: params.archived }
-      );
+  const fallbackSnapshot = params.accessSnapshot
+    ?? (params.session.userId
+      ? await getTeamChatConversationAccessSnapshot({
+          conversationId: params.conversationId,
+          sessionUserId: params.session.userId,
+          archived: params.archived,
+        })
+      : emptyAccessSnapshot(params.conversationId, params.session.userId));
+  const snapshot = accessSnapshotToConversationDiagnosticSnapshot(fallbackSnapshot);
+  const routeTopMarkerReached =
+    params.routeTopMarkerReached ?? params.routeHandlerTopMarkerReached ?? false;
+  const notFoundReason = params.notFoundReason !== undefined
+    ? params.notFoundReason
+    : !params.accessFound && fallbackSnapshot.readable
+      ? "readable_helper_lookup_failed"
+      : fallbackSnapshot.notFoundReason;
   const diagnostic: TeamChatDetailRouteDiagnostic = {
+    diagnosticVersion: TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION,
     route: params.route,
     sessionUserId: params.session.userId,
     sessionUserEmail: params.session.email,
     requestedConversationId: params.conversationId,
     accessFound: params.accessFound,
-    readableHelperPassed: params.readableHelperPassed ?? params.accessFound,
-    postHelperLookupFailed: params.postHelperLookupFailed ?? false,
+    accessStatus: fallbackSnapshot.status,
+    readable: fallbackSnapshot.readable,
+    readableHelperPassed: params.readableHelperPassed ?? fallbackSnapshot.readableHelperPassed,
+    postHelperLookupFailed: params.postHelperLookupFailed ?? fallbackSnapshot.postHelperLookupFailed,
+    routeTopMarkerReached,
+    routeHandlerTopMarkerReached: routeTopMarkerReached,
+    serializationFailed: params.serializationFailed ?? false,
+    sourceRouteFile: params.sourceRouteFile ?? null,
+    routeHandlerMarker: params.routeHandlerMarker ?? null,
     ...snapshot,
     notFoundReason,
   };
+
+  if (!shouldLogTeamChatRouteDiagnostics() && params.accessFound) {
+    return diagnostic;
+  }
 
   if (shouldLogTeamChatRouteDiagnostics() || !params.accessFound) {
     console.info("[team-chat-route-diagnostic]", JSON.stringify(diagnostic));

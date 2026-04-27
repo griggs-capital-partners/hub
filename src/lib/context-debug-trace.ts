@@ -5,6 +5,7 @@ import {
 } from "./agent-control-surface";
 import type { AsyncAgentWorkDebugSnapshot } from "./async-agent-work-queue";
 import type { ContextRegistryDebugSnapshot } from "./capability-gap-context-debt-registry";
+import type { ArtifactPromotionDebugSnapshot } from "./source-learning-artifact-promotion";
 import type {
   ContextBudgetProfile,
   ContextChunkSelection,
@@ -38,6 +39,7 @@ type BuildConversationContextDebugTraceParams = {
     agentControl?: AgentControlDebugSnapshot | null;
     asyncAgentWork?: AsyncAgentWorkDebugSnapshot | null;
     contextRegistry?: ContextRegistryDebugSnapshot | null;
+    artifactPromotion?: ArtifactPromotionDebugSnapshot | null;
   };
 };
 
@@ -919,6 +921,7 @@ export function buildConversationContextDebugTrace(
     agentControl,
     asyncAgentWork: params.bundle.asyncAgentWork ?? null,
     contextRegistry: params.bundle.contextRegistry ?? null,
+    artifactPromotion: params.bundle.artifactPromotion ?? null,
     sourceEligibility: params.bundle.sourceDecisions.map(buildSourceEligibility),
     documents,
     chunks,
@@ -969,6 +972,7 @@ export function buildConversationContextDebugTrace(
         : null,
       detail: params.bundle.documentChunking.budget.detail,
       progressive: params.bundle.progressiveAssembly ?? null,
+      transport: params.bundle.progressiveAssembly?.contextTransport?.debugSnapshot ?? null,
     },
     renderedContext: {
       text: null,

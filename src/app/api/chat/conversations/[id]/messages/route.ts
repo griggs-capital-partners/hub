@@ -20,17 +20,24 @@ import {
 import { agentChatTools, executeAgentTool } from "@/lib/agent-tools";
 import { buildOrgContext } from "@/lib/agent-context";
 import {
+  type TeamChatConversationAccessSnapshot,
+  getConversationForMessagesRoute,
   getReadableConversationForUser,
+  getTeamChatConversationAccessSnapshot,
   isMissingChatTablesError,
   listMessagesForConversation,
-  resolveConversationMessagesAccessResult,
   resolveConversationRuntimeState,
   serializeConversation,
 } from "@/lib/chat";
 import type { LlmMessage } from "@/lib/agent-llm";
 import { resolveAgentLlmRoutingPolicy } from "@/lib/agent-task-context";
 import { resolveConversationContextBundle } from "@/lib/conversation-context";
-import { logTeamChatDetailRouteDiagnostics } from "@/lib/chat-route-diagnostics";
+import {
+  TEAM_CHAT_MESSAGES_ROUTE,
+  TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION,
+  buildTeamChatMessagesRouteTopMarker,
+  logTeamChatDetailRouteDiagnostics,
+} from "@/lib/chat-route-diagnostics";
 import {
   getSanitizedDatabaseTarget,
   summarizeAgentLlmConnections,
@@ -154,6 +161,75 @@ function serializeRuntimeHistory(history: LlmMessage[]) {
   }));
 }
 
+function logMessagesRouteTopMarker(params: {
+  conversationId: string;
+  sessionUserId: string | null;
+  sessionUserEmail: string | null;
+}) {
+  const marker = buildTeamChatMessagesRouteTopMarker(params);
+  console.info(
+    "[chat/messages][GET][top-marker]",
+    JSON.stringify(marker)
+  );
+
+  return marker.routeTopMarkerReached;
+}
+
+type MessagesAccessLogSnapshot = Pick<
+  TeamChatConversationAccessSnapshot,
+  | "conversationExists"
+  | "archivedAt"
+  | "projectId"
+  | "activeMembershipCountForUser"
+  | "userMembershipRemovedAt"
+  | "messageCount"
+  | "readable"
+  | "status"
+  | "accessStatus"
+  | "notFoundReason"
+  | "readableHelperPassed"
+  | "postHelperLookupFailed"
+>;
+
+function buildMessagesAccessLogPayload(params: {
+  conversationId: string;
+  sessionUserId: string;
+  sessionUserEmail: string | null;
+  access: MessagesAccessLogSnapshot;
+  routeTopMarkerReached: boolean;
+  notFoundReason?: string | null;
+  serializationFailed?: boolean;
+  errorName?: string | null;
+  errorMessage?: string | null;
+}) {
+  return {
+    dbTarget: getSanitizedDatabaseTarget(),
+    route: TEAM_CHAT_MESSAGES_ROUTE,
+    diagnosticVersion: TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION,
+    conversationId: params.conversationId,
+    sessionUserId: params.sessionUserId,
+    sessionUserEmail: params.sessionUserEmail,
+    conversationExists: params.access.conversationExists,
+    archivedAt: params.access.archivedAt,
+    projectId: params.access.projectId,
+    activeMembershipCountForUser: params.access.activeMembershipCountForUser,
+    userMembershipRemovedAt: params.access.userMembershipRemovedAt,
+    messageCount: params.access.messageCount,
+    accessStatus: params.access.accessStatus ?? params.access.status,
+    readable: params.access.readable,
+    notFoundReason: params.notFoundReason ?? params.access.notFoundReason,
+    readableHelperPassed: params.access.readableHelperPassed,
+    postHelperLookupFailed: params.access.postHelperLookupFailed,
+    routeTopMarkerReached: params.routeTopMarkerReached,
+    routeHandlerTopMarkerReached: params.routeTopMarkerReached,
+    serializationFailed: params.serializationFailed ?? false,
+    sourceRouteFile: "src/app/api/chat/conversations/[id]/messages/route.ts",
+    routeHandlerMarker: "messages-route-parity-v1",
+    ...(params.errorName ? { errorName: params.errorName } : {}),
+    ...(params.errorMessage ? { errorMessage: params.errorMessage } : {}),
+  };
+}
+
 function buildRuntimeSnapshot(params: {
   runtimePreview: ReturnType<typeof buildAgentRuntimePreview>;
   sourceSelection: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceSelection"];
@@ -203,7 +279,13 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const routeTopMarkerReached = logMessagesRouteTopMarker({
+    conversationId: id,
+    sessionUserId: null,
+    sessionUserEmail: null,
+  });
   const session = await auth();
+
   if (!session?.user?.id) {
     return NextResponse.json(
       { error: "Unauthorized" },
@@ -212,89 +294,181 @@ export async function GET(
   }
 
   try {
-    const conversation = await getReadableConversationForUser(id, session.user.id);
+    const accessSnapshot = await getTeamChatConversationAccessSnapshot({
+      conversationId: id,
+      sessionUserId: session.user.id,
+    });
     const accessDiagnostic = await logTeamChatDetailRouteDiagnostics({
-      route: "api/chat/conversations/[id]/messages.GET",
+      route: TEAM_CHAT_MESSAGES_ROUTE,
       session: {
         userId: session.user.id,
         email: session.user.email ?? null,
       },
       conversationId: id,
-      accessFound: Boolean(conversation),
-      readableHelperPassed: Boolean(conversation),
+      accessFound: accessSnapshot.readable,
+      accessSnapshot,
+      readableHelperPassed: accessSnapshot.readableHelperPassed,
       postHelperLookupFailed: false,
+      routeTopMarkerReached,
+      sourceRouteFile: "src/app/api/chat/conversations/[id]/messages/route.ts",
+      routeHandlerMarker: "messages-route-parity-v1",
     });
 
-    if (!conversation) {
+    if (accessSnapshot.status !== 200) {
+      const diagnostic = buildMessagesAccessLogPayload({
+        conversationId: id,
+        sessionUserId: session.user.id,
+        sessionUserEmail: session.user.email ?? null,
+        access: accessSnapshot,
+        routeTopMarkerReached,
+        notFoundReason: accessSnapshot.notFoundReason ?? accessDiagnostic.notFoundReason,
+      });
       console.warn(
         "[chat/messages][GET][not_found]",
-        JSON.stringify({
-          dbTarget: getSanitizedDatabaseTarget(),
-          route: accessDiagnostic.route,
-          conversationId: id,
-          sessionUserId: session.user.id,
-          sessionUserEmail: session.user.email ?? null,
-          conversationExists: accessDiagnostic.conversationExists,
-          archivedAt: accessDiagnostic.archivedAt,
-          projectId: accessDiagnostic.projectId,
-          activeMembershipCountForUser: accessDiagnostic.activeMembershipCountForUser,
-          userMembershipRemovedAt: accessDiagnostic.userMembershipRemovedAt,
-          messageCount: accessDiagnostic.messageCount,
-          notFoundReason: accessDiagnostic.notFoundReason,
-          readableHelperPassed: accessDiagnostic.readableHelperPassed,
-          postHelperLookupFailed: accessDiagnostic.postHelperLookupFailed,
-        })
+        JSON.stringify(diagnostic)
       );
       return NextResponse.json(
-        { error: "Conversation not found" },
+        { error: "Conversation not found", diagnostic },
         { status: 404, headers: TEAM_CHAT_NO_STORE_HEADERS }
       );
     }
 
-    const messages = await listMessagesForConversation(conversation.id);
-    const messageAccess = resolveConversationMessagesAccessResult({
-      conversation,
-      userId: session.user.id,
-      messageCount: messages.length,
-      readableHelperPassed: true,
-      postHelperLookupFailed: false,
-    });
-    if (messageAccess.status !== 200) {
-      const postHelperDiagnostic = await logTeamChatDetailRouteDiagnostics({
-        route: "api/chat/conversations/[id]/messages.GET",
+    const conversation = await getConversationForMessagesRoute(id);
+    if (!conversation) {
+      const postHelperAccess = {
+        ...accessSnapshot,
+        postHelperLookupFailed: true,
+      };
+      await logTeamChatDetailRouteDiagnostics({
+        route: TEAM_CHAT_MESSAGES_ROUTE,
         session: {
           userId: session.user.id,
           email: session.user.email ?? null,
         },
         conversationId: id,
-        accessFound: false,
+        accessFound: true,
+        accessSnapshot: postHelperAccess,
         readableHelperPassed: true,
         postHelperLookupFailed: true,
+        routeTopMarkerReached,
+        notFoundReason: "post_helper_conversation_lookup_failed",
+        sourceRouteFile: "src/app/api/chat/conversations/[id]/messages/route.ts",
+        routeHandlerMarker: "messages-route-parity-v1",
+      });
+      const diagnostic = buildMessagesAccessLogPayload({
+        conversationId: id,
+        sessionUserId: session.user.id,
+        sessionUserEmail: session.user.email ?? null,
+        access: postHelperAccess,
+        routeTopMarkerReached,
+        notFoundReason: "post_helper_conversation_lookup_failed",
       });
 
-      console.warn(
-        "[chat/messages][GET][post_helper_access_mismatch]",
-        JSON.stringify({
-          dbTarget: getSanitizedDatabaseTarget(),
-          route: postHelperDiagnostic.route,
-          conversationId: id,
-          sessionUserId: session.user.id,
-          sessionUserEmail: session.user.email ?? null,
-          conversationExists: postHelperDiagnostic.conversationExists,
-          archivedAt: postHelperDiagnostic.archivedAt,
-          projectId: postHelperDiagnostic.projectId,
-          activeMembershipCountForUser: postHelperDiagnostic.activeMembershipCountForUser,
-          userMembershipRemovedAt: postHelperDiagnostic.userMembershipRemovedAt,
-          messageCount: messages.length,
-          notFoundReason: messageAccess.notFoundReason,
-          readableHelperPassed: true,
-          postHelperLookupFailed: true,
-        })
+      console.error(
+        "[chat/messages][GET][post_helper_conversation_lookup_failed]",
+        JSON.stringify(diagnostic)
       );
 
       return NextResponse.json(
-        { error: "Conversation not found" },
-        { status: 404, headers: TEAM_CHAT_NO_STORE_HEADERS }
+        { error: "Failed to load conversation messages", diagnostic },
+        { status: 500, headers: TEAM_CHAT_NO_STORE_HEADERS }
+      );
+    }
+
+    let messages: Awaited<ReturnType<typeof listMessagesForConversation>>;
+    try {
+      messages = await listMessagesForConversation(conversation.id);
+    } catch (error) {
+      const failureAccess = {
+        ...accessSnapshot,
+        postHelperLookupFailed: true,
+      };
+      const failureDiagnostic = await logTeamChatDetailRouteDiagnostics({
+        route: TEAM_CHAT_MESSAGES_ROUTE,
+        session: {
+          userId: session.user.id,
+          email: session.user.email ?? null,
+        },
+        conversationId: id,
+        accessFound: true,
+        accessSnapshot: failureAccess,
+        readableHelperPassed: true,
+        postHelperLookupFailed: true,
+        routeTopMarkerReached,
+        notFoundReason: "post_helper_message_query_failed",
+        sourceRouteFile: "src/app/api/chat/conversations/[id]/messages/route.ts",
+        routeHandlerMarker: "messages-route-parity-v1",
+      });
+      const diagnostic = buildMessagesAccessLogPayload({
+        conversationId: id,
+        sessionUserId: session.user.id,
+        sessionUserEmail: session.user.email ?? null,
+        access: {
+          ...failureAccess,
+          messageCount: failureDiagnostic.messageCount,
+        },
+        routeTopMarkerReached,
+        notFoundReason: "post_helper_message_query_failed",
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+
+      console.error(
+        "[chat/messages][GET][post_helper_message_query_failed]",
+        JSON.stringify(diagnostic)
+      );
+
+      return NextResponse.json(
+        { error: "Failed to load conversation messages", diagnostic },
+        { status: 500, headers: TEAM_CHAT_NO_STORE_HEADERS }
+      );
+    }
+
+    let serializedConversation: ReturnType<typeof serializeConversation>;
+    try {
+      serializedConversation = serializeConversation(conversation);
+    } catch (error) {
+      const serializationAccess = {
+        ...accessSnapshot,
+        messageCount: messages.length,
+      };
+      await logTeamChatDetailRouteDiagnostics({
+        route: TEAM_CHAT_MESSAGES_ROUTE,
+        session: {
+          userId: session.user.id,
+          email: session.user.email ?? null,
+        },
+        conversationId: id,
+        accessFound: true,
+        accessSnapshot: serializationAccess,
+        readableHelperPassed: true,
+        postHelperLookupFailed: false,
+        routeTopMarkerReached,
+        serializationFailed: true,
+        notFoundReason: "message_serialization_failed",
+        sourceRouteFile: "src/app/api/chat/conversations/[id]/messages/route.ts",
+        routeHandlerMarker: "messages-route-parity-v1",
+      });
+      const diagnostic = buildMessagesAccessLogPayload({
+        conversationId: id,
+        sessionUserId: session.user.id,
+        sessionUserEmail: session.user.email ?? null,
+        access: serializationAccess,
+        routeTopMarkerReached,
+        serializationFailed: true,
+        notFoundReason: "message_serialization_failed",
+        errorName: error instanceof Error ? error.name : "UnknownError",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+
+      console.error(
+        "[chat/messages][GET][serialization_failed]",
+        JSON.stringify(diagnostic)
+      );
+
+      return NextResponse.json(
+        { error: "Failed to serialize conversation messages", diagnostic },
+        { status: 500, headers: TEAM_CHAT_NO_STORE_HEADERS }
       );
     }
 
@@ -331,7 +505,7 @@ export async function GET(
     }
     return NextResponse.json(
       {
-        conversation: serializeConversation(conversation),
+        conversation: serializedConversation,
         messages,
       },
       { headers: TEAM_CHAT_NO_STORE_HEADERS }
@@ -348,9 +522,13 @@ export async function GET(
       "[chat/messages][GET]",
       JSON.stringify({
         dbTarget: getSanitizedDatabaseTarget(),
+        route: TEAM_CHAT_MESSAGES_ROUTE,
+        diagnosticVersion: TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION,
         conversationId: id,
         sessionUserId: session.user.id,
         sessionUserEmail: session.user.email ?? null,
+        routeTopMarkerReached,
+        routeHandlerTopMarkerReached: routeTopMarkerReached,
         errorName: error instanceof Error ? error.name : "UnknownError",
         errorMessage: error instanceof Error ? error.message : String(error),
       })

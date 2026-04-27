@@ -11,6 +11,12 @@ import {
   type ContextPackingTrace,
   type ExcludedContextCandidate,
 } from "./context-packing-kernel";
+import {
+  buildContextPayloadsFromPackingCandidates,
+  planAdaptiveContextTransport,
+  type ContextPayload,
+  type ContextTransportResult,
+} from "./adaptive-context-transport";
 import type {
   InspectionCapability,
   InspectionToolBroker,
@@ -234,6 +240,7 @@ export type ProgressiveContextAssemblyInput = {
   artifactCandidates?: ContextPackingCandidate[];
   sourceCandidates?: ContextPackingCandidate[];
   rawExcerptCandidates?: ContextPackingCandidate[];
+  transportPayloads?: ContextPayload[];
   inspectionInvocations?: InspectionToolInvocation[];
   toolBroker?: InspectionToolBroker | null;
   packingKernel?: ContextPackingKernel;
@@ -244,6 +251,7 @@ export type ProgressiveContextAssemblyResult = {
   passResults: AssemblyPassResult[];
   packingRequests: ContextPackingRequest[];
   packingResults: ContextPackingResult[];
+  contextTransport: ContextTransportResult;
   artifactReuseDecisions: ArtifactReuseDecision[];
   sourceExpansionDecisions: SourceExpansionDecision[];
   expandedContextBundle: ExpandedContextBundle;
@@ -919,6 +927,17 @@ function buildExpandedContextBundle(params: {
   } satisfies ExpandedContextBundle;
 }
 
+function buildTransportPayloads(input: ProgressiveContextAssemblyInput) {
+  return [
+    ...buildContextPayloadsFromPackingCandidates([
+      ...(input.artifactCandidates ?? []),
+      ...(input.sourceCandidates ?? []),
+      ...(input.rawExcerptCandidates ?? []),
+    ]),
+    ...(input.transportPayloads ?? []),
+  ];
+}
+
 function buildArtifactReuseDecisions(result: ContextPackingResult | null) {
   if (!result) return [] satisfies ArtifactReuseDecision[];
   const selectedIds = new Set(result.selectedCandidates.map((candidate) => candidate.id));
@@ -1045,6 +1064,7 @@ export class ProgressiveContextAssembler {
   assemble(input: ProgressiveContextAssemblyInput): ProgressiveContextAssemblyResult {
     const packingKernel = input.packingKernel ?? new ContextPackingKernel();
     const decision = input.agentControl;
+    const availableTransportPayloads = buildTransportPayloads(input);
     const passResults: AssemblyPassResult[] = [];
     const packingRequests: ContextPackingRequest[] = [];
     const packingResults: ContextPackingResult[] = [];
@@ -1164,6 +1184,12 @@ export class ProgressiveContextAssembler {
         ],
         packingRequests,
         packingResults,
+        contextTransport: planAdaptiveContextTransport({
+          request: input.request,
+          agentControl: decision,
+          availablePayloads: availableTransportPayloads,
+          a03PackingResults: packingResults,
+        }),
         artifactReuseDecisions: [],
         sourceExpansionDecisions: [],
         expandedContextBundle: buildExpandedContextBundle({
@@ -1509,6 +1535,12 @@ export class ProgressiveContextAssembler {
     const contextDebtCandidates = buildDebtCandidates(gaps);
     const packingTraceEvents = packingResults.flatMap((result) => result.traceEvents);
     const contextBudgetUsedTokens = expandedContextBundle.budgetUsedTokens;
+    const contextTransport = planAdaptiveContextTransport({
+      request: input.request,
+      agentControl: decision,
+      availablePayloads: availableTransportPayloads,
+      a03PackingResults: packingResults,
+    });
 
     return {
       plan: {
@@ -1522,6 +1554,7 @@ export class ProgressiveContextAssembler {
       passResults,
       packingRequests,
       packingResults,
+      contextTransport,
       artifactReuseDecisions: buildArtifactReuseDecisions(artifactPackingResult),
       sourceExpansionDecisions: buildSourceExpansionDecisions(rawPackingResult),
       expandedContextBundle,

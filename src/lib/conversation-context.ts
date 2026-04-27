@@ -46,7 +46,6 @@ import {
 } from "./context-pdf";
 import {
   buildDocumentIntelligenceState,
-  buildKnowledgeArtifactSourceLocationLabel,
   materializeDocumentKnowledgeArtifactRecord,
   mergeDocumentInspectionTasks,
   mergeDocumentKnowledgeArtifacts,
@@ -67,6 +66,15 @@ import {
   type UpsertDocumentKnowledgeArtifactInput,
 } from "./document-intelligence";
 import {
+  DEFAULT_ARTIFACT_PROMOTION_POLICY,
+  evaluateArtifactPromotionCandidates,
+  proposeDeterministicSourceLearningCandidates,
+  renderSourceMemoryBlocks,
+  type ArtifactPromotionCandidate,
+  type ArtifactPromotionDebugSnapshot,
+  type SourceObservation,
+} from "./source-learning-artifact-promotion";
+import {
   evaluateAgentControlSurface,
   type AgentControlDebugSnapshot,
   type AgentControlSourceSignal,
@@ -76,6 +84,13 @@ import {
   assembleProgressiveContext,
   type ProgressiveContextAssemblyResult,
 } from "./progressive-context-assembly";
+import {
+  buildContextPayloadsFromArtifactPromotionCandidates,
+  buildContextPayloadsFromArtifactPromotionDecisions,
+  buildContextPayloadsFromSourceCoverageRecords,
+  buildContextPayloadsFromSourceObservations,
+  type ContextPayload,
+} from "./adaptive-context-transport";
 import {
   EMPTY_CONTEXT_REGISTRY_SELECTION,
   buildAgentControlSourceSignalsFromRegistry,
@@ -261,6 +276,7 @@ export type ConversationContextBundle = {
   progressiveAssembly: ProgressiveContextAssemblyResult;
   asyncAgentWork: AsyncAgentWorkDebugSnapshot | null;
   contextRegistry: ContextRegistryDebugSnapshot;
+  artifactPromotion: ArtifactPromotionDebugSnapshot | null;
   debugTrace?: ContextDebugTrace | null;
 };
 
@@ -940,6 +956,13 @@ type ConversationContextResolverDependencies = {
   upsertInspectionTask?: (
     task: UpsertDocumentInspectionTaskInput
   ) => Promise<ConversationDocumentInspectionTaskStoreRecord>;
+  proposeArtifactPromotionCandidates?: (params: {
+    conversationId: string;
+    document: ConversationContextDocumentRecord;
+    sourceObservations: SourceObservation[];
+    existingArtifacts: DocumentKnowledgeArtifactRecord[];
+    currentUserPrompt: string | null;
+  }) => Promise<ArtifactPromotionCandidate[]>;
   persistAsyncAgentWork?: boolean;
   upsertAsyncAgentWorkItem?: (item: AsyncAgentWorkItem) => Promise<AsyncAgentWorkItem>;
   persistContextRegistry?: boolean;
@@ -1660,16 +1683,461 @@ function buildAgentControlSourceSignals(params: {
 }
 
 function buildContextRegistrySection(selection: ContextRegistrySelection) {
-  const candidates = buildContextRegistryPackingCandidates(selection);
-  if (candidates.length === 0) {
+  const debts = normalizeRenderableContextDebt(selection.contextDebtRecords);
+  const gaps = normalizeRenderableCapabilityGaps(selection.capabilityGapRecords);
+  const coverage = normalizeRenderableSourceCoverage(selection.sourceCoverageRecords);
+  if (debts.length === 0 && gaps.length === 0 && coverage.length === 0) {
     return null;
   }
 
+  const maxRecordsPerSection = 5;
+  const capabilityGapGroups = groupCapabilityGapsForModel(gaps);
+
   return joinMarkdownSections([
-    "## Known Context Debt and Capability Gaps",
-    "These are durable registry records from prior inspections or deferred capability evidence. They are memory, not proof that unavailable tools ran.",
-    ...candidates.slice(0, 8).map((candidate) => candidate.content),
+    debts.length > 0
+      ? joinMarkdownSections([
+          "## Known Source Context Debt",
+          "Durable source-memory records for missing, weak, stale, blocked, or unresolved source understanding.",
+          ...debts.slice(0, maxRecordsPerSection).map(renderContextDebtClusterForModel),
+          debts.length > maxRecordsPerSection
+            ? `- ${debts.length - maxRecordsPerSection} additional source context debt cluster(s) omitted from normal prompt context; full details remain in debug trace.`
+            : null,
+        ])
+      : null,
+    gaps.length > 0
+      ? joinMarkdownSections([
+          "## Known Capability Gaps",
+          "Durable capability proposals for work the system cannot execute yet. These are not executed tools.",
+          ...capabilityGapGroups.map((group) =>
+            joinMarkdownSections([
+              `### ${group.title}`,
+              ...group.records.slice(0, maxRecordsPerSection).map(renderCapabilityGapRecordForModel),
+              group.records.length > maxRecordsPerSection
+                ? `- ${group.records.length - maxRecordsPerSection} additional capability gap record(s) omitted from normal prompt context for this group; full details remain in debug trace.`
+                : null,
+            ])
+          ),
+        ])
+      : null,
+    coverage.length > 0
+      ? joinMarkdownSections([
+          "## Source Coverage",
+          ...renderSourceCoverageRecordsForModel(coverage.slice(0, maxRecordsPerSection)),
+          coverage.length > maxRecordsPerSection
+            ? `- ${coverage.length - maxRecordsPerSection} additional source coverage record(s) omitted from normal prompt context; full details remain in debug trace.`
+            : null,
+        ])
+      : null,
   ]);
+}
+
+function sourceObservationTypeFromContextKind(contextKind: string): SourceObservation["type"] {
+  if (contextKind === "spreadsheet") return "spreadsheet_range";
+  if (contextKind === "pdf") return "parser_text_excerpt";
+  return "extracted_text_chunk";
+}
+
+function buildSourceObservationsFromChunks(params: {
+  document: ConversationContextDocumentRecord;
+  contextKind: string;
+  chunks: ContextDocumentChunk[];
+}) {
+  return params.chunks.map((chunk) => ({
+    id: `${params.document.id}:chunk:${chunk.chunkIndex}`,
+    type: sourceObservationTypeFromContextKind(params.contextKind),
+    sourceDocumentId: params.document.id,
+    sourceVersion: null,
+    sourceLocator: {
+      pageNumberStart: chunk.pageNumberStart,
+      pageNumberEnd: chunk.pageNumberEnd,
+      pageLabelStart: chunk.pageLabelStart,
+      pageLabelEnd: chunk.pageLabelEnd,
+      tableId: chunk.tableId,
+      figureId: chunk.figureId,
+      sectionPath: [...chunk.sectionPath],
+      headingPath: [...chunk.headingPath],
+      sourceLocationLabel: buildThreadDocumentSourceBodyLocationLabel({
+        filename: params.document.filename,
+        chunk,
+      }),
+      charStart: chunk.charStart,
+      charEnd: chunk.charEnd,
+    },
+    content: chunk.text,
+    payload: {
+      chunkIndex: chunk.chunkIndex,
+      sourceType: chunk.sourceType,
+      visualClassification: chunk.visualClassification,
+      visualClassificationConfidence: chunk.visualClassificationConfidence,
+      visualClassificationReasonCodes: [...chunk.visualClassificationReasonCodes],
+    },
+    extractionMethod: params.contextKind === "pdf" ? "parser_pdf_text_extraction" : "parser_text_extraction",
+    confidence: chunk.visualClassificationConfidence === "high" ? 0.9 : chunk.visualClassificationConfidence === "medium" ? 0.7 : 0.6,
+    limitations:
+      chunk.visualClassification === "true_table"
+        ? ["Parser text observation may not contain structured table rows, columns, or cells."]
+        : ["Observation is extracted text substrate and is not automatically durable source learning."],
+  })) satisfies SourceObservation[];
+}
+
+function normalizeDebtKindLabel(kind: string) {
+  return (kind === "output_budget_insufficient" ? "output_budget_gap" : kind).replace(/_/g, " ");
+}
+
+function isGenericTruthGuardDebt(record: ContextRegistrySelection["contextDebtRecords"][number]) {
+  return (
+    record.title.includes("Truthful guard observed") ||
+    record.description.includes("Execution claim evidence prevented") ||
+    record.debtKey.includes("truthful-guard")
+  );
+}
+
+function contextDebtRichness(record: ContextRegistrySelection["contextDebtRecords"][number]) {
+  return (
+    (record.linkedArtifactKeys.length > 0 ? 4 : 0) +
+    (typeof record.sourceLocator.pageNumber === "number" ? 3 : 0) +
+    (record.conversationDocumentId ? 2 : 0) +
+    (record.sourceId ? 1 : 0) +
+    severityRankForContext(record.severity)
+  );
+}
+
+function contextDebtSuppressionKey(record: ContextRegistrySelection["contextDebtRecords"][number]) {
+  const page = typeof record.sourceLocator.pageNumber === "number" ? `page-${record.sourceLocator.pageNumber}` : "general";
+  return [
+    record.conversationDocumentId ?? record.sourceId ?? record.conversationId ?? "workspace",
+    String(record.kind) === "output_budget_insufficient" ? "output_budget_gap" : record.kind,
+    page,
+  ].join(":");
+}
+
+type ContextDebtRenderCluster = {
+  clusterKey: string;
+  primaryRecord: ContextRegistrySelection["contextDebtRecords"][number];
+  records: ContextRegistrySelection["contextDebtRecords"];
+  kinds: string[];
+  status: string;
+  severity: string;
+  linkedArtifactKeys: string[];
+  deferredCapabilities: string[];
+  resolutionPaths: string[];
+};
+
+function normalizedContextDebtKind(kind: string) {
+  return kind === "output_budget_insufficient" ? "output_budget_gap" : kind;
+}
+
+function contextDebtSourceKey(record: ContextRegistrySelection["contextDebtRecords"][number]) {
+  return record.conversationDocumentId ?? record.sourceId ?? record.conversationId ?? "workspace";
+}
+
+function contextDebtPageKey(record: ContextRegistrySelection["contextDebtRecords"][number]) {
+  return typeof record.sourceLocator.pageNumber === "number" ? `page-${record.sourceLocator.pageNumber}` : "general";
+}
+
+function shouldClusterContextDebt(record: ContextRegistrySelection["contextDebtRecords"][number]) {
+  return (
+    record.linkedArtifactKeys.length > 0 ||
+    typeof record.sourceLocator.pageNumber === "number" ||
+    record.sourceScope === "page" ||
+    record.sourceScope === "table" ||
+    [
+      "missing_table_body",
+      "weak_table_candidate",
+      "deferred_capability_needed",
+      "validation_gap",
+      "incomplete_table_coverage",
+    ].includes(normalizedContextDebtKind(record.kind))
+  );
+}
+
+function contextDebtClusterKey(record: ContextRegistrySelection["contextDebtRecords"][number]) {
+  if (!shouldClusterContextDebt(record)) {
+    return contextDebtSuppressionKey(record);
+  }
+
+  return [
+    contextDebtSourceKey(record),
+    contextDebtPageKey(record),
+    record.sourceScope === "table" || record.linkedArtifactKeys.length > 0 ? "source-memory-gap" : "source-gap",
+  ].join(":");
+}
+
+function selectPrimaryContextDebtRecord(records: ContextRegistrySelection["contextDebtRecords"]) {
+  return [...records].sort((left, right) =>
+    contextDebtRichness(right) - contextDebtRichness(left) ||
+    severityRankForContext(right.severity) - severityRankForContext(left.severity) ||
+    Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt)
+  )[0] as ContextRegistrySelection["contextDebtRecords"][number];
+}
+
+function sortLinkedArtifactKeys(left: string, right: string) {
+  const priority = (value: string) => {
+    if (value.startsWith("table_candidate:")) return 0;
+    if (value.startsWith("extraction_warning:")) return 1;
+    return 2;
+  };
+  return priority(left) - priority(right) || left.localeCompare(right);
+}
+
+function normalizeRenderableContextDebt(records: ContextRegistrySelection["contextDebtRecords"]) {
+  const richerKindKeys = new Set<string>();
+  const richerSourcePageKeys = new Set<string>();
+  for (const record of records) {
+    if (isGenericTruthGuardDebt(record) || contextDebtRichness(record) < 3) continue;
+    richerKindKeys.add([record.conversationId ?? "workspace", normalizedContextDebtKind(record.kind)].join(":"));
+    richerSourcePageKeys.add([contextDebtSourceKey(record), contextDebtPageKey(record)].join(":"));
+  }
+
+  const clusterRecords = records.filter((record) => {
+    if (!isGenericTruthGuardDebt(record)) return true;
+    return (
+      !richerKindKeys.has([record.conversationId ?? "workspace", normalizedContextDebtKind(record.kind)].join(":")) &&
+      !richerSourcePageKeys.has([contextDebtSourceKey(record), contextDebtPageKey(record)].join(":"))
+    );
+  });
+  const byClusterKey = new Map<string, ContextRegistrySelection["contextDebtRecords"]>();
+
+  for (const record of clusterRecords) {
+    const key = contextDebtClusterKey(record);
+    byClusterKey.set(key, [...(byClusterKey.get(key) ?? []), record]);
+  }
+
+  return [...byClusterKey.entries()]
+    .map(([clusterKey, groupedRecords]) => {
+      const primaryRecord = selectPrimaryContextDebtRecord(groupedRecords);
+      const severity = groupedRecords
+        .map((record) => record.severity)
+        .sort((left, right) => severityRankForContext(right) - severityRankForContext(left))[0] ?? primaryRecord.severity;
+      return {
+        clusterKey,
+        primaryRecord,
+        records: groupedRecords,
+        kinds: Array.from(new Set(groupedRecords.map((record) => normalizedContextDebtKind(record.kind)))),
+        status: primaryRecord.status,
+        severity,
+        linkedArtifactKeys: Array.from(new Set(groupedRecords.flatMap((record) => record.linkedArtifactKeys))).sort(sortLinkedArtifactKeys),
+        deferredCapabilities: Array.from(new Set(groupedRecords.flatMap((record) => record.deferredCapabilities))).sort(),
+        resolutionPaths: Array.from(new Set(groupedRecords.flatMap((record) => record.resolutionPaths))).sort(),
+      } satisfies ContextDebtRenderCluster;
+    })
+    .sort((left, right) =>
+      severityRankForContext(right.severity) - severityRankForContext(left.severity) ||
+      Date.parse(right.primaryRecord.lastSeenAt) - Date.parse(left.primaryRecord.lastSeenAt)
+    );
+}
+
+function normalizeRenderableCapabilityGaps(records: ContextRegistrySelection["capabilityGapRecords"]) {
+  const byKey = new Map<string, ContextRegistrySelection["capabilityGapRecords"][number]>();
+  for (const record of records) {
+    const key = [
+      record.conversationDocumentId ?? record.sourceId ?? record.conversationId ?? "workspace",
+      record.kind,
+      record.neededCapability,
+    ].join(":");
+    const existing = byKey.get(key);
+    if (!existing || severityRankForContext(record.severity) > severityRankForContext(existing.severity)) {
+      byKey.set(key, record);
+    }
+  }
+  return [...byKey.values()].sort((left, right) =>
+    severityRankForContext(right.severity) - severityRankForContext(left.severity) ||
+    Date.parse(right.lastSeenAt) - Date.parse(left.lastSeenAt)
+  );
+}
+
+type CapabilityGapRenderGroup = {
+  title: "Source Inspection Capability Gaps" | "Creation / Validation Capability Gaps" | "Other Capability Gaps";
+  records: ContextRegistrySelection["capabilityGapRecords"];
+};
+
+function classifyCapabilityGapForModel(record: ContextRegistrySelection["capabilityGapRecords"][number]) {
+  const text = [
+    record.kind,
+    record.neededCapability,
+    record.missingPayloadType,
+    record.missingToolId,
+    record.missingModelCapability,
+    record.missingArtifactType,
+    record.missingConnector,
+    record.missingApprovalPath,
+    record.missingBudgetProfile,
+    record.title,
+    record.description,
+    record.currentLimitation,
+    record.recommendedResolution,
+    ...record.resolutionPaths,
+    ...record.candidateContextLanes,
+    ...record.candidateModelCapabilities,
+    ...record.candidateToolCategories,
+  ]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+
+  if (
+    record.kind === "missing_creation_capability" ||
+    record.kind === "missing_validation_capability" ||
+    /deliverable|creation|validation|export|workbook|deck|report|high_fidelity_creation/.test(text)
+  ) {
+    return "Creation / Validation Capability Gaps" as const;
+  }
+
+  if (
+    record.kind === "missing_context_lane" ||
+    record.kind === "missing_context_transport" ||
+    record.kind === "missing_model_capability" ||
+    record.kind === "missing_source_coverage_capability" ||
+    /rendered|ocr|vision|document.ai|document-ai|table recovery|native image|source inspection|structured table|page image|page crop/.test(text)
+  ) {
+    return "Source Inspection Capability Gaps" as const;
+  }
+
+  return "Other Capability Gaps" as const;
+}
+
+function groupCapabilityGapsForModel(records: ContextRegistrySelection["capabilityGapRecords"]) {
+  const groups: CapabilityGapRenderGroup[] = [
+    { title: "Source Inspection Capability Gaps", records: [] },
+    { title: "Creation / Validation Capability Gaps", records: [] },
+    { title: "Other Capability Gaps", records: [] },
+  ];
+  for (const record of records) {
+    const title = classifyCapabilityGapForModel(record);
+    groups.find((group) => group.title === title)?.records.push(record);
+  }
+  return groups.filter((group) => group.records.length > 0);
+}
+
+function normalizeRenderableSourceCoverage(records: ContextRegistrySelection["sourceCoverageRecords"]) {
+  const byKey = new Map<string, ContextRegistrySelection["sourceCoverageRecords"][number]>();
+  for (const record of records) {
+    if (!["unknown", "uninspected", "partially_inspected", "inspected_with_limitations", "stale", "blocked"].includes(record.coverageStatus)) {
+      continue;
+    }
+    const key = [
+      record.conversationDocumentId ?? record.sourceId ?? record.conversationId ?? "workspace",
+      record.sourceScope,
+      JSON.stringify(record.sourceLocator ?? {}),
+      JSON.stringify(record.coverageTarget ?? {}),
+      record.coverageStatus,
+    ].join(":");
+    const existing = byKey.get(key);
+    if (!existing || Date.parse(record.updatedAt) > Date.parse(existing.updatedAt)) {
+      byKey.set(key, record);
+    }
+  }
+  return [...byKey.values()].sort((left, right) =>
+    Date.parse(right.updatedAt) - Date.parse(left.updatedAt) ||
+    formatSourceCoverageTarget(left.coverageTarget).localeCompare(formatSourceCoverageTarget(right.coverageTarget))
+  );
+}
+
+function severityRankForContext(value: string) {
+  return { critical: 4, high: 3, medium: 2, low: 1 }[value as "critical" | "high" | "medium" | "low"] ?? 0;
+}
+
+function cleanRegistryModelText(value: string | null | undefined) {
+  return (value ?? "")
+    .replace(/Truthful guard observed unresolved context gap:\s*/gi, "Unresolved context gap: ")
+    .replace(/Execution claim evidence prevented this gap from being represented as completed work\./gi, "This remains unresolved.")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function renderContextDebtClusterForModel(cluster: ContextDebtRenderCluster) {
+  const record = cluster.primaryRecord;
+  const sourceParts = [
+    typeof record.sourceLocator.locationLabel === "string" ? record.sourceLocator.locationLabel : null,
+    typeof record.sourceLocator.pageNumber === "number" && typeof record.sourceLocator.locationLabel !== "string"
+      ? `page ${record.sourceLocator.pageNumber}`
+      : null,
+  ].filter((part): part is string => Boolean(part));
+  const linkedArtifacts = cluster.linkedArtifactKeys.length > 0
+    ? ` Linked artifacts: ${cluster.linkedArtifactKeys.join(", ")}.`
+    : "";
+  const capabilities = cluster.deferredCapabilities.length > 0
+    ? ` Needed next capabilities: ${cluster.deferredCapabilities.join(", ")}. These capabilities have not executed.`
+    : "";
+  const kindSummary =
+    cluster.kinds.length > 1
+      ? ` Related debt: ${cluster.kinds.map(normalizeDebtKindLabel).join(", ")}.`
+      : ` ${normalizeDebtKindLabel(cluster.kinds[0] ?? record.kind)}.`;
+  const compactedDetail =
+    cluster.records.length > 1
+      ? ` Combines ${cluster.records.length} related durable debt records; full individual records remain in debug trace.`
+      : "";
+  const sourceTitle =
+    typeof record.sourceLocator.pageNumber === "number"
+      ? `Page ${record.sourceLocator.pageNumber} unresolved source context debt`
+      : cleanRegistryModelText(record.title) || "Unresolved source context debt";
+  return [
+    `- ${sourceTitle} (${cluster.status}, ${cluster.severity}).`,
+    sourceParts.length > 0 ? ` Source: ${sourceParts.join(", ")}.` : "",
+    kindSummary,
+    ` ${cleanRegistryModelText(record.description)}`,
+    record.whyItMatters ? ` Why it matters: ${cleanRegistryModelText(record.whyItMatters)}` : "",
+    linkedArtifacts,
+    capabilities,
+    compactedDetail,
+  ].join("").trim();
+}
+
+function renderCapabilityGapRecordForModel(record: ContextRegistrySelection["capabilityGapRecords"][number]) {
+  const resolution = record.resolutionPaths.length > 0
+    ? ` Recommended resolution: ${record.resolutionPaths.join(", ")}.`
+    : "";
+  const fixtures = record.benchmarkFixtureIds.length > 0
+    ? ` Benchmark fixture: ${record.benchmarkFixtureIds.join(", ")}.`
+    : "";
+  return [
+    `- ${record.neededCapability} (${record.kind.replace(/_/g, " ")}, ${record.status}, ${record.severity}).`,
+    ` ${cleanRegistryModelText(record.currentLimitation ?? record.description)}`,
+    resolution,
+    fixtures,
+    " This is a gap/proposal only; it has not executed.",
+  ].join("").trim();
+}
+
+function formatSourceCoverageTarget(target: Record<string, unknown>) {
+  const rawTarget = typeof target.target === "string" ? target.target : null;
+  const rawScope = typeof target.scope === "string" ? target.scope : null;
+  return (rawTarget ?? rawScope ?? "source coverage").replace(/_/g, " ");
+}
+
+function renderSourceCoverageRecordsForModel(records: ContextRegistrySelection["sourceCoverageRecords"]) {
+  const allText = records
+    .flatMap((record) => [
+      formatSourceCoverageTarget(record.coverageTarget),
+      record.coverageStatus,
+      ...record.limitations,
+      ...record.inspectedBy,
+      JSON.stringify(record.sourceLocator ?? {}),
+      JSON.stringify(record.coverageTarget ?? {}),
+    ])
+    .join(" ")
+    .toLowerCase();
+  const statuses = Array.from(new Set(records.map((record) => record.coverageStatus.replace(/_/g, " ")))).join(", ");
+  const targets = Array.from(new Set(records.map((record) => formatSourceCoverageTarget(record.coverageTarget)))).slice(0, 3);
+  const lines = [
+    `- Relevant source sections ${statuses || "inspected with limitations"} for ${targets.join(", ") || "source coverage"}.`,
+  ];
+
+  if (/deliverable|full document|full_document|all pages|all_pages|all tables|all_tables|coverage/.test(allText)) {
+    lines.push("- Full deliverable-grade coverage was not achieved.");
+  }
+  if (/page\s*15|page-15|table body|water chemistry|missing_table_body/.test(allText)) {
+    lines.push("- Page 15 table body remains missing.");
+  }
+  if (/approval|rendered|ocr|vision|document.ai|document-ai|table recovery/.test(allText)) {
+    lines.push("- Deeper recovery requires approval and currently unavailable rendered/OCR/vision/document-AI capabilities.");
+  }
+
+  if (lines.length === 1 && records.length > 1) {
+    lines.push(`- ${records.length} source coverage record(s) were compacted for normal context; full details remain in debug trace.`);
+  }
+
+  return lines;
 }
 
 function hasContextRegistryPrismaDelegates() {
@@ -2731,20 +3199,26 @@ function buildThreadDocumentChunkingDebugDocument(params: {
   };
 }
 
-function buildThreadDocumentSection(params: {
+type ThreadDocumentSectionRenderInput = {
   filename: string;
   fullyIncluded?: boolean;
   selection: ContextDocumentChunkSelectionResult;
   ranking?: ContextDocumentChunkRankingResult | null;
   occurrence?: ConversationContextDocumentOccurrenceDebug | null;
   selectedArtifacts?: DocumentKnowledgeArtifactRecord[];
-}) {
+};
+
+function buildThreadDocumentSection(params: ThreadDocumentSectionRenderInput) {
   const displayChunks = [...params.selection.selectedChunks].sort(
     (left, right) => left.charStart - right.charStart || left.chunkIndex - right.chunkIndex
   );
   const displayArtifacts = [...(params.selectedArtifacts ?? [])].sort(
     (left, right) => right.approxTokenCount - left.approxTokenCount || left.artifactKey.localeCompare(right.artifactKey)
   );
+  const sourceMemoryBlocks = renderSourceMemoryBlocks({
+    filename: params.filename,
+    artifacts: displayArtifacts,
+  });
   const occurrence = params.occurrence ?? null;
   const occurrenceListingHint =
     params.ranking?.occurrenceIntentDetected && params.ranking.occurrenceTargetPhrase
@@ -2768,28 +3242,26 @@ function buildThreadDocumentSection(params: {
               : "- No exact-match occurrence inventory was available for this attachment.",
         ])
       : null;
-  const artifactSection = displayArtifacts.length > 0
+  const artifactSection = sourceMemoryBlocks.length > 0
     ? joinMarkdownSections([
-        "### Learned Artifacts",
-        "These artifacts were learned from prior or current inspection passes and are durable document memory for this source.",
-        ...displayArtifacts.map((artifact, index) =>
-          joinMarkdownSections([
-            `#### Artifact ${index + 1}: ${(artifact.title ?? artifact.kind).trim()}`,
-            `ARTIFACT TYPE: ${artifact.kind.replace(/_/g, " ")}`,
-            `ARTIFACT STATUS: ${artifact.status}`,
-            artifact.sourceLocationLabel
-              ? `SOURCE BODY LOCATION: ${artifact.sourceLocationLabel}`
-              : `SOURCE BODY LOCATION: ${buildKnowledgeArtifactSourceLocationLabel(
-                  params.filename,
-                  artifact.location,
-                  artifact.title
-                )}`,
-            artifact.confidence != null ? `CONFIDENCE: ${artifact.confidence.toFixed(2)}` : null,
-            artifact.summary ? `SUMMARY: ${artifact.summary}` : null,
-            "DETAIL:",
-            artifact.content,
-          ])
-        ),
+        "### Source Memory Artifacts",
+        "These are durable agent-selected source memories, separate from raw extracted excerpts. Diagnostic source memories describe limitations; positive source memories describe reusable source learning.",
+        sourceMemoryBlocks.some((block) => block.cluster.artifactClass === "positive")
+          ? joinMarkdownSections([
+              "#### Positive Source Learning",
+              ...sourceMemoryBlocks
+                .filter((block) => block.cluster.artifactClass === "positive")
+                .map((block) => block.renderedText),
+            ])
+          : null,
+        sourceMemoryBlocks.some((block) => block.cluster.artifactClass === "diagnostic")
+          ? joinMarkdownSections([
+              "#### Diagnostic / Unresolved Source Memory",
+              ...sourceMemoryBlocks
+                .filter((block) => block.cluster.artifactClass === "diagnostic")
+                .map((block) => block.renderedText),
+            ])
+          : null,
       ])
     : null;
 
@@ -2841,6 +3313,101 @@ function buildThreadDocumentSection(params: {
       ? `... [${params.selection.skippedChunks.length} additional chunk candidates not included in this runtime]`
       : null,
   ]);
+}
+
+function rawExcerptCandidateIdForChunk(chunk: ContextDocumentChunk) {
+  return `${chunk.sourceId}:${chunk.chunkIndex}`;
+}
+
+function allowsBroadNormalExcerptRendering(agentControl: AgentControlDebugSnapshot) {
+  return (
+    agentControl.taskFidelityLevel === "highest_fidelity_ingestion" ||
+    agentControl.taskFidelityLevel === "highest_fidelity_creation" ||
+    agentControl.sourceCoverageTarget === "full_document" ||
+    agentControl.sourceCoverageTarget === "all_pages" ||
+    agentControl.sourceCoverageTarget === "all_tables" ||
+    agentControl.sourceCoverageTarget === "all_attachments"
+  );
+}
+
+function rankOrderForChunk(
+  chunk: ContextDocumentChunk,
+  ranking: ContextDocumentChunkRankingResult | null | undefined
+) {
+  return ranking?.details.find(
+    (detail) => detail.sourceId === chunk.sourceId && detail.chunkIndex === chunk.chunkIndex
+  )?.rankingOrder ?? Number.MAX_SAFE_INTEGER;
+}
+
+function uniqueChunksByCandidateId(chunks: ContextDocumentChunk[]) {
+  const seen = new Set<string>();
+  const result: ContextDocumentChunk[] = [];
+  for (const chunk of chunks) {
+    const id = rawExcerptCandidateIdForChunk(chunk);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    result.push(chunk);
+  }
+  return result;
+}
+
+function filterSelectionForNormalContext(params: {
+  selection: ContextDocumentChunkSelectionResult;
+  selectedExcerptIds: Set<string>;
+  ranking?: ContextDocumentChunkRankingResult | null;
+  allowBroadExcerptRendering: boolean;
+  allowFallbackToPreselectedExcerpts: boolean;
+}) {
+  const maxNormalExcerpts = params.allowBroadExcerptRendering ? 24 : 8;
+  const progressiveSelectedChunks =
+    params.selectedExcerptIds.size === 0 && params.allowFallbackToPreselectedExcerpts
+      ? params.selection.selectedChunks
+      : params.selection.selectedChunks.filter((chunk) =>
+          params.selectedExcerptIds.has(rawExcerptCandidateIdForChunk(chunk))
+        );
+  const rankedForNormalContext = [...progressiveSelectedChunks].sort(
+    (left, right) =>
+      rankOrderForChunk(left, params.ranking) - rankOrderForChunk(right, params.ranking) ||
+      left.sourceOrderIndex - right.sourceOrderIndex ||
+      left.chunkIndex - right.chunkIndex
+  );
+  const selectedChunks = rankedForNormalContext.slice(0, maxNormalExcerpts);
+  const selectedIds = new Set(selectedChunks.map(rawExcerptCandidateIdForChunk));
+  const omittedChunks = params.selection.selectedChunks.filter((chunk) =>
+    !selectedIds.has(rawExcerptCandidateIdForChunk(chunk))
+  );
+  const skippedChunks = uniqueChunksByCandidateId([
+    ...params.selection.skippedChunks,
+    ...omittedChunks,
+  ]);
+  const selectedApproxTokenCount = selectedChunks.reduce((sum, chunk) => sum + chunk.approxTokenCount, 0);
+  const selectedCharCount = selectedChunks.reduce((sum, chunk) => sum + chunk.text.length, 0);
+
+  return {
+    ...params.selection,
+    selectedChunks,
+    skippedChunks,
+    selectedApproxTokenCount,
+    selectedCharCount,
+    usedBudgetClamp:
+      params.selection.usedBudgetClamp ||
+      omittedChunks.length > 0 ||
+      selectedChunks.length < params.selection.selectedChunks.length,
+    selectedDueToCoverageChunkKeys: params.selection.selectedDueToCoverageChunkKeys.filter((key) =>
+      selectedIds.has(key)
+    ),
+    skippedDueToBudgetChunkKeys: Array.from(new Set([
+      ...params.selection.skippedDueToBudgetChunkKeys,
+      ...omittedChunks.map(rawExcerptCandidateIdForChunk),
+    ])),
+  } satisfies ContextDocumentChunkSelectionResult;
+}
+
+function isPositiveSelectedSourceMemoryArtifact(artifact: DocumentKnowledgeArtifactRecord) {
+  const payloadClass = artifact.payload?.artifactClass;
+  if (payloadClass === "positive") return true;
+  if (payloadClass === "diagnostic") return false;
+  return !["table_candidate", "extraction_warning", "open_question"].includes(artifact.kind);
 }
 
 type ConversationContextRequestedSource = {
@@ -3699,12 +4266,17 @@ export async function resolveConversationContextBundle(params: {
   }
 
   const sources: ConversationContextSource[] = [];
-  const sections: string[] = [];
+  const documentSectionRenderInputs: ThreadDocumentSectionRenderInput[] = [];
   const availabilityNotes: string[] = [];
   const documentChunkingDocuments: ConversationContextDocumentChunkingDocument[] = [];
   const documentIntelligenceDocuments: ConversationContextDocumentIntelligenceDocument[] = [];
   const progressiveArtifactCandidates: ContextPackingCandidate[] = [];
   const progressiveRawExcerptCandidates: ContextPackingCandidate[] = [];
+  const progressiveTransportPayloads: ContextPayload[] = [];
+  const artifactPromotionTraces: ArtifactPromotionDebugSnapshot["traces"] = [];
+  let artifactPromotionCandidateCount = 0;
+  let artifactPromotionAcceptedCount = 0;
+  let artifactPromotionRejectedCount = 0;
   const selectedArtifactKeys: string[] = [];
   let selectedArtifactTokenCount = 0;
   let remainingDocumentTokens = resolvedBudget.totalDocumentContextBudgetTokens;
@@ -4032,6 +4604,61 @@ export async function resolveConversationContextBundle(params: {
       storedInspectionTasksByDocument.set(document.id, inspectionTasks);
     }
 
+    const sourceObservations = buildSourceObservationsFromChunks({
+      document,
+      contextKind,
+      chunks: chunkCandidates,
+    });
+    progressiveTransportPayloads.push(
+      ...buildContextPayloadsFromSourceObservations(sourceObservations)
+    );
+    const shouldRunArtifactPromotion =
+      Boolean(dependencies.proposeArtifactPromotionCandidates) ||
+      Boolean(dependencies.upsertKnowledgeArtifact) ||
+      persistDocumentIntelligence;
+    const promotionCandidates = shouldRunArtifactPromotion
+      ? dependencies.proposeArtifactPromotionCandidates
+        ? await dependencies.proposeArtifactPromotionCandidates({
+            conversationId: params.conversationId,
+            document,
+            sourceObservations,
+            existingArtifacts: learnedArtifacts,
+            currentUserPrompt: params.currentUserPrompt ?? null,
+          })
+        : proposeDeterministicSourceLearningCandidates({
+            document,
+            sourceObservations,
+            currentUserPrompt: params.currentUserPrompt ?? null,
+          })
+      : [];
+    progressiveTransportPayloads.push(
+      ...buildContextPayloadsFromArtifactPromotionCandidates(promotionCandidates)
+    );
+    if (promotionCandidates.length > 0) {
+      const promotionResult = evaluateArtifactPromotionCandidates({
+        candidates: promotionCandidates,
+        existingArtifacts: learnedArtifacts,
+      });
+      progressiveTransportPayloads.push(
+        ...buildContextPayloadsFromArtifactPromotionDecisions(promotionResult.decisions)
+      );
+      const persistedPromotionArtifacts = await Promise.all(
+        promotionResult.acceptedArtifacts.map(async (artifact) =>
+          buildStoredKnowledgeArtifactRecord(await upsertKnowledgeArtifact(artifact))
+        )
+      );
+
+      artifactPromotionCandidateCount += promotionResult.debugSnapshot.candidateCount;
+      artifactPromotionAcceptedCount += promotionResult.debugSnapshot.acceptedCount;
+      artifactPromotionRejectedCount += promotionResult.debugSnapshot.rejectedCount;
+      artifactPromotionTraces.push(...promotionResult.debugSnapshot.traces);
+
+      if (persistedPromotionArtifacts.length > 0) {
+        learnedArtifacts = mergeDocumentKnowledgeArtifacts(learnedArtifacts, persistedPromotionArtifacts);
+        storedKnowledgeArtifactsByDocument.set(document.id, learnedArtifacts);
+      }
+    }
+
     progressiveArtifactCandidates.push(
       ...learnedArtifacts.map((artifact) =>
         buildArtifactPackingCandidate({
@@ -4073,8 +4700,8 @@ export async function resolveConversationContextBundle(params: {
     const artifactSelection = selectDocumentKnowledgeArtifactsWithinBudget({
       artifacts: learnedArtifacts,
       query: params.currentUserPrompt,
-      maxTokens: Math.max(0, Math.min(256, Math.floor(availableDocumentTokens * 0.5))),
-      maxArtifacts: 3,
+      maxTokens: Math.max(0, Math.min(512, Math.floor(availableDocumentTokens * 0.5))),
+      maxArtifacts: 6,
     });
     const sourceMetadataWithArtifacts = buildArtifactSourceMetadata({
       existingSourceMetadata: sourceMetadata,
@@ -4159,19 +4786,17 @@ export async function resolveConversationContextBundle(params: {
         selection.selectedApproxTokenCount -
         THREAD_DOCUMENT_SECTION_TOKEN_RESERVE
     );
-    sections.push(
-      buildThreadDocumentSection({
-        filename: document.filename,
-        fullyIncluded:
-          selection.selectedChunks.length === chunkCandidates.length &&
-          selection.skippedChunks.length === 0 &&
-          !selection.usedBudgetClamp,
-        selection,
-        ranking,
-        occurrence: documentChunkingDebugDocument.occurrence,
-        selectedArtifacts: artifactSelection.selectedArtifacts,
-      })
-    );
+    documentSectionRenderInputs.push({
+      filename: document.filename,
+      fullyIncluded:
+        selection.selectedChunks.length === chunkCandidates.length &&
+        selection.skippedChunks.length === 0 &&
+        !selection.usedBudgetClamp,
+      selection,
+      ranking,
+      occurrence: documentChunkingDebugDocument.occurrence,
+      selectedArtifacts: artifactSelection.selectedArtifacts,
+    });
     sources.push(buildContextSource(
       "used",
       document.filename,
@@ -4259,6 +4884,38 @@ export async function resolveConversationContextBundle(params: {
     ],
   });
 
+  const progressiveAssembly = assembleProgressiveContext({
+    request: params.currentUserPrompt ?? null,
+    agentControl,
+    artifactCandidates: [...progressiveArtifactCandidates, ...contextRegistryPackingCandidates],
+    rawExcerptCandidates: progressiveRawExcerptCandidates,
+    transportPayloads: [
+      ...progressiveTransportPayloads,
+      ...buildContextPayloadsFromSourceCoverageRecords(openContextRegistry.sourceCoverageRecords),
+    ],
+  });
+  const selectedExcerptIdsForNormalContext = new Set(
+    progressiveAssembly.expandedContextBundle.selectedExcerptIds
+  );
+  const allowBroadExcerptRendering = allowsBroadNormalExcerptRendering(agentControl);
+  const sections = documentSectionRenderInputs.map((input) => {
+    const selection = filterSelectionForNormalContext({
+      selection: input.selection,
+      selectedExcerptIds: selectedExcerptIdsForNormalContext,
+      ranking: input.ranking,
+      allowBroadExcerptRendering,
+      allowFallbackToPreselectedExcerpts:
+        !(input.selectedArtifacts ?? []).some(isPositiveSelectedSourceMemoryArtifact),
+    });
+    return buildThreadDocumentSection({
+      ...input,
+      selection,
+      fullyIncluded:
+        Boolean(input.fullyIncluded) &&
+        allowBroadExcerptRendering &&
+        selection.selectedChunks.length === input.selection.selectedChunks.length,
+    });
+  });
   const renderedText = joinMarkdownSections([
     documentChunkingOccurrence
       ? joinMarkdownSections([
@@ -4291,12 +4948,6 @@ export async function resolveConversationContextBundle(params: {
         ])
       : null,
   ]);
-  const progressiveAssembly = assembleProgressiveContext({
-    request: params.currentUserPrompt ?? null,
-    agentControl,
-    artifactCandidates: [...progressiveArtifactCandidates, ...contextRegistryPackingCandidates],
-    rawExcerptCandidates: progressiveRawExcerptCandidates,
-  });
   const asyncWorkItems = planAsyncAgentWorkItems({
     conversationId: params.conversationId,
     conversationDocumentId: documents.length === 1 ? documents[0].id : null,
@@ -4332,6 +4983,15 @@ export async function resolveConversationContextBundle(params: {
   const contextRegistry = buildContextRegistryDebugSnapshot(
     mergeContextRegistrySelections(openContextRegistry, persistedContextRegistry)
   );
+  const artifactPromotion = artifactPromotionCandidateCount > 0
+    ? {
+        policy: DEFAULT_ARTIFACT_PROMOTION_POLICY,
+        candidateCount: artifactPromotionCandidateCount,
+        acceptedCount: artifactPromotionAcceptedCount,
+        rejectedCount: artifactPromotionRejectedCount,
+        traces: artifactPromotionTraces,
+      } satisfies ArtifactPromotionDebugSnapshot
+    : null;
 
   const bundle = {
     text: renderedText,
@@ -4357,6 +5017,7 @@ export async function resolveConversationContextBundle(params: {
     progressiveAssembly,
     asyncAgentWork,
     contextRegistry,
+    artifactPromotion,
   };
 
   return {

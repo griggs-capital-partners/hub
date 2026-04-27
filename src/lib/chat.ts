@@ -175,7 +175,10 @@ export type ReadableConversationAccessReason =
   | "user_has_no_active_membership";
 
 export type ReadableConversationAccessSnapshot = {
+  id?: string;
   archivedAt: Date | null;
+  chatProjectId?: string | null;
+  projectId?: string | null;
   members: ReadonlyArray<{
     userId: string | null;
     removedAt: Date | null;
@@ -183,11 +186,83 @@ export type ReadableConversationAccessSnapshot = {
 };
 
 export type ConversationMessagesAccessResult = {
+  readable: boolean;
   status: 200 | 404;
   notFoundReason: ReadableConversationAccessReason | null;
+  conversationExists: boolean;
+  archivedAt: string | null;
+  projectId: string | null;
+  activeMembershipCountForUser: number;
+  userMembershipRemovedAt: Array<string | null>;
   readableHelperPassed: boolean;
   postHelperLookupFailed: boolean;
   messageCount: number;
+};
+
+export type TeamChatConversationAccessStatus = 200 | 404;
+
+export type TeamChatConversationSummary = {
+  id: string;
+  type: string | null;
+  name: string | null;
+  projectId: string | null;
+  archivedAt: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+export type TeamChatConversationMembershipSummary = {
+  userId: string | null;
+  agentId: string | null;
+  joinedAt: string | null;
+  removedAt: string | null;
+  active: boolean;
+};
+
+export type TeamChatConversationAccessSnapshot = {
+  conversationId: string;
+  status: TeamChatConversationAccessStatus;
+  accessStatus: TeamChatConversationAccessStatus;
+  readable: boolean;
+  notFoundReason: ReadableConversationAccessReason | null;
+  conversationExists: boolean;
+  archivedAt: string | null;
+  projectId: string | null;
+  activeMembershipCountForUser: number;
+  userMembershipRemovedAt: Array<string | null>;
+  messageCount: number | null;
+  readableHelperPassed: boolean;
+  postHelperLookupFailed: boolean;
+  conversationSummary: TeamChatConversationSummary | null;
+  membershipSummary: TeamChatConversationMembershipSummary[];
+};
+
+export type TeamChatConversationAccessSnapshotRecord = {
+  id: string;
+  type?: string | null;
+  name?: string | null;
+  archivedAt: Date | null;
+  chatProjectId?: string | null;
+  projectId?: string | null;
+  createdAt?: Date | null;
+  updatedAt?: Date | null;
+  members: ReadonlyArray<{
+    userId: string | null;
+    agentId?: string | null;
+    joinedAt?: Date | null;
+    removedAt: Date | null;
+  }>;
+  _count?: {
+    messages?: number | null;
+  };
+  messageCount?: number | null;
+};
+
+export type TeamChatRouteParityResult = {
+  conversationId: string;
+  readable: boolean;
+  status: TeamChatConversationAccessStatus | null;
+  mismatchReason: string | null;
 };
 
 function isArchivedInScope(archivedAt: Date | null, scope: ConversationArchiveScope = "exclude") {
@@ -235,6 +310,11 @@ export function resolveConversationMessagesAccessResult(params: {
   userId: string;
   messageCount?: number | null;
   archived?: ConversationArchiveScope;
+  conversationExists?: boolean;
+  archivedAt?: string | Date | null;
+  projectId?: string | null;
+  activeMembershipCountForUser?: number;
+  userMembershipRemovedAt?: Array<string | Date | null>;
   readableHelperPassed?: boolean;
   postHelperLookupFailed?: boolean;
 }): ConversationMessagesAccessResult {
@@ -244,14 +324,140 @@ export function resolveConversationMessagesAccessResult(params: {
     { archived: params.archived }
   );
   const isReadable = notFoundReason === "readable";
+  const conversationExists = params.conversationExists ?? Boolean(params.conversation);
+  const archivedAt =
+    params.archivedAt instanceof Date
+      ? params.archivedAt.toISOString()
+      : params.archivedAt ?? params.conversation?.archivedAt?.toISOString() ?? null;
+  const projectId =
+    params.projectId
+      ?? params.conversation?.projectId
+      ?? params.conversation?.chatProjectId
+      ?? null;
+  const userMembershipRemovedAt =
+    params.userMembershipRemovedAt?.map((value) => (
+      value instanceof Date ? value.toISOString() : value
+    ))
+    ?? params.conversation?.members
+      .filter((member) => member.userId === params.userId)
+      .map((member) => member.removedAt?.toISOString() ?? null)
+    ?? [];
+  const activeMembershipCountForUser =
+    params.activeMembershipCountForUser
+    ?? userMembershipRemovedAt.filter((removedAt) => removedAt === null).length;
 
   return {
+    readable: isReadable,
     status: isReadable ? 200 : 404,
     notFoundReason: isReadable ? null : notFoundReason,
+    conversationExists,
+    archivedAt,
+    projectId,
+    activeMembershipCountForUser,
+    userMembershipRemovedAt,
     readableHelperPassed: params.readableHelperPassed ?? isReadable,
     postHelperLookupFailed: params.postHelperLookupFailed ?? false,
     messageCount: params.messageCount ?? 0,
   };
+}
+
+function serializeDateForAccessSnapshot(value: Date | string | null | undefined) {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return value ?? null;
+}
+
+export function resolveTeamChatConversationAccessSnapshot(params: {
+  conversationId: string;
+  sessionUserId: string;
+  conversation: TeamChatConversationAccessSnapshotRecord | null | undefined;
+  archived?: ConversationArchiveScope;
+  postHelperLookupFailed?: boolean;
+}): TeamChatConversationAccessSnapshot {
+  const conversation = params.conversation ?? null;
+  const notFoundReason = getReadableConversationAccessReason(
+    conversation,
+    params.sessionUserId,
+    { archived: params.archived }
+  );
+  const readable = notFoundReason === "readable";
+  const status: TeamChatConversationAccessStatus = readable ? 200 : 404;
+  const membershipSummary = conversation?.members.map((member) => ({
+    userId: member.userId,
+    agentId: member.agentId ?? null,
+    joinedAt: serializeDateForAccessSnapshot(member.joinedAt),
+    removedAt: serializeDateForAccessSnapshot(member.removedAt),
+    active: member.userId === params.sessionUserId && member.removedAt === null,
+  })) ?? [];
+  const userMembershipRemovedAt = membershipSummary
+    .filter((member) => member.userId === params.sessionUserId)
+    .map((member) => member.removedAt);
+  const messageCount =
+    conversation?.messageCount
+    ?? conversation?._count?.messages
+    ?? (conversation ? 0 : null);
+  const projectId = conversation?.projectId ?? conversation?.chatProjectId ?? null;
+
+  return {
+    conversationId: params.conversationId,
+    status,
+    accessStatus: status,
+    readable,
+    notFoundReason: readable ? null : notFoundReason,
+    conversationExists: Boolean(conversation),
+    archivedAt: serializeDateForAccessSnapshot(conversation?.archivedAt),
+    projectId,
+    activeMembershipCountForUser: membershipSummary.filter((member) => member.active).length,
+    userMembershipRemovedAt,
+    messageCount,
+    readableHelperPassed: readable,
+    postHelperLookupFailed: params.postHelperLookupFailed ?? false,
+    conversationSummary: conversation
+      ? {
+          id: conversation.id,
+          type: conversation.type ?? null,
+          name: conversation.name ?? null,
+          projectId,
+          archivedAt: serializeDateForAccessSnapshot(conversation.archivedAt),
+          createdAt: serializeDateForAccessSnapshot(conversation.createdAt),
+          updatedAt: serializeDateForAccessSnapshot(conversation.updatedAt),
+        }
+      : null,
+    membershipSummary,
+  };
+}
+
+export function evaluateTeamChatRouteParity(params: {
+  listConversationIds: string[];
+  messageAccessSnapshots: TeamChatConversationAccessSnapshot[];
+}): TeamChatRouteParityResult[] {
+  const snapshotById = new Map(
+    params.messageAccessSnapshots.map((snapshot) => [snapshot.conversationId, snapshot])
+  );
+
+  return params.listConversationIds.map((conversationId) => {
+    const snapshot = snapshotById.get(conversationId);
+
+    if (!snapshot) {
+      return {
+        conversationId,
+        readable: false,
+        status: null,
+        mismatchReason: "missing_messages_access_snapshot",
+      };
+    }
+
+    return {
+      conversationId,
+      readable: snapshot.readable,
+      status: snapshot.status,
+      mismatchReason: snapshot.readable && snapshot.status === 200
+        ? null
+        : snapshot.notFoundReason ?? "messages_access_not_readable",
+    };
+  });
 }
 
 function sortConversationMemberships<T extends Pick<ConversationMembershipRecord, "joinedAt">>(members: readonly T[]) {
@@ -820,6 +1026,57 @@ export async function listConversationsForUserWithOptions(
   }
 }
 
+export async function getTeamChatConversationAccessSnapshot(params: {
+  conversationId: string;
+  sessionUserId: string;
+  includeArchived?: boolean;
+  archived?: ConversationArchiveScope;
+}) {
+  const archived =
+    params.archived ?? (params.includeArchived ? "include" : "exclude");
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: params.conversationId },
+    select: {
+      id: true,
+      type: true,
+      name: true,
+      archivedAt: true,
+      chatProjectId: true,
+      createdAt: true,
+      updatedAt: true,
+      members: {
+        where: { userId: params.sessionUserId },
+        orderBy: { joinedAt: "asc" },
+        select: {
+          userId: true,
+          agentId: true,
+          joinedAt: true,
+          removedAt: true,
+        },
+      },
+      _count: {
+        select: {
+          messages: true,
+        },
+      },
+    },
+  });
+
+  return resolveTeamChatConversationAccessSnapshot({
+    conversationId: params.conversationId,
+    sessionUserId: params.sessionUserId,
+    conversation,
+    archived,
+  });
+}
+
+export async function getConversationForMessagesRoute(conversationId: string) {
+  return prisma.conversation.findUnique({
+    where: { id: conversationId },
+    include: activeConversationInclude,
+  });
+}
+
 export async function getConversationForUser(
   conversationId: string,
   userId: string,
@@ -834,8 +1091,18 @@ export async function getReadableConversationForUser(
   options: { memberScope?: ConversationMemberScope; archived?: ConversationArchiveScope } = {}
 ) {
   try {
-    const conversation = await prisma.conversation.findUnique({
-      where: { id: conversationId },
+    const conversation = await prisma.conversation.findFirst({
+      where: {
+        id: conversationId,
+        ...(options.archived === "only"
+          ? { archivedAt: { not: null } }
+          : options.archived === "include"
+            ? {}
+            : { archivedAt: null }),
+        members: {
+          some: { userId, removedAt: null },
+        },
+      },
       include: options.memberScope === "all" ? allConversationInclude : activeConversationInclude,
     });
 

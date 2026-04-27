@@ -14,12 +14,19 @@ const jiti = createJiti(import.meta.url, {
 });
 const {
   filterActiveConversationMemberships,
+  evaluateTeamChatRouteParity,
   getReadableConversationAccessReason,
   isConversationReadableByUser,
   planConversationMembershipMutation,
   resolveConversationMessagesAccessResult,
+  resolveTeamChatConversationAccessSnapshot,
   serializeConversation,
 } = jiti(path.join(__dirname, "..", "src", "lib", "chat.ts"));
+const {
+  TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION,
+  buildTeamChatMessagesRouteTopMarker,
+  logTeamChatDetailRouteDiagnostics,
+} = jiti(path.join(__dirname, "..", "src", "lib", "chat-route-diagnostics.ts"));
 
 function makeMembershipRecord(overrides = {}) {
   return {
@@ -69,6 +76,22 @@ async function runTest(name, fn) {
   }
 }
 
+function assertReadableMessagesAccess(result, { messageCount, activeMembershipCountForUser = 1 } = {}) {
+  assert.equal(result.readable, true);
+  assert.equal(result.status, 200);
+  assert.equal(result.notFoundReason, null);
+  assert.equal(result.conversationExists, true);
+  assert.equal(result.archivedAt, null);
+  assert.equal(result.projectId, null);
+  assert.equal(result.activeMembershipCountForUser, activeMembershipCountForUser);
+  assert.deepEqual(result.userMembershipRemovedAt, [null]);
+  assert.equal(result.readableHelperPassed, true);
+  assert.equal(result.postHelperLookupFailed, false);
+  if (messageCount !== undefined) {
+    assert.equal(result.messageCount, messageCount);
+  }
+}
+
 await runTest("plans brand new participant additions as creates", async () => {
   const plan = planConversationMembershipMutation({
     members: [
@@ -93,6 +116,26 @@ await runTest("plans brand new participant additions as creates", async () => {
   assert.deepEqual(plan.nextActiveAgentIds, ["agent-1"]);
   assert.equal(plan.nextParticipantCount, 3);
   assert.equal(plan.hasParticipantChanges, true);
+});
+
+await runTest("messages route top marker includes diagnostic version before access branches", async () => {
+  const marker = buildTeamChatMessagesRouteTopMarker({
+    conversationId: "cmoeojun9000175q05ay279fj",
+    sessionUserId: "312235d0-7600-4800-a52c-11d7544e7377",
+    sessionUserEmail: "alex@griggscapitalpartners.com",
+    timestamp: "2026-04-27T12:00:00.000Z",
+  });
+
+  assert.deepEqual(marker, {
+    route: "api/chat/conversations/[id]/messages.GET",
+    diagnosticVersion: TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION,
+    conversationId: "cmoeojun9000175q05ay279fj",
+    sessionUserId: "312235d0-7600-4800-a52c-11d7544e7377",
+    sessionUserEmail: "alex@griggscapitalpartners.com",
+    timestamp: "2026-04-27T12:00:00.000Z",
+    routeTopMarkerReached: true,
+    routeHandlerTopMarkerReached: true,
+  });
 });
 
 await runTest("plans active participant removals without deleting historical rows", async () => {
@@ -353,22 +396,19 @@ await runTest("messages route access returns 200 for listed projectless active-m
     messageCount: 0,
   });
 
-  assert.deepEqual(result, {
-    status: 200,
-    notFoundReason: null,
-    readableHelperPassed: true,
-    postHelperLookupFailed: false,
-    messageCount: 0,
-  });
+  assertReadableMessagesAccess(result, { messageCount: 0 });
 });
 
-await runTest("messages route access returns 200 for projectless active-member thread with messages", async () => {
+await runTest("messages route access returns 200 for exact projectless active-member fixture with messages", async () => {
   const conversation = {
+    id: "cmoeojun9000175q05ay279fj",
     archivedAt: null,
     chatProjectId: null,
     members: [
       makeMembershipRecord({
-        userId: "user-1",
+        id: "member-current-user",
+        conversationId: "cmoeojun9000175q05ay279fj",
+        userId: "312235d0-7600-4800-a52c-11d7544e7377",
         removedAt: null,
       }),
     ],
@@ -376,13 +416,155 @@ await runTest("messages route access returns 200 for projectless active-member t
 
   const result = resolveConversationMessagesAccessResult({
     conversation,
-    userId: "user-1",
-    messageCount: 2,
+    userId: "312235d0-7600-4800-a52c-11d7544e7377",
+    messageCount: 20,
+    conversationExists: true,
+    archivedAt: null,
+    projectId: null,
+    activeMembershipCountForUser: 1,
+    userMembershipRemovedAt: [null],
+    readableHelperPassed: true,
+    postHelperLookupFailed: false,
   });
 
+  assertReadableMessagesAccess(result, { messageCount: 20 });
+});
+
+await runTest("canonical access snapshot returns 200 for exact list-visible fixture", async () => {
+  const snapshot = resolveTeamChatConversationAccessSnapshot({
+    conversationId: "cmoeojun9000175q05ay279fj",
+    sessionUserId: "312235d0-7600-4800-a52c-11d7544e7377",
+    conversation: {
+      id: "cmoeojun9000175q05ay279fj",
+      type: "group",
+      name: "z-03 test",
+      archivedAt: null,
+      chatProjectId: null,
+      createdAt: new Date("2026-04-27T12:00:00.000Z"),
+      updatedAt: new Date("2026-04-27T12:05:00.000Z"),
+      members: [
+        makeMembershipRecord({
+          id: "member-current-user",
+          conversationId: "cmoeojun9000175q05ay279fj",
+          userId: "312235d0-7600-4800-a52c-11d7544e7377",
+          removedAt: null,
+        }),
+      ],
+      _count: { messages: 20 },
+    },
+  });
+
+  assert.equal(snapshot.status, 200);
+  assert.equal(snapshot.accessStatus, 200);
+  assert.equal(snapshot.readable, true);
+  assert.equal(snapshot.notFoundReason, null);
+  assert.equal(snapshot.conversationExists, true);
+  assert.equal(snapshot.archivedAt, null);
+  assert.equal(snapshot.projectId, null);
+  assert.equal(snapshot.activeMembershipCountForUser, 1);
+  assert.deepEqual(snapshot.userMembershipRemovedAt, [null]);
+  assert.equal(snapshot.messageCount, 20);
+  assert.equal(snapshot.readableHelperPassed, true);
+  assert.equal(snapshot.postHelperLookupFailed, false);
+  assert.equal(snapshot.conversationSummary.id, "cmoeojun9000175q05ay279fj");
+});
+
+await runTest("route parity reports list-visible conversations as message-readable", async () => {
+  const readableSnapshot = resolveTeamChatConversationAccessSnapshot({
+    conversationId: "thread-visible",
+    sessionUserId: "user-1",
+    conversation: {
+      id: "thread-visible",
+      type: "group",
+      name: "Visible",
+      archivedAt: null,
+      chatProjectId: null,
+      members: [makeMembershipRecord({ userId: "user-1" })],
+      _count: { messages: 0 },
+    },
+  });
+
+  assert.deepEqual(
+    evaluateTeamChatRouteParity({
+      listConversationIds: ["thread-visible"],
+      messageAccessSnapshots: [readableSnapshot],
+    }),
+    [
+      {
+        conversationId: "thread-visible",
+        readable: true,
+        status: 200,
+        mismatchReason: null,
+      },
+    ]
+  );
+});
+
+await runTest("messages route access exposes diagnostic fields for readable listed threads", async () => {
+  const conversation = {
+    id: "thread-readable",
+    archivedAt: null,
+    chatProjectId: null,
+    members: [makeMembershipRecord({ userId: "user-1", removedAt: null })],
+  };
+
+  const result = resolveConversationMessagesAccessResult({
+    conversation,
+    userId: "user-1",
+    messageCount: 20,
+  });
+
+  assert.deepEqual(
+    {
+      readable: result.readable,
+      status: result.status,
+      notFoundReason: result.notFoundReason,
+      conversationExists: result.conversationExists,
+      archivedAt: result.archivedAt,
+      projectId: result.projectId,
+      activeMembershipCountForUser: result.activeMembershipCountForUser,
+      userMembershipRemovedAt: result.userMembershipRemovedAt,
+      messageCount: result.messageCount,
+      readableHelperPassed: result.readableHelperPassed,
+      postHelperLookupFailed: result.postHelperLookupFailed,
+    },
+    {
+      readable: true,
+      status: 200,
+      notFoundReason: null,
+      conversationExists: true,
+      archivedAt: null,
+      projectId: null,
+      activeMembershipCountForUser: 1,
+      userMembershipRemovedAt: [null],
+      messageCount: 20,
+      readableHelperPassed: true,
+      postHelperLookupFailed: false,
+    }
+  );
+});
+
+await runTest("post-helper message query failures do not reclassify readable threads as 404", async () => {
+  const conversation = {
+    id: "thread-readable",
+    archivedAt: null,
+    chatProjectId: null,
+    members: [makeMembershipRecord({ userId: "user-1", removedAt: null })],
+  };
+
+  const result = resolveConversationMessagesAccessResult({
+    conversation,
+    userId: "user-1",
+    messageCount: 20,
+    readableHelperPassed: true,
+    postHelperLookupFailed: true,
+  });
+
+  assert.equal(result.readable, true);
   assert.equal(result.status, 200);
-  assert.equal(result.messageCount, 2);
   assert.equal(result.notFoundReason, null);
+  assert.equal(result.postHelperLookupFailed, true);
+  assert.equal(result.messageCount, 20);
 });
 
 await runTest("messages route access supports direct-agent and mixed shared threads", async () => {
@@ -442,8 +624,14 @@ await runTest("messages route access denies removed memberships and archived def
       messageCount: 0,
     }),
     {
+      readable: false,
       status: 404,
       notFoundReason: "user_has_no_active_membership",
+      conversationExists: true,
+      archivedAt: null,
+      projectId: null,
+      activeMembershipCountForUser: 0,
+      userMembershipRemovedAt: ["2026-04-01T00:00:00.000Z"],
       readableHelperPassed: false,
       postHelperLookupFailed: false,
       messageCount: 0,
@@ -457,6 +645,109 @@ await runTest("messages route access denies removed memberships and archived def
     }).notFoundReason,
     "conversation_archived"
   );
+});
+
+await runTest("messages route access includes diagnostic fields on 404 decisions", async () => {
+  const result = resolveConversationMessagesAccessResult({
+    conversation: null,
+    userId: "user-1",
+    messageCount: 20,
+    conversationExists: true,
+    archivedAt: null,
+    projectId: null,
+    activeMembershipCountForUser: 0,
+    userMembershipRemovedAt: ["2026-04-01T00:00:00.000Z"],
+    readableHelperPassed: false,
+    postHelperLookupFailed: false,
+  });
+
+  assert.equal(result.readable, false);
+  assert.equal(result.status, 404);
+  assert.equal(result.notFoundReason, "conversation_missing");
+  assert.equal(result.conversationExists, true);
+  assert.equal(result.messageCount, 20);
+  assert.equal(result.readableHelperPassed, false);
+  assert.equal(result.postHelperLookupFailed, false);
+  assert.deepEqual(result.userMembershipRemovedAt, ["2026-04-01T00:00:00.000Z"]);
+});
+
+await runTest("messages route diagnostics include parity fields on denied access", async () => {
+  const accessSnapshot = resolveTeamChatConversationAccessSnapshot({
+    conversationId: "thread-denied",
+    sessionUserId: "user-1",
+    conversation: {
+      id: "thread-denied",
+      type: "group",
+      name: "Denied",
+      archivedAt: null,
+      chatProjectId: null,
+      members: [
+        makeMembershipRecord({
+          userId: "user-1",
+          removedAt: new Date("2026-04-01T00:00:00.000Z"),
+        }),
+      ],
+      _count: { messages: 20 },
+    },
+  });
+  const diagnostic = await logTeamChatDetailRouteDiagnostics({
+    route: "api/chat/conversations/[id]/messages.GET",
+    session: {
+      userId: "user-1",
+      email: "user-1@example.com",
+    },
+    conversationId: "thread-denied",
+    accessFound: false,
+    accessSnapshot,
+    readableHelperPassed: false,
+    postHelperLookupFailed: false,
+    routeTopMarkerReached: true,
+  });
+
+  assert.equal(diagnostic.diagnosticVersion, TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION);
+  assert.equal(diagnostic.notFoundReason, "user_has_no_active_membership");
+  assert.equal(diagnostic.messageCount, 20);
+  assert.equal(diagnostic.readableHelperPassed, false);
+  assert.equal(diagnostic.postHelperLookupFailed, false);
+  assert.equal(diagnostic.routeTopMarkerReached, true);
+  assert.equal(diagnostic.routeHandlerTopMarkerReached, true);
+});
+
+await runTest("serialization failures remain readable access failures instead of misleading 404s", async () => {
+  const accessSnapshot = resolveTeamChatConversationAccessSnapshot({
+    conversationId: "thread-readable",
+    sessionUserId: "user-1",
+    conversation: {
+      id: "thread-readable",
+      type: "group",
+      name: "Readable",
+      archivedAt: null,
+      chatProjectId: null,
+      members: [makeMembershipRecord({ userId: "user-1" })],
+      _count: { messages: 20 },
+    },
+  });
+  const diagnostic = await logTeamChatDetailRouteDiagnostics({
+    route: "api/chat/conversations/[id]/messages.GET",
+    session: {
+      userId: "user-1",
+      email: "user-1@example.com",
+    },
+    conversationId: "thread-readable",
+    accessFound: true,
+    accessSnapshot,
+    readableHelperPassed: true,
+    postHelperLookupFailed: false,
+    routeTopMarkerReached: true,
+    serializationFailed: true,
+    notFoundReason: "message_serialization_failed",
+  });
+
+  assert.equal(diagnostic.accessStatus, 200);
+  assert.equal(diagnostic.readable, true);
+  assert.equal(diagnostic.notFoundReason, "message_serialization_failed");
+  assert.equal(diagnostic.serializationFailed, true);
+  assert.equal(diagnostic.postHelperLookupFailed, false);
 });
 
 if (failures.length > 0) {

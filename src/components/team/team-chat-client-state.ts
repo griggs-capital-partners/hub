@@ -48,3 +48,10 @@ export function resolveConversationDetail404State(params: {
     conversations: params.refreshedConversations,
   };
 }
+
+export function shouldShowThreadStillHereState(params: {
+  messagesError: string | null;
+  renderedMessageCount: number;
+}) {
+  return Boolean(params.messagesError && params.renderedMessageCount === 0);
+}

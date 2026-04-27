@@ -41,6 +41,7 @@ import {
   formatRelativeTime,
   getConversationLabel,
 } from "@/components/team/team-chat-shared";
+import { shouldShowThreadStillHereState } from "@/components/team/team-chat-client-state";
 
 const CONVERSATION_COLUMN_CLASS = "mx-auto w-full max-w-[60rem]";
 const HUMAN_MESSAGE_WIDTH_CLASS = "w-full max-w-[85%] md:max-w-[48rem]";
@@ -953,7 +954,10 @@ const ConversationTranscript = memo(
         onPointerDown={onEngageConversationArea}
         className="chat-scroll flex-1 overflow-y-auto overflow-x-hidden bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.035),transparent_58%)] px-4 py-5 md:min-h-0 md:px-8 md:py-8"
       >
-        {messagesError && renderedMessages.length === 0 ? (
+        {shouldShowThreadStillHereState({
+          messagesError,
+          renderedMessageCount: renderedMessages.length,
+        }) ? (
           <div className="flex h-full flex-col items-center justify-center px-8 text-center">
             <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-3xl bg-[rgba(239,68,68,0.12)] text-[#F2C0C0]">
               <AlertTriangle size={28} />

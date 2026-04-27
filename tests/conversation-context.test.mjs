@@ -30,6 +30,9 @@ const {
 const { buildPdfContextExtractionResult } = jiti(
   path.join(__dirname, "..", "src", "lib", "context-pdf.ts")
 );
+const { EMPTY_CONTEXT_REGISTRY_SELECTION } = jiti(
+  path.join(__dirname, "..", "src", "lib", "capability-gap-context-debt-registry.ts")
+);
 
 function makeDocument(overrides = {}) {
   return {
@@ -59,6 +62,126 @@ function resolveConversationContextBundle(params, dependencies) {
     },
     dependencies
   );
+}
+
+function makeContextDebtRecord(overrides = {}) {
+  const now = overrides.now ?? "2026-04-27T12:00:00.000Z";
+  return {
+    id: overrides.id ?? "debt-1",
+    debtKey: overrides.debtKey ?? "context-debt:thread-1:t5-doc:t5-doc:missing_table_body:page-15",
+    workspaceId: null,
+    conversationId: overrides.conversationId ?? "thread-1",
+    conversationDocumentId: overrides.conversationDocumentId ?? "t5-doc",
+    asyncAgentWorkItemId: overrides.asyncAgentWorkItemId ?? null,
+    artifactKey: overrides.artifactKey ?? null,
+    sourceId: overrides.sourceId ?? "t5-doc",
+    kind: overrides.kind ?? "missing_table_body",
+    status: overrides.status ?? "open",
+    severity: overrides.severity ?? "high",
+    sourceScope: overrides.sourceScope ?? "page",
+    sourceLocator: overrides.sourceLocator ?? {
+      sourceId: "t5-doc",
+      pageNumber: 15,
+      locationLabel: "T5 Summary Deck V1.7ext.pdf - page 15 - Smackover Water Chemistry",
+    },
+    title: overrides.title ?? "Page 15 table body is missing from durable memory.",
+    description: overrides.description ?? "A likely table was detected, but structured rows, columns, and cells were not recovered.",
+    whyItMatters: overrides.whyItMatters ?? "DLE/geothermal process design needs full brine chemistry.",
+    resolutionPath: overrides.resolutionPath ?? "ocr_needed",
+    resolutionPaths: overrides.resolutionPaths ?? ["rendered_page_inspection_needed", "ocr_needed", "vision_needed", "document_ai_needed"],
+    deferredCapabilities: overrides.deferredCapabilities ?? [
+      "rendered_page_inspection",
+      "ocr",
+      "vision_page_understanding",
+      "document_ai_table_recovery",
+    ],
+    requiredApprovalReasons: overrides.requiredApprovalReasons ?? [],
+    policyBlockers: overrides.policyBlockers ?? [],
+    sourceCoverageTarget: overrides.sourceCoverageTarget ?? { target: "page_15_table" },
+    evidence: overrides.evidence ?? { noUnavailableToolExecutionClaimed: true },
+    traceEvents: overrides.traceEvents ?? [],
+    linkedArtifactKeys: overrides.linkedArtifactKeys ?? ["table_candidate:15", "extraction_warning:15:table_body_missing"],
+    firstSeenAt: overrides.firstSeenAt ?? now,
+    lastSeenAt: overrides.lastSeenAt ?? now,
+    resolvedAt: overrides.resolvedAt ?? null,
+    createdAt: overrides.createdAt ?? now,
+    updatedAt: overrides.updatedAt ?? now,
+  };
+}
+
+function makeCapabilityGapRecord(overrides = {}) {
+  const now = overrides.now ?? "2026-04-27T12:00:00.000Z";
+  return {
+    id: overrides.id ?? "gap-1",
+    gapKey: overrides.gapKey ?? "capability-gap:thread-1:t5-doc:t5-doc:control:missing_tool:ocr",
+    workspaceId: null,
+    conversationId: overrides.conversationId ?? "thread-1",
+    conversationDocumentId: overrides.conversationDocumentId ?? "t5-doc",
+    asyncAgentWorkItemId: overrides.asyncAgentWorkItemId ?? null,
+    relatedContextDebtId: overrides.relatedContextDebtId ?? "debt-1",
+    sourceId: overrides.sourceId ?? "t5-doc",
+    kind: overrides.kind ?? "missing_tool",
+    status: overrides.status ?? "detected",
+    severity: overrides.severity ?? "high",
+    reviewState: overrides.reviewState ?? "needs_review",
+    neededCapability: overrides.neededCapability ?? "ocr",
+    missingPayloadType: overrides.missingPayloadType ?? null,
+    missingToolId: overrides.missingToolId ?? "ocr",
+    missingModelCapability: overrides.missingModelCapability ?? null,
+    missingArtifactType: overrides.missingArtifactType ?? null,
+    missingConnector: overrides.missingConnector ?? null,
+    missingApprovalPath: overrides.missingApprovalPath ?? null,
+    missingBudgetProfile: overrides.missingBudgetProfile ?? null,
+    title: overrides.title ?? "OCR is needed for table recovery.",
+    description: overrides.description ?? "Visual or structured table recovery is required before table cells can be trusted.",
+    whyNeeded: overrides.whyNeeded ?? "The parser found a likely table but not the body.",
+    currentLimitation: overrides.currentLimitation ?? "OCR is not an approved executable tool in this runtime.",
+    recommendedResolution: overrides.recommendedResolution ?? "Register and approve an OCR capability pack later.",
+    resolutionPath: overrides.resolutionPath ?? "register_tool",
+    resolutionPaths: overrides.resolutionPaths ?? ["register_tool", "add_capability_pack"],
+    candidateToolCategories: overrides.candidateToolCategories ?? ["ocr"],
+    candidateModelCapabilities: overrides.candidateModelCapabilities ?? [],
+    candidateContextLanes: overrides.candidateContextLanes ?? [],
+    requiredArtifactTypes: overrides.requiredArtifactTypes ?? [],
+    requiredApprovalPolicy: overrides.requiredApprovalPolicy ?? {},
+    requiredBudgetProfile: overrides.requiredBudgetProfile ?? {},
+    securityConsiderations: overrides.securityConsiderations ?? [],
+    dataEgressConsiderations: overrides.dataEgressConsiderations ?? [],
+    benchmarkFixtureIds: overrides.benchmarkFixtureIds ?? ["t5_pdf_page_15_visible_table"],
+    evidence: overrides.evidence ?? { executionClaimed: false },
+    traceEvents: overrides.traceEvents ?? [],
+    firstSeenAt: overrides.firstSeenAt ?? now,
+    lastSeenAt: overrides.lastSeenAt ?? now,
+    resolvedAt: overrides.resolvedAt ?? null,
+    createdAt: overrides.createdAt ?? now,
+    updatedAt: overrides.updatedAt ?? now,
+  };
+}
+
+function makeSourceCoverageRecord(overrides = {}) {
+  const now = overrides.now ?? "2026-04-27T12:00:00.000Z";
+  return {
+    id: overrides.id ?? "coverage-1",
+    coverageKey: overrides.coverageKey ?? "source-coverage:thread-1:t5-doc:t5-doc:full_document:general",
+    workspaceId: null,
+    conversationId: overrides.conversationId ?? "thread-1",
+    conversationDocumentId: overrides.conversationDocumentId ?? "t5-doc",
+    asyncAgentWorkItemId: overrides.asyncAgentWorkItemId ?? null,
+    sourceId: overrides.sourceId ?? "t5-doc",
+    sourceScope: overrides.sourceScope ?? "conversation_document",
+    sourceLocator: overrides.sourceLocator ?? {},
+    coverageStatus: overrides.coverageStatus ?? "partially_inspected",
+    coverageTarget: overrides.coverageTarget ?? { target: "full_document" },
+    inspectedBy: overrides.inspectedBy ?? ["parser_text_excerpt"],
+    limitations: overrides.limitations ?? ["Full rendered-page/table coverage has not run."],
+    relatedDebtIds: overrides.relatedDebtIds ?? ["debt-1"],
+    selectedCandidateCount: overrides.selectedCandidateCount ?? 2,
+    totalCandidateCount: overrides.totalCandidateCount ?? 12,
+    evidence: overrides.evidence ?? {},
+    traceEvents: overrides.traceEvents ?? [],
+    createdAt: overrides.createdAt ?? now,
+    updatedAt: overrides.updatedAt ?? now,
+  };
 }
 
 function createDocumentIntelligenceMemory() {
@@ -672,7 +795,7 @@ await runTest("preserves page-aware PDF provenance, partial extraction detail, a
     (chunk) => chunk.pageNumberStart === 2
   )?.sourceBodyLocationLabel;
   assert.match(pageAwareChunkLabel ?? "", /rates\.pdf.*page A-1.*Appendix A.*Attachment 1/i);
-  assert.match(bundle.text, /SOURCE BODY LOCATION: rates\.pdf — page A-1 — Table 1/i);
+  assert.match(bundle.text, /Table 1 extracted from page A-1|SOURCE BODY LOCATION: rates\.pdf.*page A-1.*Table 1/i);
   assert.equal(bundle.documentChunking.documents[0]?.extractionDetail?.includes("partial page-aware provenance"), true);
   assert.equal(bundle.documentChunking.documents[0]?.sourceMetadata?.detectedTableCount, 1);
   assert.deepEqual(bundle.documentChunking.documents[0]?.sourceMetadata?.lowTextPageNumbers, [3]);
@@ -798,9 +921,19 @@ await runTest("creates durable T5 page 15 table artifacts and preserves sparse e
     ),
     true
   );
-  assert.match(bundle.text, /### Learned Artifacts/);
-  assert.match(bundle.text, /Likely table detected on page 15/i);
+  assert.match(bundle.text, /### Source Memory Artifacts/);
+  assert.match(bundle.text, /Page 15 unresolved table memory/i);
+  assert.equal((bundle.text.match(/table_candidate:15/g) ?? []).length, 1);
+  assert.equal((bundle.text.match(/extraction_warning:15:table_body_missing/g) ?? []).length, 1);
+  assert.match(bundle.text, /Linked artifacts: table_candidate:15, extraction_warning:15:table_body_missing/i);
+  assert.match(bundle.text, /structured rows, columns, and cells were not recovered/i);
+  assert.match(bundle.text, /These capabilities have not executed/i);
   assert.match(bundle.text, /Do not infer missing columns, cell values, or headers/i);
+  assert.equal((bundle.text.match(/### Excerpt /g) ?? []).length <= 8, true);
+  assert.equal(
+    (bundle.text.match(/### Excerpt /g) ?? []).length < (bundle.debugTrace?.chunks.length ?? 0),
+    true
+  );
   assert.doesNotMatch(bundle.text, /\bSodium\b|\bChloride\b|\bCalcium\b/i);
   assert.equal(
     bundle.debugTrace?.knowledgeArtifacts.some((artifact) => artifact.kind === "table_candidate"),
@@ -836,6 +969,332 @@ await runTest("creates durable T5 page 15 table artifacts and preserves sparse e
     ),
     true
   );
+});
+
+await runTest("renders A-04g registry records in separated clean sections and suppresses generic truth-guard duplicates", async () => {
+  const expectations = getT5DeckExpectations();
+  const richDebt = makeContextDebtRecord({
+    id: "debt-rich",
+    debtKey: "context-debt:thread-1:t5-doc:t5-doc:missing_table_body:page-15",
+    conversationDocumentId: expectations.sourceId,
+    sourceId: expectations.sourceId,
+  });
+  const weakDebt = makeContextDebtRecord({
+    id: "debt-weak",
+    debtKey: "context-debt:thread-1:t5-doc:t5-doc:weak_table_candidate:page-15",
+    conversationDocumentId: expectations.sourceId,
+    sourceId: expectations.sourceId,
+    kind: "weak_table_candidate",
+    title: "A reusable artifact is weak or partial with page 15 source.",
+  });
+  const deferredDebt = makeContextDebtRecord({
+    id: "debt-deferred",
+    debtKey: "context-debt:thread-1:t5-doc:t5-doc:deferred_capability_needed:page-15",
+    conversationDocumentId: expectations.sourceId,
+    sourceId: expectations.sourceId,
+    kind: "deferred_capability_needed",
+    title: "External/not-yet-approved capability remains the truthful next step.",
+  });
+  const genericTruthDebt = makeContextDebtRecord({
+    id: "debt-generic",
+    debtKey: "context-debt:thread-1:none:workspace:missing_table_body:general",
+    conversationDocumentId: null,
+    sourceId: null,
+    sourceLocator: {},
+    linkedArtifactKeys: [],
+    title: "Truthful guard observed unresolved context gap: missing_table_body.",
+    description: "Execution claim evidence prevented this gap from being represented as completed work.",
+  });
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "What does the page 15 water chemistry table say?",
+    },
+    {
+      listDocuments: async () => [
+        makeDocument({
+          id: expectations.sourceId,
+          filename: expectations.filename,
+          mimeType: "text/markdown",
+          fileType: "text",
+          storagePath: "C:\\GitHub\\hub\\uploads\\thread-1\\t5.md",
+        }),
+      ],
+      readTextFile: async () => "Smackover Water Chemistry notes mention that the page 15 table body is unavailable in parser text.",
+      listContextRegistryRecords: async () => ({
+        contextDebtRecords: [richDebt, weakDebt, deferredDebt, genericTruthDebt],
+        capabilityGapRecords: [
+          makeCapabilityGapRecord({ conversationDocumentId: expectations.sourceId, sourceId: expectations.sourceId }),
+          makeCapabilityGapRecord({
+            id: "gap-rendered-lane",
+            gapKey: "capability-gap:thread-1:t5-doc:t5-doc:control:missing_context_lane:rendered_page_image",
+            conversationDocumentId: expectations.sourceId,
+            sourceId: expectations.sourceId,
+            kind: "missing_context_lane",
+            neededCapability: "rendered_page_image",
+            missingPayloadType: "rendered_page_image",
+            missingToolId: null,
+            candidateContextLanes: ["rendered_page_image"],
+            resolutionPaths: ["register_context_lane", "add_capability_pack"],
+          }),
+          makeCapabilityGapRecord({
+            id: "gap-creation",
+            gapKey: "capability-gap:thread-1:t5-doc:t5-doc:control:missing_creation_capability:deliverable_creation_pipeline",
+            conversationDocumentId: expectations.sourceId,
+            sourceId: expectations.sourceId,
+            kind: "missing_creation_capability",
+            neededCapability: "deliverable_creation_pipeline",
+            missingToolId: null,
+            missingArtifactType: "deliverable_export_artifact",
+            title: "Deliverable creation pipeline is needed.",
+            currentLimitation: "high_fidelity_creation needs a deliverable creation pipeline.",
+            resolutionPaths: ["add_creation_pipeline"],
+          }),
+          makeCapabilityGapRecord({
+            id: "gap-validation",
+            gapKey: "capability-gap:thread-1:t5-doc:t5-doc:control:missing_validation_capability:deliverable_validation",
+            conversationDocumentId: expectations.sourceId,
+            sourceId: expectations.sourceId,
+            kind: "missing_validation_capability",
+            neededCapability: "deliverable_validation",
+            missingToolId: null,
+            missingArtifactType: "validation_report_artifact",
+            title: "Deliverable validation is needed.",
+            currentLimitation: "Best-possible report creation needs deliverable_validation before completion can be claimed.",
+            resolutionPaths: ["add_validation_tool"],
+          }),
+        ],
+        sourceCoverageRecords: [
+          makeSourceCoverageRecord({
+            conversationDocumentId: expectations.sourceId,
+            sourceId: expectations.sourceId,
+            coverageStatus: "inspected_with_limitations",
+            limitations: [
+              "selected fidelity highest_fidelity_creation; output ceiling 1200; approval reasons repeated internally",
+              "Full rendered-page/table coverage has not run; page 15 table body remains missing; OCR and vision unavailable.",
+            ],
+          }),
+          makeSourceCoverageRecord({
+            id: "coverage-duplicate",
+            coverageKey: "source-coverage:thread-1:t5-doc:t5-doc:full_document:duplicate",
+            conversationDocumentId: expectations.sourceId,
+            sourceId: expectations.sourceId,
+            coverageStatus: "inspected_with_limitations",
+            limitations: ["Duplicate source coverage detail should stay in debug trace."],
+          }),
+        ],
+        traceEvents: [],
+      }),
+      upsertContextRegistryRecords: async () => EMPTY_CONTEXT_REGISTRY_SELECTION,
+    }
+  );
+
+  assert.match(bundle.text, /## Known Source Context Debt/);
+  assert.match(bundle.text, /## Known Capability Gaps/);
+  assert.match(bundle.text, /### Source Inspection Capability Gaps/);
+  assert.match(bundle.text, /### Creation \/ Validation Capability Gaps/);
+  assert.match(bundle.text, /## Source Coverage/);
+  assert.doesNotMatch(bundle.text, /Truthful guard observed/i);
+  assert.doesNotMatch(bundle.text, /Execution claim evidence prevented/i);
+  assert.doesNotMatch(bundle.text, /selected fidelity/i);
+  assert.doesNotMatch(bundle.text, /output ceiling/i);
+  assert.equal((bundle.text.match(/missing table body/g) ?? []).length <= 1, true);
+  assert.equal((bundle.text.match(/Page 15 unresolved source context debt/g) ?? []).length, 1);
+  assert.equal((bundle.text.match(/Relevant source sections/g) ?? []).length, 1);
+  assert.match(bundle.text, /Linked artifacts: table_candidate:15, extraction_warning:15:table_body_missing/);
+  assert.match(bundle.text, /This is a gap\/proposal only; it has not executed/);
+  assert.equal(bundle.debugTrace?.contextRegistry?.contextDebt.records.length, 4);
+  assert.equal((bundle.debugTrace?.contextRegistry?.sourceCoverage.records.length ?? 0) >= 1, true);
+  assert.equal(
+    bundle.debugTrace?.contextRegistry?.sourceCoverage.records.some((record) =>
+      record.limitations.some((limitation) => /selected fidelity|output ceiling/i.test(limitation))
+    ),
+    true
+  );
+});
+
+await runTest("generic truth-guard debt remains renderable when no richer source debt exists", async () => {
+  const genericTruthDebt = makeContextDebtRecord({
+    id: "debt-generic-only",
+    debtKey: "context-debt:thread-1:none:workspace:missing_table_body:general",
+    conversationDocumentId: null,
+    sourceId: null,
+    sourceLocator: {},
+    linkedArtifactKeys: [],
+    title: "Truthful guard observed unresolved context gap: missing_table_body.",
+    description: "Execution claim evidence prevented this gap from being represented as completed work.",
+  });
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "What context gaps are known?",
+    },
+    {
+      listDocuments: async () => [],
+      listContextRegistryRecords: async () => ({
+        contextDebtRecords: [genericTruthDebt],
+        capabilityGapRecords: [],
+        sourceCoverageRecords: [],
+        traceEvents: [],
+      }),
+      upsertContextRegistryRecords: async () => EMPTY_CONTEXT_REGISTRY_SELECTION,
+    }
+  );
+
+  assert.match(bundle.text, /## Known Source Context Debt/);
+  assert.match(bundle.text, /Unresolved context gap/i);
+  assert.doesNotMatch(bundle.text, /Truthful guard observed/i);
+  assert.doesNotMatch(bundle.text, /Execution claim evidence prevented/i);
+});
+
+await runTest("full-document creation prompts can render broader excerpts only through assembly selection", async () => {
+  const expectations = getT5DeckExpectations();
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "Create the best possible full-document report from the T5 deck with source coverage.",
+    },
+    {
+      listDocuments: async () => [
+        makeDocument({
+          id: expectations.sourceId,
+          filename: expectations.filename,
+          mimeType: "application/pdf",
+          fileType: "pdf",
+          storagePath: "C:\\GitHub\\hub\\uploads\\thread-1\\t5.pdf",
+        }),
+      ],
+      readBinaryFile: async () => Buffer.from("%PDF-1.4\nt5 fixture", "utf8"),
+      extractPdfText: async () =>
+        buildPdfContextExtractionResult(getT5DeckPdfExtractionFixture()),
+    }
+  );
+  const renderedExcerptCount = (bundle.text.match(/### Excerpt /g) ?? []).length;
+
+  assert.equal(bundle.agentControl.taskFidelityLevel, "highest_fidelity_creation");
+  assert.equal(renderedExcerptCount <= 24, true);
+  assert.equal(renderedExcerptCount <= (bundle.debugTrace?.chunks.length ?? 0), true);
+  assert.equal(renderedExcerptCount > 8 || (bundle.debugTrace?.chunks.length ?? 0) <= 8, true);
+});
+
+await runTest("valid artifact promotion proposals persist as source memory without treating raw chunks as memory", async () => {
+  const intelligenceMemory = createDocumentIntelligenceMemory();
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "What lithium metrics should be remembered?",
+    },
+    {
+      listDocuments: async () => [
+        makeDocument({
+          id: "doc-promotion",
+          filename: "t5-notes.md",
+          mimeType: "text/markdown",
+          fileType: "text",
+          storagePath: "C:\\GitHub\\hub\\uploads\\thread-1\\t5-notes.md",
+        }),
+      ],
+      readTextFile: async () =>
+        "Lundell Creek #1 tested 613 - 663 ppm of Lithium from Smackover. This is extracted deck text, not a page 15 table cell.",
+      proposeArtifactPromotionCandidates: async ({ document, sourceObservations }) => [
+        {
+          candidateId: "metric-lithium-lundell",
+          bucket: "metric_measurement",
+          title: "Lundell Creek #1 lithium range",
+          summary: "Lithium range observed in extracted T5 deck text.",
+          payload: {
+            content:
+              "Lundell Creek #1 tested 613-663 ppm of lithium from Smackover; this is from extracted deck text, not the unresolved page 15 table cells.",
+            values: [{ metric: "lithium", valueRange: "613-663", unit: "ppm" }],
+          },
+          metadata: {
+            sourceDocumentId: document.id,
+            sourceVersion: null,
+            sourceLocator: sourceObservations[0].sourceLocator,
+            observationType: sourceObservations[0].type,
+            sourceObservationIds: [sourceObservations[0].id],
+            extractionMethod: sourceObservations[0].extractionMethod,
+            confidence: 0.86,
+            limitations: ["Promoted from parser text observation; not extracted from page 15 table cells."],
+            createdByTaskKey: null,
+            createdByTool: null,
+            createdByModel: null,
+            reuseEligibility: "eligible",
+            dataPolicy: { persistenceAllowed: true },
+            supportedByObservation: true,
+          },
+          proposedBy: "test_fixture",
+          reason: "The lithium measurement is durable source learning.",
+        },
+      ],
+      ...intelligenceMemory.dependencies,
+    }
+  );
+
+  const promoted = intelligenceMemory.knowledgeArtifacts.find(
+    (artifact) => artifact.conversationDocumentId === "doc-promotion" && artifact.kind === "source_memory"
+  );
+  assert.ok(promoted);
+  const payload = JSON.parse(promoted.payloadJson);
+  assert.equal(payload.artifactBucket, "metric_measurement");
+  assert.equal(payload.artifactClass, "positive");
+  assert.equal(payload.metadata.supportedByObservation, true);
+  assert.equal(bundle.artifactPromotion?.acceptedCount, 1);
+  assert.match(bundle.text, /### Source Memory Artifacts/);
+  assert.match(bundle.text, /Lundell Creek #1 tested 613-663 ppm/i);
+  assert.doesNotMatch(bundle.text, /unsupported inference/i);
+});
+
+await runTest("deterministic T5 source learning promotes positive artifacts without page 15 table-cell extraction", async () => {
+  const expectations = getT5DeckExpectations();
+  const intelligenceMemory = createDocumentIntelligenceMemory();
+  const dependencies = {
+    listDocuments: async () => [
+      makeDocument({
+        id: expectations.sourceId,
+        filename: expectations.filename,
+        mimeType: "application/pdf",
+        fileType: "pdf",
+        storagePath: "C:\\GitHub\\hub\\uploads\\thread-1\\t5.pdf",
+      }),
+    ],
+    readBinaryFile: async () => Buffer.from("%PDF-1.4\nt5 fixture", "utf8"),
+    extractPdfText: async () =>
+      buildPdfContextExtractionResult(getT5DeckPdfExtractionFixture()),
+    ...intelligenceMemory.dependencies,
+  };
+  const bundle = await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "What lithium TDS temperature timeline brine production Reynolds thickness source learning should be remembered?",
+    },
+    dependencies
+  );
+  const positiveArtifacts = intelligenceMemory.knowledgeArtifacts.filter((artifact) => {
+    const payload = JSON.parse(artifact.payloadJson);
+    return payload.artifactClass === "positive";
+  });
+  const positiveCountAfterFirstPass = positiveArtifacts.length;
+
+  assert.equal(bundle.artifactPromotion?.acceptedCount > 0, true);
+  assert.equal(positiveArtifacts.some((artifact) => /613\s*-\s*663|613-663/i.test(artifact.content)), true);
+  assert.equal(positiveArtifacts.some((artifact) => /TDS 250,000 ppm/i.test(artifact.content)), true);
+  assert.equal(positiveArtifacts.some((artifact) => /Temp 235 F \/ 112 C/i.test(artifact.content)), true);
+  assert.match(bundle.text, /#### Positive Source Learning/);
+  assert.doesNotMatch(bundle.text, /\bSodium\b|\bChloride\b|\bCalcium\b/i);
+
+  await resolveConversationContextBundle(
+    {
+      conversationId: "thread-1",
+      currentUserPrompt: "What lithium metrics should be remembered?",
+    },
+    dependencies
+  );
+  const positiveCountAfterSecondPass = intelligenceMemory.knowledgeArtifacts.filter((artifact) => {
+    const payload = JSON.parse(artifact.payloadJson);
+    return payload.artifactClass === "positive";
+  }).length;
+  assert.equal(positiveCountAfterSecondPass, positiveCountAfterFirstPass);
 });
 
 await runTest("reuses stored artifacts ahead of weaker raw parser text for follow-up T5 table questions", async () => {
@@ -889,11 +1348,16 @@ await runTest("reuses stored artifacts ahead of weaker raw parser text for follo
   assert.equal(selectedTableArtifact?.selected, true);
   assert.equal(selectedTableArtifact?.tool, "pdf_table_candidate_detection");
   assert.equal(
-    followUpBundle.text.indexOf("### Learned Artifacts") >= 0 &&
-      followUpBundle.text.indexOf("### Excerpt 1") >= 0 &&
-      followUpBundle.text.indexOf("### Learned Artifacts") < followUpBundle.text.indexOf("### Excerpt 1"),
+    followUpBundle.text.indexOf("### Source Memory Artifacts") >= 0,
     true
   );
+  if (followUpBundle.text.indexOf("### Excerpt 1") >= 0) {
+    assert.equal(
+      followUpBundle.text.indexOf("### Source Memory Artifacts") < followUpBundle.text.indexOf("### Excerpt 1"),
+      true
+    );
+  }
+  assert.equal((followUpBundle.text.match(/### Excerpt /g) ?? []).length <= 8, true);
   assert.equal(
     followUpBundle.progressiveAssembly.packingResults[0]?.selectedCandidates.some(
       (candidate) => candidate.metadata?.artifactKey === "table_candidate:15"
@@ -905,7 +1369,8 @@ await runTest("reuses stored artifacts ahead of weaker raw parser text for follo
     "artifact"
   );
   assert.match(followUpBundle.text, /Smackover Water Chemistry/i);
-  assert.match(followUpBundle.text, /Probable true data table detected on page 15/i);
+  assert.match(followUpBundle.text, /Page 15 unresolved table memory/i);
+  assert.match(followUpBundle.text, /likely table and a sparse extraction warning/i);
 });
 
 await runTest("uses supported DOCX attachments when extraction succeeds", async () => {

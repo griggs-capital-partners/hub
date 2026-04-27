@@ -7,7 +7,9 @@
 
 import type { AgentControlDebugSnapshot } from "./agent-control-surface";
 import type { AsyncAgentWorkDebugSnapshot } from "./async-agent-work-queue";
+import type { ContextTransportDebugSnapshot } from "./adaptive-context-transport";
 import type { ContextRegistryDebugSnapshot } from "./capability-gap-context-debt-registry";
+import type { ArtifactPromotionDebugSnapshot } from "./source-learning-artifact-promotion";
 import type { ProgressiveContextAssemblyResult } from "./progressive-context-assembly";
 
 export type ContextSourceType =
@@ -450,6 +452,7 @@ export interface ContextDebugTrace {
   agentControl: AgentControlDebugSnapshot;
   asyncAgentWork?: AsyncAgentWorkDebugSnapshot | null;
   contextRegistry?: ContextRegistryDebugSnapshot | null;
+  artifactPromotion?: ArtifactPromotionDebugSnapshot | null;
   sourceEligibility: ContextSourceEligibility[];
   documents: ContextDebugDocument[];
   chunks: ContextDebugChunk[];
@@ -496,6 +499,7 @@ export interface ContextDebugTrace {
     fallbackProfileUsed?: boolean | null;
     detail?: string | null;
     progressive?: ProgressiveContextAssemblyResult | null;
+    transport?: ContextTransportDebugSnapshot | null;
   };
   renderedContext: {
     text?: string | null;
@@ -515,6 +519,7 @@ export interface ContextPlannerResult {
   skippedSourceIds: string[];
   plan: ContextAssemblyPlan;
   debugTrace: ContextDebugTrace;
+  transport?: ContextTransportDebugSnapshot | null;
 }
 
 export interface ContextSourceAdapter {
