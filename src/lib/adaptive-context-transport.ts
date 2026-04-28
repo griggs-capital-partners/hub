@@ -405,6 +405,7 @@ export type ContextTransportDebugSnapshot = {
     alreadyPersistedPayloadIds: string[];
   };
   catalogDebugSnapshot: CatalogDebugSnapshot | null;
+  visualInspectionDebugSnapshot: Record<string, unknown> | null;
   traceEvents: ContextTransportTrace[];
   noUnavailableToolExecutionClaimed: true;
 };
@@ -424,6 +425,7 @@ export type ContextTransportPlannerInput = {
   toolManifests?: ToolOutputManifest[];
   registry?: ContextPayloadRegistry;
   catalogResolution?: CatalogResolutionResult | null;
+  visualInspectionDebugSnapshot?: Record<string, unknown> | null;
   budget?: Partial<ContextTransportBudget>;
   packingKernel?: ContextPackingKernel;
   a03PackingResults?: ContextPackingResult[];
@@ -1663,6 +1665,7 @@ function debugSnapshot(params: {
   missingContextLaneProposals: MissingContextLaneProposal[];
   traceEvents: ContextTransportTrace[];
   catalogDebugSnapshot?: CatalogDebugSnapshot | null;
+  visualInspectionDebugSnapshot?: Record<string, unknown> | null;
 }): ContextTransportDebugSnapshot {
   return {
     planId: params.plan.planId,
@@ -1703,6 +1706,7 @@ function debugSnapshot(params: {
         .map((payload) => payload.id),
     },
     catalogDebugSnapshot: params.catalogDebugSnapshot ?? null,
+    visualInspectionDebugSnapshot: params.visualInspectionDebugSnapshot ?? null,
     traceEvents: params.traceEvents,
     noUnavailableToolExecutionClaimed: true,
   };
@@ -2148,6 +2152,7 @@ export function planAdaptiveContextTransport(
       missingContextLaneProposals,
       traceEvents,
       catalogDebugSnapshot: catalogResolution.debugSnapshot,
+      visualInspectionDebugSnapshot: input.visualInspectionDebugSnapshot ?? null,
     }),
   };
 }

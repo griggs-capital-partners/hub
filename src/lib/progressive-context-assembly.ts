@@ -23,6 +23,10 @@ import type {
   InspectionToolInvocation,
   InspectionToolResult,
 } from "./inspection-tool-broker";
+import type {
+  VisualInspectionDebugSnapshot,
+  VisualInspectionResult,
+} from "./visual-inspection-pack";
 
 export type AssemblyStopReason =
   | "none"
@@ -241,6 +245,7 @@ export type ProgressiveContextAssemblyInput = {
   sourceCandidates?: ContextPackingCandidate[];
   rawExcerptCandidates?: ContextPackingCandidate[];
   transportPayloads?: ContextPayload[];
+  visualInspection?: VisualInspectionResult | null;
   inspectionInvocations?: InspectionToolInvocation[];
   toolBroker?: InspectionToolBroker | null;
   packingKernel?: ContextPackingKernel;
@@ -252,6 +257,7 @@ export type ProgressiveContextAssemblyResult = {
   packingRequests: ContextPackingRequest[];
   packingResults: ContextPackingResult[];
   contextTransport: ContextTransportResult;
+  visualInspection: VisualInspectionDebugSnapshot | null;
   artifactReuseDecisions: ArtifactReuseDecision[];
   sourceExpansionDecisions: SourceExpansionDecision[];
   expandedContextBundle: ExpandedContextBundle;
@@ -935,6 +941,7 @@ function buildTransportPayloads(input: ProgressiveContextAssemblyInput) {
       ...(input.rawExcerptCandidates ?? []),
     ]),
     ...(input.transportPayloads ?? []),
+    ...(input.visualInspection?.contextPayloads ?? []),
   ];
 }
 
@@ -1189,7 +1196,9 @@ export class ProgressiveContextAssembler {
           agentControl: decision,
           availablePayloads: availableTransportPayloads,
           a03PackingResults: packingResults,
+          visualInspectionDebugSnapshot: input.visualInspection?.debugSnapshot ?? null,
         }),
+        visualInspection: input.visualInspection?.debugSnapshot ?? null,
         artifactReuseDecisions: [],
         sourceExpansionDecisions: [],
         expandedContextBundle: buildExpandedContextBundle({
@@ -1540,6 +1549,7 @@ export class ProgressiveContextAssembler {
       agentControl: decision,
       availablePayloads: availableTransportPayloads,
       a03PackingResults: packingResults,
+      visualInspectionDebugSnapshot: input.visualInspection?.debugSnapshot ?? null,
     });
 
     return {
@@ -1555,6 +1565,7 @@ export class ProgressiveContextAssembler {
       packingRequests,
       packingResults,
       contextTransport,
+      visualInspection: input.visualInspection?.debugSnapshot ?? null,
       artifactReuseDecisions: buildArtifactReuseDecisions(artifactPackingResult),
       sourceExpansionDecisions: buildSourceExpansionDecisions(rawPackingResult),
       expandedContextBundle,

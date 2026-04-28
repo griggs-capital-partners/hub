@@ -51,7 +51,7 @@ export type CapabilityAvailabilityAuditEntry = {
 export type ExecutedCapabilitySummaryEntry = {
   toolId: string;
   capability: string | null;
-  source: "inspection_task" | "async_work";
+  source: "inspection_task" | "async_work" | "visual_inspection";
 };
 
 export type TruthfulExecutionClaimSnapshot = {
@@ -394,7 +394,12 @@ function getToolTraceFromInspectionTask(task: Record<string, unknown>) {
   return asRecord(result?.toolTrace);
 }
 
-function collectExecutedToolTraces(documentIntelligence: unknown, asyncAgentWork: unknown) {
+function collectExecutedToolTraces(
+  documentIntelligence: unknown,
+  asyncAgentWork: unknown,
+  progressiveAssembly?: unknown,
+  debugTrace?: unknown
+) {
   const executed: ExecutedCapabilitySummaryEntry[] = [];
   const documents = getRecordArray(asRecord(documentIntelligence), "documents");
 
@@ -421,6 +426,25 @@ function collectExecutedToolTraces(documentIntelligence: unknown, asyncAgentWork
       toolId,
       capability: null,
       source: "async_work",
+    });
+  }
+
+  const visualDebug =
+    asRecord(asRecord(progressiveAssembly)?.visualInspection) ??
+    asRecord(asRecord(asRecord(debugTrace)?.assembly)?.visualInspection);
+  const producedPayloads = getRecordArray(visualDebug, "payloadsProduced");
+  if (producedPayloads.some((payload) => stringValue(payload.type) === "rendered_page_image" || stringValue(payload.type) === "page_crop_image")) {
+    executed.push({
+      toolId: "rendered_page_renderer",
+      capability: "rendered_page_inspection",
+      source: "visual_inspection",
+    });
+  }
+  if (getRecordArray(visualDebug, "visionObservations").length > 0 || producedPayloads.some((payload) => stringValue(payload.type) === "vision_observation")) {
+    executed.push({
+      toolId: "model_vision_inspector",
+      capability: "vision_page_understanding",
+      source: "visual_inspection",
     });
   }
 
@@ -614,7 +638,12 @@ export function buildTruthfulExecutionClaimSnapshot(params: {
     .map((entry) => entry.id);
 
   return {
-    executedTools: collectExecutedToolTraces(params.documentIntelligence, params.asyncAgentWork),
+    executedTools: collectExecutedToolTraces(
+      params.documentIntelligence,
+      params.asyncAgentWork,
+      params.progressiveAssembly,
+      params.debugTrace
+    ),
     deferredCapabilities: collectDeferredCapabilities(params),
     recommendedCapabilities: collectRecommendedCapabilities(params),
     unavailableCapabilities,
@@ -789,11 +818,17 @@ export function validateAnswerExecutionClaims(
     violations.push("OCR execution is claimed without an OCR execution trace.");
   }
 
-  if (hasPositiveExecutionPhrase(normalized, /\bvision(?:[-_\s]page[-_\s]understanding)?\b/i) && !hasExecutedTool(snapshot, "vision_page_understanding")) {
+  if (
+    hasPositiveExecutionPhrase(normalized, /\bvision(?:[-_\s]page[-_\s]understanding)?\b/i) &&
+    !hasAnyExecutedTool(snapshot, ["vision_page_understanding", "model_vision_inspector"])
+  ) {
     violations.push("Vision execution is claimed without a vision execution trace.");
   }
 
-  if (hasPositiveExecutionPhrase(normalized, /\brendered[-\s]page\b/i) && !hasExecutedTool(snapshot, "rendered_page_inspection")) {
+  if (
+    hasPositiveExecutionPhrase(normalized, /\brendered[-\s]page\b/i) &&
+    !hasAnyExecutedTool(snapshot, ["rendered_page_inspection", "rendered_page_renderer"])
+  ) {
     violations.push("Rendered-page inspection is claimed without rendered-page execution trace.");
   }
 

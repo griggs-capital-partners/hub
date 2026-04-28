@@ -242,6 +242,25 @@ runTest("bracketed tool-call format is allowed only for actual executed trace to
   assertViolation("[Call Tool: document_processor]", snapshot, /document_processor/);
 });
 
+runTest("visual inspection debug permits only actually produced rendered and vision claims", () => {
+  const snapshot = buildTruthfulExecutionClaimSnapshot({
+    progressiveAssembly: {
+      visualInspection: {
+        payloadsProduced: [
+          { id: "visual-payload:rendered-page-15", type: "rendered_page_image" },
+          { id: "visual-payload:vision-15", type: "vision_observation" },
+        ],
+        visionObservations: [{ id: "vision:15" }],
+      },
+    },
+  });
+
+  assert.equal(snapshot.executedTools.some((entry) => entry.toolId === "rendered_page_renderer"), true);
+  assert.equal(snapshot.executedTools.some((entry) => entry.toolId === "model_vision_inspector"), true);
+  assert.equal(validateAnswerExecutionClaims("Rendered-page inspection ran and vision inspected page 15.", snapshot).ok, true);
+  assertViolation("OCR extracted the page 15 cells.", snapshot, /OCR/);
+});
+
 runTest("async work creation is not completed extraction", () => {
   const snapshot = makeEmptySnapshot({
     asyncWorkCreated: true,

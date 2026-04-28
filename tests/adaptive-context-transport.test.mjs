@@ -33,6 +33,9 @@ const { buildConversationContextDebugTrace } = jiti(
 const { materializeDocumentKnowledgeArtifactRecord } = jiti(
   path.join(__dirname, "..", "src", "lib", "document-intelligence.ts")
 );
+const { resolveCatalogForAdaptiveContextTransport } = jiti(
+  path.join(__dirname, "..", "src", "lib", "context-catalog-bootstrap.ts")
+);
 
 const tests = [];
 
@@ -335,6 +338,55 @@ function t5AvailablePayloads() {
     ...buildContextPayloadsFromCapabilityGapRecords([makeGapRecord()]),
     ...buildContextPayloadsFromSourceCoverageRecords([makeCoverageRecord()]),
   ];
+}
+
+function makeRenderedPagePayload() {
+  return {
+    id: "visual-payload:rendered-page-15",
+    type: "rendered_page_image",
+    payloadClass: "runtime",
+    label: "Rendered page image: page 15",
+    sourceId: "doc-t5",
+    sourceType: "thread_document",
+    representation: "image",
+    text: null,
+    data: {
+      pageNumber: 15,
+      artifactRef: {
+        refId: "artifact:rendered-page-15",
+        refType: "data_uri",
+        uri: "data:image/svg+xml;utf8,%3Csvg%3E%3C%2Fsvg%3E",
+        mimeType: "image/svg+xml",
+      },
+    },
+    uri: "data:image/svg+xml;utf8,%3Csvg%3E%3C%2Fsvg%3E",
+    mimeType: "image/svg+xml",
+    approxTokenCount: 0,
+    priority: 95,
+    confidence: 1,
+    available: true,
+    executable: true,
+    requiresApproval: false,
+    provenance: {
+      sourceId: "doc-t5",
+      sourceType: "thread_document",
+      sourceDocumentId: "doc-t5",
+      location: { pageNumberStart: 15, pageNumberEnd: 15 },
+      producedByToolId: "rendered_page_renderer",
+      extractionMethod: "deterministic_test_renderer",
+      confidence: 1,
+    },
+    ownership: { scope: "thread" },
+    persistence: {
+      artifactEligible: true,
+      sourceObservationEligible: true,
+      contextDebtEligible: false,
+      capabilityGapEligible: false,
+      alreadyPersisted: false,
+      policy: "runtime_reference_only",
+    },
+    metadata: { noOcrExecuted: true, noDocumentAiExecuted: true },
+  };
 }
 
 function makeArtifactPackingCandidate() {
@@ -739,6 +791,65 @@ runTest("Progressive assembly exposes adaptive transport debug without changing 
     assembly.contextTransport.missingPayloadCapabilities.some((missing) => missing.payloadType === "ocr_text"),
     true
   );
+});
+
+runTest("A-04h selects rendered-page payloads only when produced and visual model support is available", () => {
+  const decision = makeDecision({
+    request: "Inspect page 15 visually.",
+    patch: {
+      taskFidelityLevel: "deep_inspection",
+      runtimeBudgetProfile: "deep_inspection",
+    },
+  });
+  const catalogResolution = resolveCatalogForAdaptiveContextTransport({
+    request: "Inspect page 15 visually.",
+    agentControl: decision,
+    modelProfileId: "deterministic_vision_model_profile",
+    runtimeSupport: {
+      renderedPageRenderer: {
+        implementationAvailable: true,
+        implementationId: "deterministic_test_renderer",
+        cropRenderingAvailable: true,
+      },
+      visionModelInspector: {
+        adapterAvailable: true,
+        adapterId: "deterministic_vision_adapter",
+        modelProfileId: "deterministic_vision_model_profile",
+        modelId: "deterministic-vision-model",
+        provider: "test_fixture_provider",
+        maxImageInputs: 2,
+        supportsStructuredOutput: true,
+        requiresApproval: false,
+        dataEgressClass: "none",
+      },
+    },
+  });
+  const result = planAdaptiveContextTransport({
+    request: "Inspect page 15 visually.",
+    agentControl: decision,
+    catalogResolution,
+    availablePayloads: [makeRenderedPagePayload()],
+    requestedPayloads: [
+      {
+        id: "need:rendered",
+        payloadType: "rendered_page_image",
+        required: false,
+        reason: "Rendered page payload was actually produced by A-04j.",
+        acceptedRepresentations: ["image"],
+      },
+      {
+        id: "need:vision",
+        payloadType: "vision_observation",
+        required: false,
+        reason: "Vision observation should not be selected unless actually produced.",
+        acceptedRepresentations: ["summary_text", "json"],
+      },
+    ],
+  });
+
+  assert.equal(result.selectedPayloads.some((payload) => payload.type === "rendered_page_image"), true);
+  assert.equal(result.selectedPayloads.some((payload) => payload.type === "vision_observation"), false);
+  assert.equal(result.missingPayloadCapabilities.some((missing) => missing.payloadType === "vision_observation"), true);
 });
 
 runTest("Context debug trace exposes transport snapshot and keeps rendered text private", () => {

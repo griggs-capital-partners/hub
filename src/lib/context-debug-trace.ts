@@ -973,6 +973,7 @@ export function buildConversationContextDebugTrace(
       detail: params.bundle.documentChunking.budget.detail,
       progressive: params.bundle.progressiveAssembly ?? null,
       transport: params.bundle.progressiveAssembly?.contextTransport?.debugSnapshot ?? null,
+      visualInspection: params.bundle.progressiveAssembly?.visualInspection ?? null,
     },
     renderedContext: {
       text: null,

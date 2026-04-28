@@ -154,14 +154,14 @@ runTest("Payload tool and model entries distinguish available proposed unsupport
 
   assert.equal(payload("text_excerpt").availabilityStatus, "available");
   assert.equal(payload("structured_table").availabilityStatus, "proposed");
-  assert.equal(payload("rendered_page_image").availabilityStatus, "unsupported");
+  assert.equal(payload("rendered_page_image").availabilityStatus, "unavailable_missing_tool_implementation");
   assert.equal(payload("page_crop_image").availabilityStatus, "unavailable_missing_tool_implementation");
   assert.equal(payload("native_file_reference").availabilityStatus, "unavailable_missing_connector");
   assert.equal(payload("vision_observation").availabilityStatus, "unavailable_missing_model_support");
 
   assert.equal(tool("parser_text_extraction").availabilityStatus, "available_read_only");
   assert.equal(tool("parser_text_extraction").isExecutable, true);
-  assert.equal(tool("rendered_page_renderer").availabilityStatus, "proposed");
+  assert.equal(tool("rendered_page_renderer").availabilityStatus, "unavailable_missing_tool_implementation");
   assert.equal(tool("rendered_page_renderer").isExecutable, false);
   assert.equal(tool("sharepoint_file_connector").availabilityStatus, "unavailable_missing_connector");
   assert.equal(tool("sharepoint_file_connector").isExecutable, false);
@@ -176,6 +176,89 @@ runTest("Payload tool and model entries distinguish available proposed unsupport
     modelProfileId: "future_vision_model_profile",
   });
   assert.equal(resolution.selectedModelManifest.consumerId, "text_only_context_model_profile");
+});
+
+runTest("Catalog gates renderer and vision execution on runtime support", () => {
+  const rendererSnapshot = buildDefaultCatalogSnapshot({
+    runtimeSupport: {
+      renderedPageRenderer: {
+        implementationAvailable: true,
+        implementationId: "deterministic_test_renderer",
+        cropRenderingAvailable: true,
+      },
+    },
+  });
+  const rendererTool = rendererSnapshot.toolEntries.find((entry) => entry.toolId === "rendered_page_renderer");
+  const renderedPayload = rendererSnapshot.payloadEntries.find((entry) => entry.payloadType === "rendered_page_image");
+  const cropPayload = rendererSnapshot.payloadEntries.find((entry) => entry.payloadType === "page_crop_image");
+  const renderedLane = rendererSnapshot.transportLaneEntries.find((entry) => entry.laneId === "rendered_page_image_lane");
+
+  assert.equal(rendererTool.isExecutable, true);
+  assert.equal(rendererTool.availabilityStatus, "available_read_only");
+  assert.equal(renderedPayload.availabilityStatus, "available_read_only");
+  assert.equal(cropPayload.availabilityStatus, "available_read_only");
+  assert.equal(renderedLane.currentAvailability, "available_read_only");
+  assert.equal(validateCatalogSnapshot(rendererSnapshot).valid, true);
+
+  const visionSnapshot = buildDefaultCatalogSnapshot({
+    runtimeSupport: {
+      renderedPageRenderer: {
+        implementationAvailable: true,
+        implementationId: "deterministic_test_renderer",
+        cropRenderingAvailable: true,
+      },
+      visionModelInspector: {
+        adapterAvailable: true,
+        adapterId: "deterministic_vision_adapter",
+        modelProfileId: "deterministic_vision_model_profile",
+        modelId: "deterministic-vision-model",
+        provider: "test_fixture_provider",
+        maxImageInputs: 2,
+        supportsStructuredOutput: true,
+        requiresApproval: false,
+        dataEgressClass: "none",
+      },
+    },
+  });
+  const visionTool = visionSnapshot.toolEntries.find((entry) => entry.toolId === "model_vision_inspector");
+  const visionModel = visionSnapshot.modelEntries.find((entry) => entry.modelProfileId === "deterministic_vision_model_profile");
+  const visionResolution = resolveCatalogForAdaptiveContextTransport({
+    snapshot: visionSnapshot,
+    modelProfileId: "deterministic_vision_model_profile",
+  });
+
+  assert.equal(visionTool.isExecutable, true);
+  assert.equal(visionTool.availabilityStatus, "available");
+  assert.equal(visionModel.availabilityStatus, "available");
+  assert.equal(visionModel.maxImageInputs, 2);
+  assert.equal(visionResolution.debugSnapshot.compatibleVisionModelProfileIds.includes("deterministic_vision_model_profile"), true);
+  assert.equal(visionResolution.selectedModelManifest.consumerId, "deterministic_vision_model_profile");
+  assert.equal(validateCatalogSnapshot(visionSnapshot).valid, true);
+});
+
+runTest("Catalog validation rejects executable visual tools without backing support", () => {
+  const snapshot = buildDefaultCatalogSnapshot();
+  const badRendererSnapshot = {
+    ...snapshot,
+    toolEntries: snapshot.toolEntries.map((entry) =>
+      entry.toolId === "rendered_page_renderer"
+        ? { ...entry, availabilityStatus: "available_read_only", isExecutable: true }
+        : entry
+    ),
+  };
+  const rendererCodes = issueCodes(validateCatalogSnapshot(badRendererSnapshot));
+  assert.equal(rendererCodes.has("executable_renderer_without_support"), true);
+
+  const badVisionSnapshot = {
+    ...snapshot,
+    toolEntries: snapshot.toolEntries.map((entry) =>
+      entry.toolId === "model_vision_inspector"
+        ? { ...entry, availabilityStatus: "available", isExecutable: true }
+        : entry
+    ),
+  };
+  const visionCodes = issueCodes(validateCatalogSnapshot(badVisionSnapshot));
+  assert.equal(visionCodes.has("executable_vision_inspector_without_vision_model"), true);
 });
 
 runTest("Catalog validation catches duplicate and unknown registration mistakes", () => {

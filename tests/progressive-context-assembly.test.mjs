@@ -19,6 +19,11 @@ const { evaluateAgentControlSurface } = jiti(
 const { buildDefaultInspectionToolBroker } = jiti(
   path.join(__dirname, "..", "src", "lib", "document-intelligence.ts")
 );
+const {
+  createDeterministicRenderedPageRenderer,
+  createDeterministicVisionInspectionAdapter,
+  executeVisualInspection,
+} = jiti(path.join(__dirname, "..", "src", "lib", "visual-inspection-pack.ts"));
 
 const tests = [];
 
@@ -91,6 +96,19 @@ function makeArtifactCandidate(overrides = {}) {
     rankingHints: overrides.rankingHints ?? ["table", "page 15", "Smackover Water Chemistry"],
     required: overrides.required ?? false,
     metadata: overrides.metadata ?? { artifactKey: "table_candidate:15" },
+  };
+}
+
+function visualTarget() {
+  return {
+    sourceDocumentId: "doc-t5",
+    sourceId: "doc-t5",
+    sourceType: "thread_document",
+    sourceVersion: "v1",
+    documentLabel: "T5 Summary Deck V1.7ext.pdf",
+    pageNumber: 15,
+    pageLabel: "15",
+    sourceLocationLabel: "T5 Summary Deck V1.7ext.pdf - page 15",
   };
 }
 
@@ -625,6 +643,47 @@ runTest("parser output is treated as a signal, not the ceiling of context", () =
     ),
     true
   );
+});
+
+runTest("progressive assembly can include A-04j visual inspection payloads and debug truth", async () => {
+  const decision = standardDecision({
+    request: "What does page 15 Smackover Water Chemistry table say?",
+    patch: {
+      approvalRequired: false,
+      asyncRecommended: false,
+      toolBudgetRequest: {
+        requestedToolCalls: 4,
+        grantedToolCalls: 4,
+        exceedsPolicy: false,
+        reason: "test visual budget",
+      },
+    },
+  });
+  const visualInspection = await executeVisualInspection({
+    request: "What does page 15 Smackover Water Chemistry table say?",
+    sourceTargets: [visualTarget()],
+    agentControl: decision,
+    renderer: createDeterministicRenderedPageRenderer(),
+    visionAdapter: createDeterministicVisionInspectionAdapter(),
+    policy: {
+      approvalGranted: true,
+      maxPages: 1,
+      maxModelCalls: 1,
+    },
+    now: () => new Date("2026-04-27T12:00:00.000Z"),
+  });
+  const result = assembleProgressiveContext({
+    request: "What does page 15 Smackover Water Chemistry table say?",
+    agentControl: decision,
+    artifactCandidates: [makeWarningArtifact()],
+    visualInspection,
+  });
+
+  assert.equal(result.visualInspection.payloadsProduced.some((payload) => payload.type === "rendered_page_image"), true);
+  assert.equal(result.visualInspection.payloadsProduced.some((payload) => payload.type === "vision_observation"), true);
+  assert.equal(result.contextTransport.debugSnapshot.visualInspectionDebugSnapshot.plan.id, visualInspection.plan.id);
+  assert.equal(result.contextTransport.debugSnapshot.availablePayloads.some((payload) => payload.type === "vision_observation"), true);
+  assert.equal(result.contextTransport.debugSnapshot.requestedPayloads.some((payload) => payload.payloadType === "vision_observation"), true);
 });
 
 let passed = 0;

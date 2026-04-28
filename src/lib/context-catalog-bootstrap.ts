@@ -231,6 +231,8 @@ export type CatalogValidationIssue = {
     | "available_tool_without_outputs"
     | "available_model_without_payloads"
     | "unavailable_tool_marked_executable"
+    | "executable_renderer_without_support"
+    | "executable_vision_inspector_without_vision_model"
     | "available_payload_without_producer"
     | "missing_catalog_provenance";
   severity: "error" | "warning";
@@ -250,16 +252,45 @@ export type CatalogRegistrationPolicy = {
   requireProvenance: boolean;
 };
 
+export type CatalogRenderedPageRendererSupport = {
+  implementationAvailable: boolean;
+  implementationId: string | null;
+  cropRenderingAvailable: boolean;
+  persistenceSupported: boolean;
+};
+
+export type CatalogVisionModelInspectorSupport = {
+  adapterAvailable: boolean;
+  adapterId: string | null;
+  modelProfileId: string | null;
+  modelId: string | null;
+  provider: string | null;
+  maxImageInputs: number | null;
+  supportsStructuredOutput: boolean;
+  requiresApproval: boolean;
+  dataEgressClass: CatalogDataEgressClass;
+};
+
+export type CatalogRuntimeSupport = {
+  renderedPageRenderer: CatalogRenderedPageRendererSupport;
+  visionModelInspector: CatalogVisionModelInspectorSupport;
+};
+
 export type CatalogBootstrapOptions = {
   catalogId?: string;
   includeProposedEntries?: boolean;
   registrationPolicy?: Partial<CatalogRegistrationPolicy>;
+  runtimeSupport?: Partial<{
+    renderedPageRenderer: Partial<CatalogRenderedPageRendererSupport>;
+    visionModelInspector: Partial<CatalogVisionModelInspectorSupport>;
+  }>;
 };
 
 export type CatalogSnapshot = {
   catalogId: string;
   generatedAt: string;
   registrationPolicy: CatalogRegistrationPolicy;
+  runtimeSupport: CatalogRuntimeSupport;
   payloadEntries: PayloadCatalogEntry[];
   representationEntries: PayloadRepresentationCatalogEntry[];
   transportLaneEntries: TransportLaneCatalogEntry[];
@@ -275,6 +306,7 @@ export type CatalogDiff = {
 
 export type CatalogDebugSnapshot = {
   catalogId: string;
+  runtimeSupport: CatalogRuntimeSupport;
   payloadEntriesConsidered: Array<Pick<PayloadCatalogEntry, "payloadType" | "displayName" | "availabilityStatus" | "producerToolIds" | "fallbackPayloadTypes">>;
   representationEntriesConsidered: Array<Pick<PayloadRepresentationCatalogEntry, "representationId" | "transportRepresentation" | "availabilityStatus">>;
   modelEntriesConsidered: Array<Pick<ModelCatalogEntry, "modelProfileId" | "modelId" | "provider" | "availabilityStatus" | "supportsVision" | "supportsNativePdf">>;
@@ -282,6 +314,7 @@ export type CatalogDebugSnapshot = {
   laneEntriesConsidered: Array<Pick<TransportLaneCatalogEntry, "laneId" | "currentAvailability" | "executionBoundary" | "usesA03PackingKernel" | "acceptedPayloadTypes">>;
   selectedAvailableProducerToolIds: string[];
   selectedConsumerModelProfileId: string | null;
+  compatibleVisionModelProfileIds: string[];
   unavailableProducerToolsByPayloadType: Record<string, string[]>;
   mappingToAdaptiveTransport: {
     payloadDefinitionIds: string[];
@@ -321,6 +354,50 @@ const DEFAULT_REGISTRATION_POLICY: CatalogRegistrationPolicy = {
   allowAvailablePayloadWithoutProducer: false,
   requireProvenance: true,
 };
+
+const DEFAULT_CATALOG_RUNTIME_SUPPORT: CatalogRuntimeSupport = {
+  renderedPageRenderer: {
+    implementationAvailable: false,
+    implementationId: null,
+    cropRenderingAvailable: false,
+    persistenceSupported: false,
+  },
+  visionModelInspector: {
+    adapterAvailable: false,
+    adapterId: null,
+    modelProfileId: null,
+    modelId: null,
+    provider: null,
+    maxImageInputs: null,
+    supportsStructuredOutput: false,
+    requiresApproval: true,
+    dataEgressClass: "unknown",
+  },
+};
+
+function normalizeCatalogRuntimeSupport(
+  support?: CatalogBootstrapOptions["runtimeSupport"] | CatalogRuntimeSupport | null
+): CatalogRuntimeSupport {
+  return {
+    renderedPageRenderer: {
+      ...DEFAULT_CATALOG_RUNTIME_SUPPORT.renderedPageRenderer,
+      ...(support?.renderedPageRenderer ?? {}),
+    },
+    visionModelInspector: {
+      ...DEFAULT_CATALOG_RUNTIME_SUPPORT.visionModelInspector,
+      ...(support?.visionModelInspector ?? {}),
+    },
+  };
+}
+
+function visualAvailabilityStatus(params: {
+  available: boolean;
+  approvalRequired?: boolean;
+  unavailableStatus: CatalogAvailabilityStatus;
+}): CatalogAvailabilityStatus {
+  if (!params.available) return params.unavailableStatus;
+  return params.approvalRequired ? "available_approval_required" : "available";
+}
 
 function provenance(rationale: string): CatalogProvenance {
   return {
@@ -465,8 +542,12 @@ function payloadConsumption(
   return { payloadType, representations, required, notes };
 }
 
-function defaultPayloadEntries() {
+function defaultPayloadEntries(support: CatalogRuntimeSupport = DEFAULT_CATALOG_RUNTIME_SUPPORT) {
   const textConsumers = ["text_only_context_model_profile"];
+  const renderedPageAvailable = support.renderedPageRenderer.implementationAvailable;
+  const pageCropAvailable = renderedPageAvailable && support.renderedPageRenderer.cropRenderingAvailable;
+  const visionAvailable = support.visionModelInspector.adapterAvailable;
+  const visionModelProfileId = support.visionModelInspector.modelProfileId ?? "future_vision_model_profile";
   return [
     payloadEntry({
       payloadType: "text_excerpt",
@@ -769,7 +850,7 @@ function defaultPayloadEntries() {
       payloadType: "rendered_page_image",
       displayName: "Rendered page image",
       description: "Full rendered page bitmap or image reference.",
-      availabilityStatus: "unsupported",
+      availabilityStatus: renderedPageAvailable ? "available_read_only" : "unavailable_missing_tool_implementation",
       representations: ["image_ref", "binary_ref"],
       isTextLike: false,
       isMultimodal: true,
@@ -779,24 +860,40 @@ function defaultPayloadEntries() {
       contextDebtEligibility: false,
       capabilityGapEligibility: true,
       defaultBudgetClass: "rich_media",
-      defaultCompactionPolicy: FUTURE_UNSUPPORTED_COMPACTION,
-      defaultExclusionPolicy: "blocked until rendered page renderer exists",
-      defaultBoundary: "future_tool_boundary",
+      defaultCompactionPolicy: renderedPageAvailable ? METADATA_ONLY_COMPACTION : FUTURE_UNSUPPORTED_COMPACTION,
+      defaultExclusionPolicy: renderedPageAvailable
+        ? "include only when a renderer-produced runtime image reference exists and the consuming model/lane accepts it"
+        : "blocked until rendered page renderer exists",
+      defaultBoundary: renderedPageAvailable ? "in_memory" : "future_tool_boundary",
       artifactPolicy: artifactPolicy("future_artifact_type_needed", ["figure_interpretation", "table_candidate"], "Future rendered/vision pack may derive artifacts."),
-      observationPolicy: observationPolicy("future_observation_type_needed", ["rendered_page_image"], "No rendered-page SourceObservation execution exists in A-04i."),
+      observationPolicy: observationPolicy(
+        renderedPageAvailable ? "eligible_for_source_observation" : "future_observation_type_needed",
+        ["rendered_page_image"],
+        renderedPageAvailable
+          ? "A-04j can emit source-grounded rendered-page image references when an actual renderer runs."
+          : "No rendered-page SourceObservation execution exists without an enabled A-04j renderer."
+      ),
       producerToolIds: ["rendered_page_renderer"],
       consumerModelIds: [],
-      consumerProfileIds: ["future_vision_model_profile"],
+      consumerProfileIds: [visionModelProfileId],
       fallbackPayloadTypes: ["text_excerpt", "source_observation", "knowledge_artifact"],
-      limitations: ["No rendered-page execution is implemented or invoked."],
-      notes: ["Catalog-only capability gap for future A-04j."],
-      rationale: "Rendered pages are required for future high-fidelity visual recovery.",
+      limitations: renderedPageAvailable
+        ? [
+            support.renderedPageRenderer.persistenceSupported
+              ? "Rendered images follow the configured artifact/file storage policy."
+              : "Rendered image references are runtime-safe and not persisted as binary DB blobs.",
+          ]
+        : ["No rendered-page execution is implemented or invoked."],
+      notes: renderedPageAvailable
+        ? [`A-04j renderer support enabled by ${support.renderedPageRenderer.implementationId ?? "runtime support flag"}.`]
+        : ["Catalog-only capability gap until A-04j renderer support is configured."],
+      rationale: "Rendered pages are required for high-fidelity visual recovery, but availability must follow actual renderer support.",
     }),
     payloadEntry({
       payloadType: "page_crop_image",
       displayName: "Page crop image",
       description: "Rendered crop around a table, chart, figure, or selected page region.",
-      availabilityStatus: "unavailable_missing_tool_implementation",
+      availabilityStatus: pageCropAvailable ? "available_read_only" : "unavailable_missing_tool_implementation",
       representations: ["image_ref", "binary_ref"],
       isTextLike: false,
       isMultimodal: true,
@@ -806,18 +903,32 @@ function defaultPayloadEntries() {
       contextDebtEligibility: false,
       capabilityGapEligibility: true,
       defaultBudgetClass: "rich_media",
-      defaultCompactionPolicy: FUTURE_UNSUPPORTED_COMPACTION,
-      defaultExclusionPolicy: "blocked until rendered page renderer exists",
-      defaultBoundary: "future_tool_boundary",
+      defaultCompactionPolicy: pageCropAvailable ? METADATA_ONLY_COMPACTION : FUTURE_UNSUPPORTED_COMPACTION,
+      defaultExclusionPolicy: pageCropAvailable
+        ? "include only when explicit crop coordinates or a supported crop planner produced a real crop"
+        : "blocked until rendered page crop support exists",
+      defaultBoundary: pageCropAvailable ? "in_memory" : "future_tool_boundary",
       artifactPolicy: artifactPolicy("future_artifact_type_needed", ["figure_interpretation", "table_candidate"], "Future rendered/vision pack may derive artifacts."),
-      observationPolicy: observationPolicy("future_observation_type_needed", ["page_crop_image"], "No page-crop SourceObservation execution exists in A-04i."),
+      observationPolicy: observationPolicy(
+        pageCropAvailable ? "eligible_for_source_observation" : "future_observation_type_needed",
+        ["page_crop_image"],
+        pageCropAvailable
+          ? "A-04j can emit source-grounded crop image references when explicit crop geometry is supplied or planned."
+          : "No page-crop SourceObservation execution exists without enabled crop rendering."
+      ),
       producerToolIds: ["rendered_page_renderer"],
       consumerModelIds: [],
-      consumerProfileIds: ["future_vision_model_profile"],
+      consumerProfileIds: [visionModelProfileId],
       fallbackPayloadTypes: ["text_excerpt", "source_observation", "knowledge_artifact"],
-      limitations: ["No page-crop rendering execution is implemented or invoked."],
-      notes: ["Catalog-only capability gap for future A-04j."],
-      rationale: "Page crops are a future bridge between rendered pages and vision/OCR.",
+      limitations: pageCropAvailable
+        ? [
+            "Crop payloads require explicit crop coordinates or a supported crop planner; A-04j must not invent crop coordinates.",
+          ]
+        : ["No page-crop rendering execution is implemented or invoked."],
+      notes: pageCropAvailable
+        ? [`A-04j crop support enabled by ${support.renderedPageRenderer.implementationId ?? "runtime support flag"}.`]
+        : ["Catalog-only capability gap until A-04j crop support is configured."],
+      rationale: "Page crops bridge rendered pages and visual inspection only when crop support actually exists.",
     }),
     payloadEntry({
       payloadType: "native_file_reference",
@@ -877,7 +988,11 @@ function defaultPayloadEntries() {
       payloadType: "vision_observation",
       displayName: "Vision observation",
       description: "Model or tool visual observation of a page, crop, figure, chart, or table.",
-      availabilityStatus: "unavailable_missing_model_support",
+      availabilityStatus: visualAvailabilityStatus({
+        available: visionAvailable,
+        approvalRequired: support.visionModelInspector.requiresApproval,
+        unavailableStatus: "unavailable_missing_model_support",
+      }),
       representations: ["summary_text", "json"],
       isTextLike: true,
       isMultimodal: true,
@@ -887,18 +1002,30 @@ function defaultPayloadEntries() {
       contextDebtEligibility: false,
       capabilityGapEligibility: true,
       defaultBudgetClass: "rich_media",
-      defaultCompactionPolicy: FUTURE_UNSUPPORTED_COMPACTION,
-      defaultExclusionPolicy: "blocked until governed vision model adapter exists",
-      defaultBoundary: "future_tool_boundary",
+      defaultCompactionPolicy: visionAvailable ? TEXT_LIKE_COMPACTION : FUTURE_UNSUPPORTED_COMPACTION,
+      defaultExclusionPolicy: visionAvailable
+        ? "include only when an approved configured vision adapter actually produced the observation"
+        : "blocked until governed vision model adapter exists",
+      defaultBoundary: visionAvailable ? "source_observation_memory" : "future_tool_boundary",
       artifactPolicy: artifactPolicy("eligible_for_artifact_promotion", ["figure_interpretation", "table_extraction"], "Future vision output can feed artifact promotion."),
-      observationPolicy: observationPolicy("future_observation_type_needed", ["vision_observation"], "No vision SourceObservation execution exists in A-04i."),
+      observationPolicy: observationPolicy(
+        visionAvailable ? "eligible_for_source_observation" : "future_observation_type_needed",
+        ["vision_observation"],
+        visionAvailable
+          ? "A-04j can convert actual vision adapter results into SourceObservation-compatible records."
+          : "No vision SourceObservation execution exists without an enabled model adapter."
+      ),
       producerToolIds: ["model_vision_inspector"],
       consumerModelIds: [],
-      consumerProfileIds: ["text_only_context_model_profile", "future_vision_model_profile"],
+      consumerProfileIds: ["text_only_context_model_profile", visionModelProfileId],
       fallbackPayloadTypes: ["text_excerpt", "source_observation", "knowledge_artifact"],
-      limitations: ["No vision model execution is implemented or invoked."],
-      notes: ["Catalog-only capability gap for future A-04j."],
-      rationale: "Vision observations must be inspectable as unavailable before adapters exist.",
+      limitations: visionAvailable
+        ? ["Vision observations are model observations with confidence and limitations; they are not OCR or document-AI output."]
+        : ["No vision model execution is implemented or invoked."],
+      notes: visionAvailable
+        ? [`A-04j vision adapter support enabled by ${support.visionModelInspector.adapterId ?? "runtime support flag"}.`]
+        : ["Catalog-only capability gap until A-04j vision support is configured."],
+      rationale: "Vision observations must be inspectable and executable only when a compatible configured adapter exists.",
     }),
     payloadEntry({
       payloadType: "document_ai_result",
@@ -1190,7 +1317,7 @@ function defaultRepresentationEntries() {
   ] satisfies PayloadRepresentationCatalogEntry[];
 }
 
-function defaultModelEntries() {
+function defaultModelEntries(support: CatalogRuntimeSupport = DEFAULT_CATALOG_RUNTIME_SUPPORT) {
   const textPayloads = [
     "text_excerpt",
     "knowledge_artifact",
@@ -1209,6 +1336,16 @@ function defaultModelEntries() {
     "vision_observation",
     "document_ai_result",
   ];
+  const visionSupport = support.visionModelInspector;
+  const visionModelAvailable = visionSupport.adapterAvailable;
+  const visionModelProfileId = visionSupport.modelProfileId ?? "future_vision_model_profile";
+  const visionModelId = visionSupport.modelId ?? visionModelProfileId;
+  const visionProvider = visionSupport.provider ?? (visionModelAvailable ? "configured_vision_model_provider" : "catalog_profile_only");
+  const visionImagePayloads = ["rendered_page_image", "page_crop_image"];
+  const visionPayloads = [...visionImagePayloads, "vision_observation", "native_file_reference"];
+  const visionRepresentations: PayloadRepresentationId[] = visionModelAvailable
+    ? ["image_ref", "binary_ref", "summary_text", "json"]
+    : ["image_ref", "binary_ref", "file_ref", "summary_text", "json"];
   return [
     modelEntry({
       modelId: "text_only_context_model_profile",
@@ -1242,35 +1379,54 @@ function defaultModelEntries() {
       rationale: "Matches the existing A-04h text-only behavior.",
     }),
     modelEntry({
-      modelId: "future_vision_model_profile",
-      modelProfileId: "future_vision_model_profile",
-      provider: "catalog_profile_only",
-      displayName: "Future vision model profile",
-      description: "Conceptual model profile for rendered pages, crops, and visual observations.",
-      availabilityStatus: "unavailable_missing_model_support",
-      acceptedPayloadTypes: ["rendered_page_image", "page_crop_image", "vision_observation", "native_file_reference"],
-      acceptedRepresentations: ["image_ref", "binary_ref", "file_ref", "summary_text", "json"],
+      modelId: visionModelId,
+      modelProfileId: visionModelProfileId,
+      provider: visionProvider,
+      displayName: visionModelAvailable ? "Configured vision model profile" : "Future vision model profile",
+      description: visionModelAvailable
+        ? "Configured model profile for A-04j rendered-page and crop vision inspection."
+        : "Conceptual model profile for rendered pages, crops, and visual observations.",
+      availabilityStatus: visualAvailabilityStatus({
+        available: visionModelAvailable,
+        approvalRequired: visionSupport.requiresApproval,
+        unavailableStatus: "unavailable_missing_model_support",
+      }),
+      acceptedPayloadTypes: visionPayloads,
+      acceptedRepresentations: visionRepresentations,
       maxTextTokens: null,
       maxOutputTokens: null,
-      maxImageInputs: null,
+      maxImageInputs: visionModelAvailable ? Math.max(1, visionSupport.maxImageInputs ?? 4) : null,
       maxFileInputs: null,
-      supportedFileTypes: [],
+      supportedFileTypes: visionModelAvailable ? ["image/png", "image/jpeg", "image/webp", "image/svg+xml"] : [],
       supportsVision: true,
       supportsNativePdf: false,
-      supportsStructuredOutput: true,
+      supportsStructuredOutput: visionSupport.supportsStructuredOutput,
       supportsToolCalling: false,
       costClass: "unknown",
       latencyClass: "async_preferred",
-      policyRestrictions: ["Catalog-only; must not be selected for execution until a real adapter exists."],
-      payloadCompatibility: ["rendered_page_image", "page_crop_image", "vision_observation", "native_file_reference"].map((payloadType) => ({
+      policyRestrictions: visionModelAvailable
+        ? [
+            "Must execute only through the configured A-04j vision inspection adapter.",
+            visionSupport.requiresApproval ? "Requires approval before model vision execution." : "Execution is allowed inside current policy when budget permits.",
+          ]
+        : ["Catalog-only; must not be selected for execution until a real adapter exists."],
+      payloadCompatibility: visionPayloads.map((payloadType) => ({
         payloadType,
-        acceptedRepresentations: ["image_ref", "binary_ref", "file_ref", "summary_text", "json"],
-        compatibility: "conceptual",
-        notes: ["Future-only compatibility. No execution adapter exists in A-04i."],
+        acceptedRepresentations: visionRepresentations,
+        compatibility: visionModelAvailable && (visionImagePayloads.includes(payloadType) || payloadType === "vision_observation")
+          ? "accepted"
+          : "conceptual",
+        notes: visionModelAvailable
+          ? ["Accepted only for image payloads or already-produced vision observations inside A-04j policy gates."]
+          : ["Future-only compatibility. No execution adapter exists in A-04i."],
       })),
-      limitations: ["No vision adapter is implemented."],
-      notes: ["Explains missing visual support without implying provider availability."],
-      rationale: "A-04j can attach concrete vision support later.",
+      limitations: visionModelAvailable
+        ? ["Vision observations are not OCR, document-AI, or structured table extraction."]
+        : ["No vision adapter is implemented."],
+      notes: visionModelAvailable
+        ? [`Vision adapter ${visionSupport.adapterId ?? "configured_adapter"} supplies this profile.`]
+        : ["Explains missing visual support without implying provider availability."],
+      rationale: "A-04j attaches concrete vision support only when a compatible configured adapter exists.",
     }),
     modelEntry({
       modelId: "future_native_file_model_profile",
@@ -1306,7 +1462,16 @@ function defaultModelEntries() {
   ] satisfies ModelCatalogEntry[];
 }
 
-function defaultToolEntries() {
+function defaultToolEntries(support: CatalogRuntimeSupport = DEFAULT_CATALOG_RUNTIME_SUPPORT) {
+  const rendererAvailable = support.renderedPageRenderer.implementationAvailable;
+  const cropAvailable = rendererAvailable && support.renderedPageRenderer.cropRenderingAvailable;
+  const rendererPayloadStatus: ToolAvailabilityStatus = rendererAvailable ? "available_read_only" : "unavailable_missing_tool_implementation";
+  const visionAvailable = support.visionModelInspector.adapterAvailable;
+  const visionToolStatus = visualAvailabilityStatus({
+    available: visionAvailable,
+    approvalRequired: support.visionModelInspector.requiresApproval,
+    unavailableStatus: "unavailable_missing_model_support",
+  }) satisfies ToolAvailabilityStatus;
   return [
     toolEntry({
       toolId: "parser_text_extraction",
@@ -1566,38 +1731,56 @@ function defaultToolEntries() {
     toolEntry({
       toolId: "rendered_page_renderer",
       displayName: "Rendered page renderer",
-      description: "Future renderer for full page images and page crops.",
-      availabilityStatus: "proposed",
+      description: rendererAvailable
+        ? "Configured renderer for full page images and explicit page crops."
+        : "Renderer boundary for full page images and page crops.",
+      availabilityStatus: rendererPayloadStatus,
       producedPayloadTypes: ["rendered_page_image", "page_crop_image"],
-      requiredInputPayloadTypes: ["native_file_reference"],
+      requiredInputPayloadTypes: [],
       outputRepresentations: ["image_ref", "binary_ref"],
       outputConfidenceSignals: ["render_status", "page_geometry"],
       outputValidationNeeds: ["source_page_locator", "rendered_asset_reference"],
       artifactTypesProduced: [],
-      sourceObservationTypesProduced: ["rendered_page_image"],
-      costClass: "unknown",
-      latencyClass: "async_preferred",
+      sourceObservationTypesProduced: cropAvailable ? ["rendered_page_image", "page_crop_image"] : ["rendered_page_image"],
+      costClass: rendererAvailable ? "free_local" : "unknown",
+      latencyClass: rendererAvailable ? "sync_safe" : "async_preferred",
       dataEgressClass: "none",
       sideEffectLevel: "read_only",
       toolBoundary: "future_extension",
-      executionBoundary: "not_executable",
+      executionBoundary: rendererAvailable ? "in_process" : "not_executable",
       requiresApproval: false,
-      isExecutable: false,
+      isExecutable: rendererAvailable,
       fallbackCapabilities: ["ocr", "vision_page_understanding"],
       productionCapabilities: [
-        payloadProduction("rendered_page_image", ["image_ref", "binary_ref"], "proposed", ["render_status"], ["rendered_asset_reference"]),
-        payloadProduction("page_crop_image", ["image_ref", "binary_ref"], "proposed", ["render_status"], ["crop_geometry"]),
+        payloadProduction("rendered_page_image", ["image_ref", "binary_ref"], rendererPayloadStatus, ["render_status"], ["rendered_asset_reference"]),
+        payloadProduction(
+          "page_crop_image",
+          ["image_ref", "binary_ref"],
+          cropAvailable ? "available_read_only" : "unavailable_missing_tool_implementation",
+          ["render_status"],
+          ["crop_geometry"]
+        ),
       ],
-      consumptionRequirements: [payloadConsumption("native_file_reference", ["file_ref", "binary_ref"], false)],
-      limitations: ["No rendered-page execution is implemented or invoked."],
-      notes: ["Candidate for A-04j."],
-      rationale: "Explains missing rendered-page payloads without executing rendering.",
+      consumptionRequirements: [],
+      limitations: rendererAvailable
+        ? [
+            cropAvailable
+              ? "Crop rendering requires explicit crop coordinates or a supported crop planner."
+              : "Full-page rendering is available, but crop rendering support is not configured.",
+          ]
+        : ["No rendered-page execution is implemented or invoked."],
+      notes: rendererAvailable
+        ? [`A-04j renderer ${support.renderedPageRenderer.implementationId ?? "configured_renderer"} is executable inside its local boundary.`]
+        : ["Candidate for A-04j."],
+      rationale: "Explains rendered-page payload availability without executing unsupported rendering.",
     }),
     toolEntry({
       toolId: "model_vision_inspector",
       displayName: "Model vision inspector",
-      description: "Future vision model inspection of rendered pages, crops, or native file references.",
-      availabilityStatus: "unavailable_missing_model_support",
+      description: visionAvailable
+        ? "Configured model vision inspection of rendered pages or crops."
+        : "Future vision model inspection of rendered pages, crops, or native file references.",
+      availabilityStatus: visionToolStatus,
       producedPayloadTypes: ["vision_observation"],
       requiredInputPayloadTypes: ["rendered_page_image", "page_crop_image", "native_file_reference"],
       outputRepresentations: ["summary_text", "json"],
@@ -1607,22 +1790,26 @@ function defaultToolEntries() {
       sourceObservationTypesProduced: ["vision_observation"],
       costClass: "unknown",
       latencyClass: "async_preferred",
-      dataEgressClass: "unknown",
+      dataEgressClass: support.visionModelInspector.dataEgressClass,
       sideEffectLevel: "read_only",
       toolBoundary: "model_provider",
-      executionBoundary: "not_executable",
-      requiresApproval: true,
-      isExecutable: false,
+      executionBoundary: visionAvailable ? "model_provider" : "not_executable",
+      requiresApproval: support.visionModelInspector.requiresApproval,
+      isExecutable: visionAvailable,
       fallbackCapabilities: ["ocr", "document_ai_table_recovery"],
-      productionCapabilities: [payloadProduction("vision_observation", ["summary_text", "json"], "unavailable_missing_model_support", ["model_confidence"], ["source_image_reference"])],
+      productionCapabilities: [payloadProduction("vision_observation", ["summary_text", "json"], visionToolStatus, ["model_confidence"], ["source_image_reference"])],
       consumptionRequirements: [
         payloadConsumption("rendered_page_image", ["image_ref", "binary_ref"], false),
         payloadConsumption("page_crop_image", ["image_ref", "binary_ref"], false),
         payloadConsumption("native_file_reference", ["file_ref", "binary_ref"], false),
       ],
-      limitations: ["No vision execution or model adapter is implemented or invoked."],
-      notes: ["Candidate for A-04j."],
-      rationale: "Explains missing vision observations without selecting future models.",
+      limitations: visionAvailable
+        ? ["Model vision observations are not OCR, document-AI, or structured table extraction."]
+        : ["No vision execution or model adapter is implemented or invoked."],
+      notes: visionAvailable
+        ? [`A-04j vision adapter ${support.visionModelInspector.adapterId ?? "configured_adapter"} is executable through ${support.visionModelInspector.provider ?? "configured provider"}.`]
+        : ["Candidate for A-04j."],
+      rationale: "Explains missing vision observations without selecting future models or fake adapters.",
     }),
     toolEntry({
       toolId: "ocr_extractor",
@@ -1787,8 +1974,19 @@ function defaultToolEntries() {
   ] satisfies ToolCatalogEntry[];
 }
 
-function defaultTransportLaneEntries(payloadEntries: PayloadCatalogEntry[]) {
+function defaultTransportLaneEntries(
+  payloadEntries: PayloadCatalogEntry[],
+  support: CatalogRuntimeSupport = DEFAULT_CATALOG_RUNTIME_SUPPORT
+) {
   const textLikePayloads = payloadEntries.filter((entry) => entry.isTextLike).map((entry) => entry.payloadType);
+  const renderedLaneStatus: LaneAvailabilityStatus = support.renderedPageRenderer.implementationAvailable
+    ? "available_read_only"
+    : "unavailable_missing_tool_implementation";
+  const visionLaneStatus = visualAvailabilityStatus({
+    available: support.visionModelInspector.adapterAvailable,
+    approvalRequired: support.visionModelInspector.requiresApproval,
+    unavailableStatus: "unavailable_missing_model_support",
+  }) satisfies LaneAvailabilityStatus;
   return [
     laneEntry({
       laneId: "a03_text_packing_lane",
@@ -1841,39 +2039,47 @@ function defaultTransportLaneEntries(payloadEntries: PayloadCatalogEntry[]) {
     laneEntry({
       laneId: "rendered_page_image_lane",
       displayName: "Rendered page image lane",
-      description: "Future rendered-page and crop transport lane.",
-      availabilityStatus: "unavailable_missing_tool_implementation",
+      description: support.renderedPageRenderer.implementationAvailable
+        ? "Rendered-page and explicit-crop transport lane."
+        : "Future rendered-page and crop transport lane.",
+      availabilityStatus: renderedLaneStatus,
       acceptedPayloadTypes: ["rendered_page_image", "page_crop_image"],
       acceptedRepresentations: ["image_ref", "binary_ref"],
-      currentAvailability: "unavailable_missing_tool_implementation",
-      executionBoundary: "future_tool_boundary",
+      currentAvailability: renderedLaneStatus,
+      executionBoundary: support.renderedPageRenderer.implementationAvailable ? "in_memory" : "future_tool_boundary",
       budgetClass: "rich_media",
       usesA03PackingKernel: false,
       requiresApproval: false,
       sideEffectLevel: "read_only",
       missingCapabilityGapKind: "rendered_page_inspection",
       fallbackLaneIds: ["a03_text_packing_lane", "memory_reuse_lane"],
-      limitations: ["No rendered-page execution exists in A-04i."],
-      notes: ["Candidate for A-04j."],
+      limitations: support.renderedPageRenderer.implementationAvailable
+        ? ["Lane carries only renderer-produced image references, never invented rendered-page evidence."]
+        : ["No rendered-page execution exists without A-04j renderer support."],
+      notes: support.renderedPageRenderer.implementationAvailable ? ["A-04j renderer lane enabled by runtime support."] : ["Candidate for A-04j."],
       rationale: "T5 page 15 needs this lane in a future pass.",
     }),
     laneEntry({
       laneId: "vision_observation_lane",
       displayName: "Vision observation lane",
-      description: "Future model-vision observation lane.",
-      availabilityStatus: "unavailable_missing_model_support",
+      description: support.visionModelInspector.adapterAvailable
+        ? "Model-vision observation transport lane."
+        : "Future model-vision observation lane.",
+      availabilityStatus: visionLaneStatus,
       acceptedPayloadTypes: ["vision_observation"],
       acceptedRepresentations: ["summary_text", "json"],
-      currentAvailability: "unavailable_missing_model_support",
-      executionBoundary: "future_tool_boundary",
+      currentAvailability: visionLaneStatus,
+      executionBoundary: support.visionModelInspector.adapterAvailable ? "source_observation_memory" : "future_tool_boundary",
       budgetClass: "rich_media",
       usesA03PackingKernel: false,
-      requiresApproval: true,
+      requiresApproval: support.visionModelInspector.requiresApproval,
       sideEffectLevel: "read_only",
       missingCapabilityGapKind: "vision_page_understanding",
       fallbackLaneIds: ["rendered_page_image_lane", "a03_text_packing_lane"],
-      limitations: ["No vision execution exists in A-04i."],
-      notes: ["Candidate for A-04j."],
+      limitations: support.visionModelInspector.adapterAvailable
+        ? ["Lane carries only actual vision adapter observations with confidence and limitations."]
+        : ["No vision execution exists without a configured A-04j vision adapter."],
+      notes: support.visionModelInspector.adapterAvailable ? ["A-04j vision lane enabled by runtime support."] : ["Candidate for A-04j."],
       rationale: "Vision observations are future-only until a governed model adapter exists.",
     }),
     laneEntry({
@@ -1958,6 +2164,7 @@ function defaultTransportLaneEntries(payloadEntries: PayloadCatalogEntry[]) {
 export class CatalogBootstrap {
   readonly catalogId: string;
   readonly registrationPolicy: CatalogRegistrationPolicy;
+  readonly runtimeSupport: CatalogRuntimeSupport;
   private readonly payloadEntries: PayloadCatalogEntry[] = [];
   private readonly representationEntries: PayloadRepresentationCatalogEntry[] = [];
   private readonly transportLaneEntries: TransportLaneCatalogEntry[] = [];
@@ -1970,6 +2177,7 @@ export class CatalogBootstrap {
       ...DEFAULT_REGISTRATION_POLICY,
       ...(options.registrationPolicy ?? {}),
     };
+    this.runtimeSupport = normalizeCatalogRuntimeSupport(options.runtimeSupport);
   }
 
   registerPayload(entry: PayloadCatalogEntry) {
@@ -2002,6 +2210,7 @@ export class CatalogBootstrap {
       catalogId: this.catalogId,
       generatedAt: BOOTSTRAP_REGISTERED_AT,
       registrationPolicy: this.registrationPolicy,
+      runtimeSupport: this.runtimeSupport,
       payloadEntries: [...this.payloadEntries],
       representationEntries: [...this.representationEntries],
       transportLaneEntries: [...this.transportLaneEntries],
@@ -2013,12 +2222,12 @@ export class CatalogBootstrap {
 
 export function buildDefaultCatalogBootstrap(options: CatalogBootstrapOptions = {}) {
   const bootstrap = new CatalogBootstrap(options);
-  const payloadEntries = defaultPayloadEntries();
+  const payloadEntries = defaultPayloadEntries(bootstrap.runtimeSupport);
   for (const entry of payloadEntries) bootstrap.registerPayload(entry);
   for (const entry of defaultRepresentationEntries()) bootstrap.registerPayloadRepresentation(entry);
-  for (const entry of defaultTransportLaneEntries(payloadEntries)) bootstrap.registerTransportLane(entry);
-  for (const entry of defaultModelEntries()) bootstrap.registerModel(entry);
-  for (const entry of defaultToolEntries()) bootstrap.registerTool(entry);
+  for (const entry of defaultTransportLaneEntries(payloadEntries, bootstrap.runtimeSupport)) bootstrap.registerTransportLane(entry);
+  for (const entry of defaultModelEntries(bootstrap.runtimeSupport)) bootstrap.registerModel(entry);
+  for (const entry of defaultToolEntries(bootstrap.runtimeSupport)) bootstrap.registerTool(entry);
   return bootstrap;
 }
 
@@ -2055,12 +2264,30 @@ function provenanceMissing(entry: CatalogEntry) {
   return !entry.provenance?.source?.sourceId || !entry.provenance.source.sourceType || !entry.provenance.registeredBy || !entry.provenance.registeredAt;
 }
 
+function compatibleVisionModelProfileIds(snapshot: CatalogSnapshot) {
+  return snapshot.modelEntries
+    .filter((entry) => {
+      if (!isAvailableStatus(entry.availabilityStatus) || !entry.supportsVision) return false;
+      if (entry.maxImageInputs !== null && entry.maxImageInputs <= 0) return false;
+      const acceptsVisualPayload = entry.acceptedPayloadTypes.some((payloadType) =>
+        payloadType === "rendered_page_image" || payloadType === "page_crop_image"
+      );
+      const acceptsImageRepresentation = entry.acceptedRepresentations.some((representation) =>
+        representation === "image_ref" || representation === "binary_ref"
+      );
+      return acceptsVisualPayload && acceptsImageRepresentation;
+    })
+    .map((entry) => entry.modelProfileId);
+}
+
 export function validateCatalogSnapshot(snapshot: CatalogSnapshot): CatalogValidationResult {
   const issues: CatalogValidationIssue[] = [];
+  const runtimeSupport = normalizeCatalogRuntimeSupport(snapshot.runtimeSupport);
   const payloadTypes = new Set(snapshot.payloadEntries.map((entry) => entry.payloadType));
   const availableToolIds = new Set(
     snapshot.toolEntries.filter((entry) => isAvailableStatus(entry.availabilityStatus) && entry.isExecutable).map((entry) => entry.toolId)
   );
+  const visionCompatibleProfileIds = compatibleVisionModelProfileIds(snapshot);
 
   if (!snapshot.registrationPolicy.allowDuplicateEntries) {
     addDuplicateIssues(issues, snapshot.payloadEntries, (entry) => entry.payloadType, "payload", "duplicate_payload_type");
@@ -2139,6 +2366,34 @@ export function validateCatalogSnapshot(snapshot: CatalogSnapshot): CatalogValid
         catalogKind: "tool",
         entryId: tool.toolId,
         message: `Tool ${tool.toolId} is ${tool.availabilityStatus} but marked executable.`,
+      });
+    }
+    if (
+      tool.toolId === "rendered_page_renderer" &&
+      isAvailableStatus(tool.availabilityStatus) &&
+      tool.isExecutable &&
+      !runtimeSupport.renderedPageRenderer.implementationAvailable
+    ) {
+      issues.push({
+        code: "executable_renderer_without_support",
+        severity: "error",
+        catalogKind: "tool",
+        entryId: tool.toolId,
+        message: "Rendered page renderer is marked executable, but runtime renderer implementation support is disabled.",
+      });
+    }
+    if (
+      tool.toolId === "model_vision_inspector" &&
+      isAvailableStatus(tool.availabilityStatus) &&
+      tool.isExecutable &&
+      visionCompatibleProfileIds.length === 0
+    ) {
+      issues.push({
+        code: "executable_vision_inspector_without_vision_model",
+        severity: "error",
+        catalogKind: "tool",
+        entryId: tool.toolId,
+        message: "Model vision inspector is marked executable without a compatible available vision model profile.",
       });
     }
   }
@@ -2388,6 +2643,7 @@ function buildCatalogDebugSnapshot(params: {
 
   return {
     catalogId: params.snapshot.catalogId,
+    runtimeSupport: normalizeCatalogRuntimeSupport(params.snapshot.runtimeSupport),
     payloadEntriesConsidered: params.snapshot.payloadEntries.map((entry) => ({
       payloadType: entry.payloadType,
       displayName: entry.displayName,
@@ -2425,6 +2681,7 @@ function buildCatalogDebugSnapshot(params: {
     })),
     selectedAvailableProducerToolIds: [...params.selectedAvailableProducerToolIds],
     selectedConsumerModelProfileId: params.selectedModel.consumerId,
+    compatibleVisionModelProfileIds: compatibleVisionModelProfileIds(params.snapshot),
     unavailableProducerToolsByPayloadType: params.unavailableProducerToolsByPayloadType,
     mappingToAdaptiveTransport: {
       payloadDefinitionIds: params.snapshot.payloadEntries.map((entry) => entry.payloadType),
@@ -2441,9 +2698,10 @@ export function resolveCatalogForAdaptiveContextTransport(input: {
   request?: string | null;
   agentControl?: AgentControlDecision | null;
   snapshot?: CatalogSnapshot | null;
+  runtimeSupport?: CatalogBootstrapOptions["runtimeSupport"] | CatalogRuntimeSupport | null;
   modelProfileId?: string | null;
 } = {}): CatalogResolutionResult {
-  const snapshot = input.snapshot ?? buildDefaultCatalogSnapshot();
+  const snapshot = input.snapshot ?? buildDefaultCatalogSnapshot({ runtimeSupport: input.runtimeSupport ?? undefined });
   const validation = validateCatalogSnapshot(snapshot);
   const payloadTypeDefinitions = catalogPayloadEntriesToContextPayloadTypeDefinitions(snapshot.payloadEntries);
   const modelCapabilityManifests = catalogModelEntriesToModelCapabilityManifests(snapshot.modelEntries);

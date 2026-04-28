@@ -11,6 +11,7 @@ import type { ContextTransportDebugSnapshot } from "./adaptive-context-transport
 import type { ContextRegistryDebugSnapshot } from "./capability-gap-context-debt-registry";
 import type { ArtifactPromotionDebugSnapshot } from "./source-learning-artifact-promotion";
 import type { ProgressiveContextAssemblyResult } from "./progressive-context-assembly";
+import type { VisualInspectionDebugSnapshot } from "./visual-inspection-pack";
 
 export type ContextSourceType =
   | "thread_document"
@@ -500,6 +501,7 @@ export interface ContextDebugTrace {
     detail?: string | null;
     progressive?: ProgressiveContextAssemblyResult | null;
     transport?: ContextTransportDebugSnapshot | null;
+    visualInspection?: VisualInspectionDebugSnapshot | null;
   };
   renderedContext: {
     text?: string | null;
