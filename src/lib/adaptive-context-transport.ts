@@ -4,7 +4,14 @@ import {
   type ContextPackingCandidate,
   type ContextPackingResult,
 } from "./context-packing-kernel";
-import { estimateTextTokens } from "./context-token-budget";
+import {
+  DEFAULT_CONTEXT_PROMPT_CACHE_STRATEGY,
+  estimateTextTokens,
+  type ContextBudgetMode,
+  type ContextCompactionStrategy,
+  type ContextPromptCacheStrategy,
+} from "./context-token-budget";
+import type { AgentWorkPlan } from "./context-seams";
 import type {
   AsyncAgentWorkDebugSnapshot,
   AsyncAgentWorkItem,
@@ -158,11 +165,49 @@ export type ContextPayloadConsumerManifest = {
 
 export type ModelCapabilityManifest = ContextPayloadConsumerManifest & {
   modelId: string;
+  modelProfileId: string;
   provider: string;
+  protocol?: string | null;
+  availabilityStatus?: string | null;
+  inputModalities: string[];
+  outputModality: string;
+  maxContextTokens?: number | null;
   maxOutputTokens?: number | null;
+  reservedSystemPromptTokens?: number | null;
+  reservedResponseTokens?: number | null;
+  contextBudgetTokensByMode: Record<ContextBudgetMode, number | null>;
+  budgetModeDefaults: Record<
+    ContextBudgetMode,
+    {
+      mode: ContextBudgetMode;
+      contextBudgetTokens: number | null;
+      maxOutputTokens: number | null;
+      compactionStrategies: ContextCompactionStrategy[];
+      promptCache: ContextPromptCacheStrategy;
+    }
+  >;
   maxImageInputs?: number | null;
   maxFileInputs?: number | null;
   supportedFileTypes: string[];
+  supportedPayloadLanes: string[];
+  unavailableLanes: Array<{
+    laneId: string;
+    payloadTypes: string[];
+    reason: string;
+  }>;
+  nativePayloadSupport: Array<{
+    payloadType: string;
+    supported: boolean;
+    reason: string;
+  }>;
+  capabilityFlags: Record<
+    string,
+    {
+      status: "supported" | "unsupported" | "catalog_only" | "approval_required" | "unknown";
+      reason: string;
+      noExecutionClaimed: true;
+    }
+  >;
   supportsVision: boolean;
   supportsNativePdf: boolean;
   supportsStructuredOutput: boolean;
@@ -289,6 +334,7 @@ export type ContextPayloadRequirement = {
 
 export type ContextTransportBudget = {
   runtimeBudgetProfile: AgentControlDecision["runtimeBudgetProfile"] | "unknown";
+  budgetMode: ContextBudgetMode | "unknown";
   contextTokens: number;
   outputTokens: number;
   toolCalls: number;
@@ -353,6 +399,8 @@ export type ContextTransportExclusion = {
 
 export type ContextTransportPlan = {
   planId: string;
+  agentWorkPlanId?: string | null;
+  agentWorkPlanTraceId?: string | null;
   request: string | null;
   budget: ContextTransportBudget;
   requestedPayloads: ContextPayloadRequirement[];
@@ -387,6 +435,8 @@ export type ContextTransportResult = {
 
 export type ContextTransportDebugSnapshot = {
   planId: string;
+  agentWorkPlanId?: string | null;
+  agentWorkPlanTraceId?: string | null;
   requestedPayloads: ContextPayloadRequirement[];
   availablePayloads: Array<Pick<ContextPayload, "id" | "type" | "label" | "available" | "representation" | "approxTokenCount">>;
   selectedPayloads: Array<Pick<ContextPayload, "id" | "type" | "label" | "representation" | "approxTokenCount">>;
@@ -419,6 +469,7 @@ export interface ContextPayloadAdapter<TInput = unknown> {
 export type ContextTransportPlannerInput = {
   request?: string | null;
   agentControl?: AgentControlDecision | null;
+  agentWorkPlan?: AgentWorkPlan | null;
   availablePayloads?: ContextPayload[];
   requestedPayloads?: ContextPayloadRequirement[];
   modelManifest?: ModelCapabilityManifest | null;
@@ -1359,23 +1410,38 @@ export function buildContextPayloadsFromArtifactPromotionDecisions(
   );
 }
 
-function defaultBudget(input: ContextTransportPlannerInput): ContextTransportBudget {
+function defaultBudget(
+  input: ContextTransportPlannerInput,
+  modelManifest: ModelCapabilityManifest = DEFAULT_MODEL_CAPABILITY_MANIFEST
+): ContextTransportBudget {
   const decision = input.agentControl;
+  const budgetMode = input.agentWorkPlan?.budget.mode ?? decision?.budgetMode ?? "unknown";
+  const manifestBudget =
+    budgetMode !== "unknown"
+      ? modelManifest.budgetModeDefaults?.[budgetMode]?.contextBudgetTokens ??
+        modelManifest.contextBudgetTokensByMode?.[budgetMode]
+      : null;
   const contextTokens =
     input.budget?.contextTokens ??
+    input.agentWorkPlan?.budget.contextTokens.granted ??
     decision?.contextBudgetRequest.grantedTokens ??
-    DEFAULT_MODEL_CAPABILITY_MANIFEST.maxTextTokens ??
+    manifestBudget ??
+    modelManifest.maxTextTokens ??
     4096;
   const outputTokens =
     input.budget?.outputTokens ??
+    input.agentWorkPlan?.budget.outputTokens.granted ??
     decision?.outputBudgetRequest.grantedTokens ??
+    modelManifest.maxOutputTokens ??
     0;
   const toolCalls =
     input.budget?.toolCalls ??
+    input.agentWorkPlan?.budget.toolCalls.granted ??
     decision?.toolBudgetRequest.grantedToolCalls ??
     0;
   return {
     runtimeBudgetProfile: input.budget?.runtimeBudgetProfile ?? decision?.runtimeBudgetProfile ?? "unknown",
+    budgetMode,
     contextTokens,
     outputTokens,
     toolCalls,
@@ -1411,6 +1477,7 @@ function defaultRequirement(
 export function buildDefaultContextPayloadRequirements(input: {
   request?: string | null;
   agentControl?: AgentControlDecision | null;
+  agentWorkPlan?: AgentWorkPlan | null;
   availablePayloads?: ContextPayload[];
   catalogResolution?: CatalogResolutionResult | null;
 }): ContextPayloadRequirement[] {
@@ -1426,6 +1493,18 @@ export function buildDefaultContextPayloadRequirements(input: {
 
   for (const requirement of input.catalogResolution?.recommendedPayloadRequirements ?? []) {
     add(requirement.payloadType, requirement.reason, requirement.required);
+  }
+
+  const agentWorkPlan = input.agentWorkPlan;
+  const agentWorkPlanId = agentWorkPlan?.planId ?? "unscoped";
+  for (const need of agentWorkPlan?.capabilityNeeds ?? []) {
+    for (const payloadType of need.payloadTypes) {
+      add(
+        payloadType,
+        `AgentWorkPlan ${agentWorkPlanId} records ${need.capability} as ${need.state}.`,
+        need.state === "needed" || need.state === "approval_required"
+      );
+    }
   }
 
   if (!input.catalogResolution && needsVisualTableRecovery(input.request, input.agentControl)) {
@@ -1669,6 +1748,8 @@ function debugSnapshot(params: {
 }): ContextTransportDebugSnapshot {
   return {
     planId: params.plan.planId,
+    agentWorkPlanId: params.plan.agentWorkPlanId ?? null,
+    agentWorkPlanTraceId: params.plan.agentWorkPlanTraceId ?? null,
     requestedPayloads: params.plan.requestedPayloads,
     availablePayloads: params.plan.availablePayloads.map((payload) => ({
       id: payload.id,
@@ -1724,12 +1805,13 @@ export function planAdaptiveContextTransport(
   const registry = input.registry ?? new ContextPayloadRegistry(catalogResolution.payloadTypeDefinitions);
   const modelCapabilityManifest = input.modelManifest ?? catalogResolution.selectedModelManifest ?? DEFAULT_MODEL_CAPABILITY_MANIFEST;
   const toolOutputManifestsConsidered = input.toolManifests ?? [...catalogResolution.toolOutputManifests];
-  const budget = defaultBudget(input);
+  const budget = defaultBudget(input, modelCapabilityManifest);
   const requestedPayloads =
     input.requestedPayloads ??
     buildDefaultContextPayloadRequirements({
       request: input.request,
       agentControl: input.agentControl,
+      agentWorkPlan: input.agentWorkPlan,
       availablePayloads: input.availablePayloads,
       catalogResolution,
     });
@@ -2103,6 +2185,8 @@ export function planAdaptiveContextTransport(
 
   const plan: ContextTransportPlan = {
     planId,
+    agentWorkPlanId: input.agentWorkPlan?.planId ?? null,
+    agentWorkPlanTraceId: input.agentWorkPlan?.traceId ?? null,
     request: input.request ?? null,
     budget,
     requestedPayloads,

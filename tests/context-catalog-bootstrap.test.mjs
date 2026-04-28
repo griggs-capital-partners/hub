@@ -362,13 +362,29 @@ runTest("Catalog generates A-04h payload registry model manifests and tool manif
   const snapshot = buildDefaultCatalogSnapshot();
   const definitions = catalogPayloadEntriesToContextPayloadTypeDefinitions(snapshot.payloadEntries);
   const registry = new ContextPayloadRegistry(definitions);
-  const modelManifests = catalogModelEntriesToModelCapabilityManifests(snapshot.modelEntries);
+  const modelManifests = catalogModelEntriesToModelCapabilityManifests(
+    snapshot.modelEntries,
+    snapshot.transportLaneEntries
+  );
   const toolManifests = catalogToolEntriesToToolOutputManifests(snapshot.toolEntries);
+  const textManifest = modelManifests.find((manifest) => manifest.consumerId === "text_only_context_model_profile");
 
   assert.equal(registry.has("text_excerpt"), true);
   assert.equal(registry.get("rendered_page_image").executableNow, false);
   assert.equal(modelManifests.some((manifest) => manifest.consumerId === "text_only_context_model_profile"), true);
   assert.equal(modelManifests.some((manifest) => manifest.consumerId === "future_vision_model_profile" && manifest.supportsVision), true);
+  assert.ok(textManifest);
+  assert.equal(textManifest.modelProfileId, "text_only_context_model_profile");
+  assert.equal(textManifest.inputModalities.includes("text"), true);
+  assert.equal(textManifest.outputModality, "text");
+  assert.equal(textManifest.contextBudgetTokensByMode.standard > 0, true);
+  assert.equal(textManifest.budgetModeDefaults.audit.mode, "audit");
+  assert.equal(textManifest.budgetModeDefaults.async_deep_work.mode, "async_deep_work");
+  assert.equal(textManifest.supportedPayloadLanes.includes("a03_text_packing_lane"), true);
+  assert.equal(textManifest.capabilityFlags.tool_calling.noExecutionClaimed, true);
+  assert.equal(textManifest.capabilityFlags.analysis_sandbox.status, "unsupported");
+  assert.equal(textManifest.budgetModeDefaults.standard.promptCache.eligible, false);
+  assert.equal(textManifest.unavailableLanes.some((lane) => lane.payloadTypes.includes("structured_table")), true);
   assert.equal(toolManifests.some((manifest) => manifest.toolId === "parser_text_extraction" && manifest.executable), true);
   assert.equal(toolManifests.some((manifest) => manifest.toolId === "ocr_extractor" && !manifest.executable), true);
   assert.equal(DEFAULT_MODEL_CAPABILITY_MANIFEST.consumerId, "text_only_context_model_profile");

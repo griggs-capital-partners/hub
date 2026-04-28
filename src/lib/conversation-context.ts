@@ -75,6 +75,7 @@ import {
   type SourceObservation,
 } from "./source-learning-artifact-promotion";
 import {
+  buildAgentWorkPlanFromControlDecision,
   evaluateAgentControlSurface,
   type AgentControlDebugSnapshot,
   type AgentControlSourceSignal,
@@ -113,7 +114,7 @@ import {
   type ModelBudgetProfileLookup,
   resolveModelContextBudget,
 } from "./model-budget-profiles";
-import type { ContextBudgetMode, ContextDebugTrace } from "./context-seams";
+import type { AgentWorkPlan, ContextBudgetMode, ContextDebugTrace } from "./context-seams";
 import { prisma } from "./prisma";
 
 export type ConversationContextSourceStatus = "used" | "unsupported" | "failed" | "unavailable";
@@ -273,6 +274,7 @@ export type ConversationContextBundle = {
   documentChunking: ConversationContextDocumentChunkingDebug;
   documentIntelligence: ConversationContextDocumentIntelligenceDebug;
   agentControl: AgentControlDebugSnapshot;
+  agentWorkPlan: AgentWorkPlan;
   progressiveAssembly: ProgressiveContextAssemblyResult;
   asyncAgentWork: AsyncAgentWorkDebugSnapshot | null;
   contextRegistry: ContextRegistryDebugSnapshot;
@@ -4863,6 +4865,14 @@ export async function resolveConversationContextBundle(params: {
   );
   const contextRegistryPackingCandidates = buildContextRegistryPackingCandidates(openContextRegistry);
   const contextRegistrySection = buildContextRegistrySection(openContextRegistry);
+  const agentControlSourceSignals = [
+    ...buildAgentControlSourceSignals({
+      sourceDocuments: documents,
+      documentChunkingDocuments,
+      documentIntelligenceDocuments,
+    }),
+    ...buildAgentControlSourceSignalsFromRegistry(openContextRegistry),
+  ];
   const agentControl = evaluateAgentControlSurface({
     conversationId: params.conversationId,
     request: params.currentUserPrompt ?? null,
@@ -4874,19 +4884,24 @@ export async function resolveConversationContextBundle(params: {
           mode: resolvedBudget.mode ?? "standard",
         }
       : null,
-    sourceSignals: [
-      ...buildAgentControlSourceSignals({
-        sourceDocuments: documents,
-        documentChunkingDocuments,
-        documentIntelligenceDocuments,
-      }),
-      ...buildAgentControlSourceSignalsFromRegistry(openContextRegistry),
-    ],
+    sourceSignals: agentControlSourceSignals,
+  });
+  const agentWorkPlan = buildAgentWorkPlanFromControlDecision({
+    conversationId: params.conversationId,
+    request: params.currentUserPrompt ?? null,
+    decision: agentControl,
+    sourceSignals: agentControlSourceSignals,
+    artifactPromotion: {
+      candidateCount: artifactPromotionCandidateCount,
+      acceptedCount: artifactPromotionAcceptedCount,
+      rejectedCount: artifactPromotionRejectedCount,
+    },
   });
 
   const progressiveAssembly = assembleProgressiveContext({
     request: params.currentUserPrompt ?? null,
     agentControl,
+    agentWorkPlan,
     artifactCandidates: [...progressiveArtifactCandidates, ...contextRegistryPackingCandidates],
     rawExcerptCandidates: progressiveRawExcerptCandidates,
     transportPayloads: [
@@ -5014,6 +5029,7 @@ export async function resolveConversationContextBundle(params: {
       documents: documentIntelligenceDocuments,
     },
     agentControl,
+    agentWorkPlan,
     progressiveAssembly,
     asyncAgentWork,
     contextRegistry,

@@ -1,4 +1,43 @@
-export type ContextBudgetMode = "standard" | "deep";
+export type ContextBudgetMode = "standard" | "deep" | "audit" | "async_deep_work";
+
+export const CONTEXT_BUDGET_MODES = [
+  "standard",
+  "deep",
+  "audit",
+  "async_deep_work",
+] as const satisfies readonly ContextBudgetMode[];
+
+export type ContextCompactionStrategy =
+  | "deterministic_pack"
+  | "artifact_first"
+  | "summary_then_excerpt"
+  | "cache_reuse_candidate"
+  | "defer_to_async";
+
+export type ContextPromptCacheStrategy = {
+  status: "not_configured" | "eligible" | "not_eligible";
+  eligible: boolean;
+  noCacheExecutionClaimed: true;
+  reason: string;
+};
+
+export function isContextBudgetMode(value: unknown): value is ContextBudgetMode {
+  return typeof value === "string" && CONTEXT_BUDGET_MODES.includes(value as ContextBudgetMode);
+}
+
+export function normalizeContextBudgetMode(
+  value: unknown,
+  fallback: ContextBudgetMode = "standard"
+): ContextBudgetMode {
+  return isContextBudgetMode(value) ? value : fallback;
+}
+
+export const DEFAULT_CONTEXT_PROMPT_CACHE_STRATEGY = {
+  status: "not_configured",
+  eligible: false,
+  noCacheExecutionClaimed: true,
+  reason: "Prompt-cache metadata is recorded for planning only; no cache read or write is executed here.",
+} as const satisfies ContextPromptCacheStrategy;
 
 export const DEFAULT_APPROX_CHARS_PER_TOKEN = 4;
 const DEFAULT_MINIMUM_NON_EMPTY_TOKENS = 1;

@@ -13,7 +13,7 @@ const {
 const {
   assembleProgressiveContext,
 } = jiti(path.join(__dirname, "..", "src", "lib", "progressive-context-assembly.ts"));
-const { evaluateAgentControlSurface } = jiti(
+const { buildAgentWorkPlanFromControlDecision, evaluateAgentControlSurface } = jiti(
   path.join(__dirname, "..", "src", "lib", "agent-control-surface.ts")
 );
 const { buildDefaultInspectionToolBroker } = jiti(
@@ -179,6 +179,39 @@ runTest("ProgressiveContextAssembler creates a deterministic plan from AgentCont
   assert.deepEqual(first.plan.passes.map((pass) => pass.name), second.plan.passes.map((pass) => pass.name));
   assert.equal(first.plan.controlDecisionId, decision.decisionId);
   assert.equal(first.plan.runtimeBudgetProfile, decision.runtimeBudgetProfile);
+});
+
+runTest("Progressive assembly preserves scoped plans and links them to AgentWorkPlan", () => {
+  const request = "Recover the page 15 table body with OCR and vision.";
+  const sourceSignals = [
+    makeSourceSignal({
+      hasWeakArtifact: true,
+      recommendedNextCapabilities: ["ocr", "vision_page_understanding"],
+    }),
+  ];
+  const decision = standardDecision({ request, sourceSignals });
+  const agentWorkPlan = buildAgentWorkPlanFromControlDecision({
+    conversationId: "thread-standard",
+    request,
+    decision,
+    sourceSignals,
+  });
+  const result = assembleProgressiveContext({
+    request,
+    agentControl: decision,
+    agentWorkPlan,
+    artifactCandidates: [makeArtifactCandidate(), makeWarningArtifact()],
+    rawExcerptCandidates: [makeRawCandidate()],
+  });
+
+  assert.equal(result.agentWorkPlan.planId, agentWorkPlan.planId);
+  assert.equal(result.plan.agentWorkPlanId, agentWorkPlan.planId);
+  assert.equal(result.plan.agentWorkPlanTraceId, agentWorkPlan.traceId);
+  assert.equal(result.contextTransport.plan.agentWorkPlanId, agentWorkPlan.planId);
+  assert.equal(result.contextTransport.plan.agentWorkPlanTraceId, agentWorkPlan.traceId);
+  assert.notEqual(result.plan.id, result.contextTransport.plan.planId);
+  assert.equal(result.plan.controlDecisionId, decision.decisionId);
+  assert.equal(result.contextTransport.plan.relationshipToA03.a03IsTextPackingLane, true);
 });
 
 runTest("A-03 is invoked as packing kernel, not assembly strategy owner", () => {

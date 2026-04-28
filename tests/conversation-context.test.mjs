@@ -536,6 +536,15 @@ await runTest("adds a parallel debug trace without changing the resolver-owned d
 
   assert.ok(bundle.debugTrace);
   assert.equal(bundle.debugTrace.conversationId, "thread-1");
+  assert.ok(bundle.agentWorkPlan);
+  assert.match(bundle.agentWorkPlan.planId, /^agent-work-plan:/);
+  assert.equal(bundle.progressiveAssembly.agentWorkPlan.planId, bundle.agentWorkPlan.planId);
+  assert.equal(bundle.progressiveAssembly.plan.agentWorkPlanId, bundle.agentWorkPlan.planId);
+  assert.equal(bundle.progressiveAssembly.contextTransport.plan.agentWorkPlanId, bundle.agentWorkPlan.planId);
+  assert.equal(bundle.debugTrace.agentWorkPlan.planId, bundle.agentWorkPlan.planId);
+  assert.equal(bundle.debugTrace.agentWorkPlan.scopedPlanLinks.assemblyPlanId, bundle.progressiveAssembly.plan.id);
+  assert.equal(bundle.debugTrace.agentWorkPlan.scopedPlanLinks.transportPlanId, bundle.progressiveAssembly.contextTransport.plan.planId);
+  assert.equal(bundle.debugTrace.agentWorkPlan.plannerEvaluator.noLlmPlanningExecuted, true);
   assert.equal(bundle.debugTrace.documents.length, bundle.documentChunking.documents.length);
   assert.deepEqual(
     bundle.debugTrace.documents[0]?.selectedChunkIds,

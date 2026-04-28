@@ -12,6 +12,17 @@ import type { ContextRegistryDebugSnapshot } from "./capability-gap-context-debt
 import type { ArtifactPromotionDebugSnapshot } from "./source-learning-artifact-promotion";
 import type { ProgressiveContextAssemblyResult } from "./progressive-context-assembly";
 import type { VisualInspectionDebugSnapshot } from "./visual-inspection-pack";
+import type {
+  ContextBudgetMode,
+  ContextCompactionStrategy,
+  ContextPromptCacheStrategy,
+} from "./context-token-budget";
+
+export type {
+  ContextBudgetMode,
+  ContextCompactionStrategy,
+  ContextPromptCacheStrategy,
+} from "./context-token-budget";
 
 export type ContextSourceType =
   | "thread_document"
@@ -35,8 +46,6 @@ export type ContextSourceType =
 export type ContextScope = "thread" | "workspace" | "user" | "external" | "system" | "unknown";
 
 export type ContextRequestMode = "default" | "plan";
-
-export type ContextBudgetMode = "standard" | "deep";
 
 export type ContextEligibilityReason =
   | "allowed"
@@ -285,6 +294,213 @@ export interface ContextBudgetProfile {
   fallbackProfileUsed?: boolean | null;
 }
 
+export type AgentWorkPlanBudgetMode = ContextBudgetMode;
+
+export type AgentWorkPlanState =
+  | "needed"
+  | "planned"
+  | "deferred"
+  | "unavailable"
+  | "approval_required"
+  | "executed";
+
+export type AgentWorkPlanAnswerReadinessStatus =
+  | "ready"
+  | "ready_with_limitations"
+  | "not_ready"
+  | "approval_required"
+  | "async_recommended"
+  | "blocked";
+
+export interface AgentWorkPlanAnswerReadiness {
+  status: AgentWorkPlanAnswerReadinessStatus;
+  readyForAnswer: boolean;
+  confidence: number | null;
+  reasons: string[];
+  limitations: string[];
+}
+
+export interface AgentWorkPlannerEvaluatorStatus {
+  status: "not_configured" | "disabled" | "planned";
+  noLlmPlanningExecuted: true;
+  reason?: string;
+}
+
+export interface AgentWorkPlanBudget {
+  mode: AgentWorkPlanBudgetMode;
+  runtimeBudgetProfile: string;
+  contextTokens: {
+    requested: number;
+    granted: number;
+    profileMax: number;
+  };
+  outputTokens: {
+    requested: number;
+    granted: number;
+    profileMax: number;
+  };
+  toolCalls: {
+    requested: number;
+    granted: number;
+  };
+  runtimeMs: {
+    requested: number;
+    granted: number;
+    syncCutoff: number;
+  };
+  compactionStrategies: ContextCompactionStrategy[];
+  promptCache: ContextPromptCacheStrategy;
+}
+
+export interface AgentWorkPlanSourceNeed {
+  sourceId: string;
+  sourceType?: string | null;
+  scope?: ContextScope | string | null;
+  state: AgentWorkPlanState;
+  coverageTarget?: string | null;
+  reason: string;
+  detail?: string | null;
+  executionEvidenceIds?: string[];
+}
+
+export interface AgentWorkPlanCapabilityNeed {
+  capability: string;
+  state: AgentWorkPlanState;
+  payloadTypes: string[];
+  requiresApproval: boolean;
+  asyncRecommended: boolean;
+  reason: string;
+  executionEvidenceIds: string[];
+  noExecutionClaimed: true;
+}
+
+export interface AgentWorkPlanModelNeed {
+  capability: string;
+  state: AgentWorkPlanState;
+  currentProvider: string | null;
+  currentModel: string | null;
+  currentProfileId: string | null;
+  requiresProviderChange: boolean;
+  acceptedPayloadTypes: string[];
+  unavailablePayloadTypes: string[];
+  reason: string;
+  noExecutionClaimed: true;
+}
+
+export interface AgentWorkPlanDecision {
+  id: string;
+  type:
+    | "classification"
+    | "budget"
+    | "source"
+    | "capability"
+    | "model"
+    | "approval"
+    | "async"
+    | "truthfulness";
+  state: AgentWorkPlanState;
+  reason: string;
+  detail: string;
+  traceEventIds: string[];
+}
+
+export interface AgentWorkPlanLimitation {
+  id: string;
+  state: AgentWorkPlanState;
+  summary: string;
+  capability?: string | null;
+  sourceId?: string | null;
+  traceEventIds: string[];
+}
+
+export interface AgentWorkPlanStep {
+  id: string;
+  label: string;
+  owner:
+    | "agent_control"
+    | "conversation_context"
+    | "progressive_assembly"
+    | "adaptive_transport"
+    | "async_agent_work"
+    | "debug_trace";
+  state: AgentWorkPlanState;
+  reason: string;
+  linkedPlanId?: string | null;
+  traceEventIds: string[];
+}
+
+export interface AgentWorkPlan {
+  planId: string;
+  traceId: string;
+  conversationId: string | null;
+  messageId?: string | null;
+  prompt: {
+    preview: string | null;
+    intentClassification: string;
+    taskType: string;
+    outputExpectation: string;
+  };
+  requiredFidelity: string;
+  answerReadiness: AgentWorkPlanAnswerReadiness;
+  sourceCoverageTarget: string;
+  memoryReuse: {
+    state: AgentWorkPlanState;
+    memoryDensity: string;
+    memoryRefreshDepth: string;
+    artifactReuseIntent: AgentWorkPlanState;
+    reason: string;
+  };
+  budget: AgentWorkPlanBudget;
+  sourceNeeds: AgentWorkPlanSourceNeed[];
+  capabilityNeeds: AgentWorkPlanCapabilityNeed[];
+  modelCapabilityNeeds: AgentWorkPlanModelNeed[];
+  approvedActionsNow: AgentWorkPlanStep[];
+  deferredActions: AgentWorkPlanStep[];
+  asyncRecommendation: {
+    state: "planned" | "deferred" | "approval_required" | "unavailable";
+    recommended: boolean;
+    reason: string | null;
+  };
+  artifactPromotion: {
+    candidateCount: number;
+    acceptedCount: number;
+    rejectedCount: number;
+    state: AgentWorkPlanState;
+    reason: string;
+  };
+  truthfulLimitations: AgentWorkPlanLimitation[];
+  unavailableCapabilities: AgentWorkPlanCapabilityNeed[];
+  decisions: AgentWorkPlanDecision[];
+  plannerEvaluator: AgentWorkPlannerEvaluatorStatus;
+  scopedPlanLinks: {
+    agentControlDecisionId: string | null;
+    assemblyPlanId?: string | null;
+    transportPlanId?: string | null;
+    asyncWorkItemId?: string | null;
+  };
+  noUnavailableToolExecutionClaimed: true;
+}
+
+export interface AgentWorkPlanDebugSummary {
+  planId: string;
+  traceId: string;
+  budgetMode: AgentWorkPlanBudgetMode;
+  answerReadiness: AgentWorkPlanAnswerReadiness;
+  plannerEvaluator: AgentWorkPlannerEvaluatorStatus;
+  modelCapabilitySummary: {
+    needs: AgentWorkPlanModelNeed[];
+    acceptedPayloadTypes: string[];
+    unavailablePayloadTypes: string[];
+  };
+  sourceNeeds: AgentWorkPlanSourceNeed[];
+  capabilityNeeds: AgentWorkPlanCapabilityNeed[];
+  unavailableLanes: string[];
+  asyncRecommendation: AgentWorkPlan["asyncRecommendation"];
+  truthfulLimitations: AgentWorkPlanLimitation[];
+  scopedPlanLinks: AgentWorkPlan["scopedPlanLinks"];
+  noUnavailableToolExecutionClaimed: true;
+}
+
 export interface ContextAssemblyPlan {
   conversationId: string;
   requestMode: ContextRequestMode;
@@ -450,6 +666,7 @@ export interface ContextDebugTrace {
   requestedSourceIds: string[];
   authority: ContextSourceAuthority;
   budgetProfile: ContextBudgetProfile | null;
+  agentWorkPlan?: AgentWorkPlanDebugSummary | null;
   agentControl: AgentControlDebugSnapshot;
   asyncAgentWork?: AsyncAgentWorkDebugSnapshot | null;
   contextRegistry?: ContextRegistryDebugSnapshot | null;

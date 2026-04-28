@@ -17,6 +17,14 @@ import type {
   ToolLatencyClass,
   ToolSideEffectLevel,
 } from "./inspection-tool-broker";
+import {
+  DEFAULT_CONTEXT_PROMPT_CACHE_STRATEGY,
+  type ContextBudgetMode,
+} from "./context-token-budget";
+import {
+  resolveModelBudgetModeDefaults,
+  resolveModelBudgetProfile,
+} from "./model-budget-profiles";
 
 export type CatalogEntryKind = "payload" | "representation" | "lane" | "model" | "tool";
 
@@ -2482,34 +2490,120 @@ export function catalogPayloadEntriesToContextPayloadTypeDefinitions(
   }));
 }
 
-export function catalogModelEntriesToModelCapabilityManifests(
-  modelEntries: ModelCatalogEntry[]
-): ModelCapabilityManifest[] {
-  return modelEntries.map((entry) => ({
-    manifestId: `model:${entry.modelProfileId}`,
-    consumerId: entry.modelProfileId,
-    modelId: entry.modelId,
-    provider: entry.provider,
-    acceptedPayloadTypes: [...entry.acceptedPayloadTypes],
-    preferredRepresentations: unique(entry.acceptedRepresentations.map(representationToTransport)),
-    maxTextTokens: entry.maxTextTokens,
-    maxOutputTokens: entry.maxOutputTokens,
-    maxImageInputs: entry.maxImageInputs,
-    maxFileInputs: entry.maxFileInputs,
-    supportedFileTypes: [...entry.supportedFileTypes],
-    supportsVision: entry.supportsVision,
-    supportsNativePdf: entry.supportsNativePdf,
-    supportsStructuredOutput: entry.supportsStructuredOutput,
-    supportsToolCalling: entry.supportsToolCalling,
-    costClass: entry.costClass,
-    latencyClass: entry.latencyClass,
-    policyRestrictions: [...entry.policyRestrictions],
-    notes: [
-      ...entry.notes,
-      `Catalog availability: ${entry.availabilityStatus}.`,
-    ],
-    limitations: [...entry.limitations],
+function modelInputModalities(entry: ModelCatalogEntry) {
+  return unique([
+    "text",
+    entry.supportsVision || (entry.maxImageInputs ?? 0) > 0 ? "image_input" : null,
+    entry.maxFileInputs === null || entry.maxFileInputs > 0 || entry.supportsNativePdf ? "file_payload" : null,
+    entry.acceptedPayloadTypes.some((payloadType) => payloadType.includes("trace")) ? "trace_payload" : null,
+  ].filter((value): value is string => Boolean(value)));
+}
+
+function modelCapabilityFlags(entry: ModelCatalogEntry): ModelCapabilityManifest["capabilityFlags"] {
+  const supports = (status: ModelCapabilityManifest["capabilityFlags"][string]["status"], reason: string) => ({
+    status,
+    reason,
+    noExecutionClaimed: true as const,
+  });
+  return {
+    large_context: supports(entry.maxTextTokens === null || entry.maxTextTokens > 16_000 ? "supported" : "unknown", "Context size is governed by the selected budget profile and catalog model entry."),
+    image_input: supports(entry.supportsVision ? "supported" : "unsupported", entry.supportsVision ? "Model catalog accepts image-like payloads." : "Model catalog does not accept image input."),
+    file_payload: supports(entry.supportsNativePdf || (entry.maxFileInputs ?? 0) > 0 ? "supported" : "unsupported", "File/native payload support is catalog metadata only unless a governed adapter runs."),
+    tool_calling: supports(entry.supportsToolCalling ? "supported" : "unsupported", "Tool/function support is a model capability flag, not an execution claim."),
+    analysis_sandbox: supports("unsupported", "No analysis sandbox adapter is configured in this work package."),
+    connector_snapshot: supports("catalog_only", "Connector snapshots are represented as future/catalog lanes only."),
+    rendered_page_image: supports(entry.acceptedPayloadTypes.includes("rendered_page_image") ? "supported" : "unsupported", "Rendered-page image support describes model input compatibility only."),
+    structured_table: supports(entry.acceptedPayloadTypes.includes("structured_table") ? "supported" : "unsupported", "Structured-table support describes payload compatibility only."),
+    document_text: supports(entry.acceptedPayloadTypes.includes("text_excerpt") ? "supported" : "unsupported", "Document text support describes payload compatibility only."),
+    trace_payload: supports(entry.acceptedRepresentations.includes("debug_trace") ? "supported" : "unsupported", "Trace payload support is diagnostic context only."),
+  };
+}
+
+function nativePayloadSupport(entry: ModelCatalogEntry) {
+  return entry.payloadCompatibility.map((compatibility) => ({
+    payloadType: compatibility.payloadType,
+    supported: compatibility.compatibility === "accepted",
+    reason: compatibility.notes.join(" ") || `Catalog compatibility is ${compatibility.compatibility}.`,
   }));
+}
+
+export function catalogModelEntriesToModelCapabilityManifests(
+  modelEntries: ModelCatalogEntry[],
+  transportLaneEntries: TransportLaneCatalogEntry[] = []
+): ModelCapabilityManifest[] {
+  return modelEntries.map((entry) => {
+    const budgetProfile = resolveModelBudgetProfile({
+      provider: entry.provider,
+      model: entry.modelId,
+    });
+    const budgetModeDefaults = resolveModelBudgetModeDefaults(budgetProfile);
+    const contextBudgetTokensByMode = Object.fromEntries(
+      Object.entries(budgetModeDefaults).map(([mode, budget]) => [mode, budget.contextBudgetTokens])
+    ) as Record<ContextBudgetMode, number | null>;
+    const compatibleLanes = transportLaneEntries.filter((lane) =>
+      lane.acceptedPayloadTypes.some((payloadType) => entry.acceptedPayloadTypes.includes(payloadType))
+    );
+    const unavailableLanes = compatibleLanes
+      .filter((lane) => !isAvailableStatus(lane.currentAvailability))
+      .map((lane) => ({
+        laneId: lane.laneId,
+        payloadTypes: [...lane.acceptedPayloadTypes],
+        reason: `Lane availability is ${lane.currentAvailability}.`,
+      }));
+
+    return {
+      manifestId: `model:${entry.modelProfileId}`,
+      consumerId: entry.modelProfileId,
+      modelId: entry.modelId,
+      modelProfileId: entry.modelProfileId,
+      provider: entry.provider,
+      protocol: null,
+      availabilityStatus: entry.availabilityStatus,
+      inputModalities: modelInputModalities(entry),
+      outputModality: "text",
+      acceptedPayloadTypes: [...entry.acceptedPayloadTypes],
+      preferredRepresentations: unique(entry.acceptedRepresentations.map(representationToTransport)),
+      maxContextTokens: entry.maxTextTokens ?? budgetProfile.maxContextTokens,
+      maxTextTokens: entry.maxTextTokens ?? budgetProfile.maxContextTokens,
+      maxOutputTokens: entry.maxOutputTokens ?? budgetProfile.maxOutputTokens,
+      reservedSystemPromptTokens: budgetProfile.reservedSystemPromptTokens,
+      reservedResponseTokens: budgetProfile.reservedResponseTokens,
+      contextBudgetTokensByMode,
+      budgetModeDefaults: Object.fromEntries(
+        Object.entries(budgetModeDefaults).map(([mode, budget]) => [
+          mode,
+          {
+            mode: mode as ContextBudgetMode,
+            contextBudgetTokens: budget.contextBudgetTokens,
+            maxOutputTokens: budget.maxOutputTokens,
+            compactionStrategies: budget.compactionStrategies,
+            promptCache: budget.promptCache ?? DEFAULT_CONTEXT_PROMPT_CACHE_STRATEGY,
+          },
+        ])
+      ) as ModelCapabilityManifest["budgetModeDefaults"],
+      maxImageInputs: entry.maxImageInputs,
+      maxFileInputs: entry.maxFileInputs,
+      supportedFileTypes: [...entry.supportedFileTypes],
+      supportedPayloadLanes: compatibleLanes
+        .filter((lane) => isAvailableStatus(lane.currentAvailability))
+        .map((lane) => lane.laneId),
+      unavailableLanes,
+      nativePayloadSupport: nativePayloadSupport(entry),
+      capabilityFlags: modelCapabilityFlags(entry),
+      supportsVision: entry.supportsVision,
+      supportsNativePdf: entry.supportsNativePdf,
+      supportsStructuredOutput: entry.supportsStructuredOutput,
+      supportsToolCalling: entry.supportsToolCalling,
+      costClass: entry.costClass,
+      latencyClass: entry.latencyClass,
+      policyRestrictions: [...entry.policyRestrictions],
+      notes: [
+        ...entry.notes,
+        `Catalog availability: ${entry.availabilityStatus}.`,
+      ],
+      limitations: [...entry.limitations],
+    };
+  });
 }
 
 export function catalogToolEntriesToToolOutputManifests(toolEntries: ToolCatalogEntry[]): ToolOutputManifest[] {
@@ -2704,7 +2798,10 @@ export function resolveCatalogForAdaptiveContextTransport(input: {
   const snapshot = input.snapshot ?? buildDefaultCatalogSnapshot({ runtimeSupport: input.runtimeSupport ?? undefined });
   const validation = validateCatalogSnapshot(snapshot);
   const payloadTypeDefinitions = catalogPayloadEntriesToContextPayloadTypeDefinitions(snapshot.payloadEntries);
-  const modelCapabilityManifests = catalogModelEntriesToModelCapabilityManifests(snapshot.modelEntries);
+  const modelCapabilityManifests = catalogModelEntriesToModelCapabilityManifests(
+    snapshot.modelEntries,
+    snapshot.transportLaneEntries
+  );
   const toolOutputManifests = catalogToolEntriesToToolOutputManifests(snapshot.toolEntries);
   const selectedModelEntry =
     snapshot.modelEntries.find((entry) => entry.modelProfileId === input.modelProfileId && isAvailableStatus(entry.availabilityStatus)) ??

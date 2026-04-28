@@ -7,7 +7,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const jiti = createJiti(import.meta.url, { moduleCache: false });
-const { evaluateAgentControlSurface } = jiti(
+const { buildAgentWorkPlanFromControlDecision, evaluateAgentControlSurface } = jiti(
   path.join(__dirname, "..", "src", "lib", "agent-control-surface.ts")
 );
 const { buildConversationContextDebugTrace } = jiti(
@@ -151,6 +151,38 @@ runTest("classifies a simple request as standard synchronous work", () => {
   assert.equal(decision.approvalRequired, false);
   assert.equal(decision.defaultBudgetSufficient, true);
   assertCoreDecisionShape(decision);
+});
+
+runTest("projects deterministic control decisions into a trace-safe AgentWorkPlan", () => {
+  const decision = evaluateAgentControlSurface({
+    conversationId: "thread-plan",
+    request: "Recover the missing page table with OCR and vision.",
+    sourceSignals: [
+      makeSourceSignal({
+        hasWeakArtifact: true,
+        recommendedNextCapabilities: ["ocr", "vision_page_understanding"],
+      }),
+    ],
+  });
+  const plan = buildAgentWorkPlanFromControlDecision({
+    conversationId: "thread-plan",
+    request: "Recover the missing page table with OCR and vision.",
+    decision,
+    sourceSignals: [
+      makeSourceSignal({
+        hasWeakArtifact: true,
+        recommendedNextCapabilities: ["ocr", "vision_page_understanding"],
+      }),
+    ],
+  });
+
+  assert.match(plan.planId, /^agent-work-plan:/);
+  assert.equal(plan.budget.mode, "standard");
+  assert.equal(plan.plannerEvaluator.noLlmPlanningExecuted, true);
+  assert.equal(plan.capabilityNeeds.some((need) => need.capability === "ocr"), true);
+  assert.equal(plan.capabilityNeeds.every((need) => need.noExecutionClaimed), true);
+  assert.equal(plan.scopedPlanLinks.assemblyPlanId, `assembly:${decision.decisionId}`);
+  assert.equal(plan.scopedPlanLinks.transportPlanId, `context-transport:${decision.decisionId}`);
 });
 
 runTest("classifies highest-fidelity ingestion as expanded deep async work", () => {
@@ -390,4 +422,3 @@ for (const test of tests) {
 if (!process.exitCode) {
   console.log(`${passed} agent-control-surface test(s) passed.`);
 }
-

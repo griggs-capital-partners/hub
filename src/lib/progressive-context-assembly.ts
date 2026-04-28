@@ -27,6 +27,7 @@ import type {
   VisualInspectionDebugSnapshot,
   VisualInspectionResult,
 } from "./visual-inspection-pack";
+import type { AgentWorkPlan } from "./context-seams";
 
 export type AssemblyStopReason =
   | "none"
@@ -219,6 +220,8 @@ export type ExpandedContextBundle = {
 
 export type ContextAssemblyPlan = {
   id: string;
+  agentWorkPlanId?: string | null;
+  agentWorkPlanTraceId?: string | null;
   controlDecisionId: string;
   taskFidelityLevel: AgentControlDecision["taskFidelityLevel"];
   runtimeBudgetProfile: AgentControlDecision["runtimeBudgetProfile"];
@@ -241,6 +244,7 @@ export type ContextAssemblyPlan = {
 export type ProgressiveContextAssemblyInput = {
   request: string | null;
   agentControl: AgentControlDecision;
+  agentWorkPlan?: AgentWorkPlan | null;
   artifactCandidates?: ContextPackingCandidate[];
   sourceCandidates?: ContextPackingCandidate[];
   rawExcerptCandidates?: ContextPackingCandidate[];
@@ -252,6 +256,7 @@ export type ProgressiveContextAssemblyInput = {
 };
 
 export type ProgressiveContextAssemblyResult = {
+  agentWorkPlan?: AgentWorkPlan | null;
   plan: ContextAssemblyPlan;
   passResults: AssemblyPassResult[];
   packingRequests: ContextPackingRequest[];
@@ -1126,6 +1131,8 @@ export class ProgressiveContextAssembler {
 
     const plan: ContextAssemblyPlan = {
       id: `assembly:${decision.decisionId}`,
+      agentWorkPlanId: input.agentWorkPlan?.planId ?? null,
+      agentWorkPlanTraceId: input.agentWorkPlan?.traceId ?? null,
       controlDecisionId: decision.decisionId,
       taskFidelityLevel: decision.taskFidelityLevel,
       runtimeBudgetProfile: decision.runtimeBudgetProfile,
@@ -1172,6 +1179,7 @@ export class ProgressiveContextAssembler {
       );
 
       return {
+        agentWorkPlan: input.agentWorkPlan ?? null,
         plan: {
           ...plan,
           passes: plannedPasses.map((pass) => ({ ...pass, status: "blocked" })),
@@ -1194,6 +1202,7 @@ export class ProgressiveContextAssembler {
         contextTransport: planAdaptiveContextTransport({
           request: input.request,
           agentControl: decision,
+          agentWorkPlan: input.agentWorkPlan,
           availablePayloads: availableTransportPayloads,
           a03PackingResults: packingResults,
           visualInspectionDebugSnapshot: input.visualInspection?.debugSnapshot ?? null,
@@ -1547,12 +1556,14 @@ export class ProgressiveContextAssembler {
     const contextTransport = planAdaptiveContextTransport({
       request: input.request,
       agentControl: decision,
+      agentWorkPlan: input.agentWorkPlan,
       availablePayloads: availableTransportPayloads,
       a03PackingResults: packingResults,
       visualInspectionDebugSnapshot: input.visualInspection?.debugSnapshot ?? null,
     });
 
     return {
+      agentWorkPlan: input.agentWorkPlan ?? null,
       plan: {
         ...plan,
         passes: plannedPasses.map((pass) => {

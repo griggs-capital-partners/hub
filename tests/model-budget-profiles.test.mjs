@@ -52,7 +52,11 @@ assert.equal(fallbackProfile.id, DEFAULT_MODEL_BUDGET_PROFILE.id);
 
 const standardBudget = resolveContextBudgetTokens(bedrockProfile, "standard");
 const deepBudget = resolveContextBudgetTokens(bedrockProfile, "deep");
+const auditBudget = resolveContextBudgetTokens(bedrockProfile, "audit");
+const asyncDeepBudget = resolveContextBudgetTokens(bedrockProfile, "async_deep_work");
 assert.ok(deepBudget > standardBudget);
+assert.equal(auditBudget, deepBudget);
+assert.equal(asyncDeepBudget, deepBudget);
 assert.ok(
   deepBudget <=
     bedrockProfile.maxContextTokens -
@@ -79,6 +83,11 @@ assert.equal(deepOpenAiBudget.mode, "deep");
 assert.equal(
   deepOpenAiBudget.contextBudgetTokens,
   resolveContextBudgetTokens(openAiProfile, "deep")
+);
+assert.equal(deepOpenAiBudget.budgetModeDefault.mode, "deep");
+assert.equal(
+  Object.keys(openAiProfile.budgetModeDefaults).sort().join(","),
+  ["async_deep_work", "audit", "deep", "standard"].sort().join(",")
 );
 
 console.log("ok - model budget profiles resolve conservative provider-aware defaults");

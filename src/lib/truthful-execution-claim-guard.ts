@@ -433,14 +433,15 @@ function collectExecutedToolTraces(
     asRecord(asRecord(progressiveAssembly)?.visualInspection) ??
     asRecord(asRecord(asRecord(debugTrace)?.assembly)?.visualInspection);
   const producedPayloads = getRecordArray(visualDebug, "payloadsProduced");
-  if (producedPayloads.some((payload) => stringValue(payload.type) === "rendered_page_image" || stringValue(payload.type) === "page_crop_image")) {
+  const availableProducedPayloads = producedPayloads.filter((payload) => asRecord(payload)?.available === true);
+  if (availableProducedPayloads.some((payload) => stringValue(payload.type) === "rendered_page_image" || stringValue(payload.type) === "page_crop_image")) {
     executed.push({
       toolId: "rendered_page_renderer",
       capability: "rendered_page_inspection",
       source: "visual_inspection",
     });
   }
-  if (getRecordArray(visualDebug, "visionObservations").length > 0 || producedPayloads.some((payload) => stringValue(payload.type) === "vision_observation")) {
+  if (getRecordArray(visualDebug, "visionObservations").length > 0 || availableProducedPayloads.some((payload) => stringValue(payload.type) === "vision_observation")) {
     executed.push({
       toolId: "model_vision_inspector",
       capability: "vision_page_understanding",
@@ -537,6 +538,12 @@ function collectDeferredCapabilities(params: {
   for (const gap of getRecordArray(assemblyRecord, "gaps")) {
     capabilities.push(...stringArray(gap.recommendedCapabilities));
   }
+  const workPlan = asRecord(asRecord(params.debugTrace)?.agentWorkPlan) ?? asRecord(assemblyRecord?.agentWorkPlan);
+  for (const need of getRecordArray(workPlan, "capabilityNeeds")) {
+    const state = stringValue(need.state);
+    const capability = stringValue(need.capability);
+    if (capability && state && state !== "executed") capabilities.push(capability);
+  }
   for (const debt of [
     ...getRegistryRecordArray(params.debugTrace, "contextDebt", "records"),
     ...getRegistryRecordArray(params.debugTrace, "contextDebt", "selectedRecords"),
@@ -571,6 +578,11 @@ function collectRecommendedCapabilities(params: {
   const assemblyRecord = asRecord(params.progressiveAssembly);
   for (const gap of getRecordArray(assemblyRecord, "gaps")) {
     capabilities.push(...stringArray(gap.recommendedCapabilities));
+  }
+  const workPlan = asRecord(asRecord(params.debugTrace)?.agentWorkPlan) ?? asRecord(assemblyRecord?.agentWorkPlan);
+  for (const need of getRecordArray(workPlan, "capabilityNeeds")) {
+    const capability = stringValue(need.capability);
+    if (capability) capabilities.push(capability);
   }
   for (const gap of [
     ...getRegistryRecordArray(params.debugTrace, "capabilityGaps", "records"),
@@ -607,9 +619,11 @@ function collectContextGapKinds(progressiveAssembly: unknown, asyncAgentWork: un
 
 function collectLimitations(asyncAgentWork: unknown, debugTrace?: unknown) {
   const asyncRecord = asRecord(asyncAgentWork);
+  const workPlan = asRecord(asRecord(debugTrace)?.agentWorkPlan);
   const limitations = [
     ...stringArray(asyncRecord?.limitations),
     ...stringArray(asRecord(asyncRecord?.completionState)?.limitations),
+    ...getRecordArray(workPlan, "truthfulLimitations").map((limitation) => stringValue(limitation.summary)),
     ...getRegistryRecordArray(debugTrace, "contextDebt", "selectedRecords").flatMap((debt) => [
       stringValue(debt.title),
       stringValue(debt.description),

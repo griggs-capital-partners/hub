@@ -22,6 +22,9 @@ const { buildDocumentChunkCandidates, rankDocumentChunks } = jiti(
 const { buildPdfContextExtractionResult } = jiti(
   path.join(__dirname, "..", "src", "lib", "context-pdf.ts")
 );
+const { buildAgentWorkPlanFromControlDecision, evaluateAgentControlSurface } = jiti(
+  path.join(__dirname, "..", "src", "lib", "agent-control-surface.ts")
+);
 
 function makeAuthority(overrides = {}) {
   return {
@@ -214,6 +217,7 @@ function makeBundle(overrides = {}) {
       ...defaultDocumentIntelligence,
       ...(overrides.documentIntelligence ?? {}),
     },
+    agentWorkPlan: overrides.agentWorkPlan,
     progressiveAssembly: overrides.progressiveAssembly,
   };
 }
@@ -269,10 +273,23 @@ await runTest("maps an empty executed bundle without mutating the input", async 
 });
 
 await runTest("maps progressive assembly metadata into the debug trace", async () => {
+  const controlDecision = evaluateAgentControlSurface({
+    conversationId: "thread-progressive",
+    request: "What is in the page 15 table?",
+    sourceSignals: [],
+  });
+  const agentWorkPlan = buildAgentWorkPlanFromControlDecision({
+    conversationId: "thread-progressive",
+    request: "What is in the page 15 table?",
+    decision: controlDecision,
+    sourceSignals: [],
+  });
   const progressiveAssembly = {
     plan: {
       id: "assembly:decision-1",
       controlDecisionId: "decision-1",
+      agentWorkPlanId: agentWorkPlan.planId,
+      agentWorkPlanTraceId: agentWorkPlan.traceId,
       passes: [
         { name: "artifact_reuse", status: "completed" },
         { name: "raw_source_excerpt_expansion", status: "completed" },
@@ -300,16 +317,40 @@ await runTest("maps progressive assembly metadata into the debug trace", async (
       },
     ],
     gaps: [{ id: "missing_table_body:doc-t5:artifact", kind: "missing_table_body" }],
-    sufficiency: { status: "sufficient_with_limitations" },
+    sufficiency: {
+      status: "sufficient_with_limitations",
+      readyForAnswer: true,
+      confidence: 0.72,
+      reasons: ["Existing artifacts support a limited answer."],
+      limitations: ["OCR was not executed."],
+    },
     stopReason: "sufficient_context",
     recommendedNextAction: "answer_with_limitations",
+    contextTransport: {
+      plan: {
+        planId: "context-transport:decision-1",
+        agentWorkPlanId: agentWorkPlan.planId,
+        agentWorkPlanTraceId: agentWorkPlan.traceId,
+      },
+      debugSnapshot: {
+        missingContextLaneProposals: [
+          { id: "missing-lane:ocr_text", missingPayloadType: "ocr_text" },
+        ],
+        modelCapabilityManifestUsed: {
+          acceptedPayloadTypes: ["text_excerpt", "knowledge_artifact"],
+          unavailableLanes: [
+            { laneId: "ocr_lane", payloadTypes: ["ocr_text"], reason: "No OCR lane is executable in this pass." },
+          ],
+        },
+      },
+    },
     traceEvents: [{ type: "sufficiency_assessed" }],
   };
   const trace = buildConversationContextDebugTrace({
     conversationId: "thread-progressive",
     authority: makeAuthority(),
     currentUserPrompt: "What is in the page 15 table?",
-    bundle: makeBundle({ progressiveAssembly }),
+    bundle: makeBundle({ agentWorkPlan, progressiveAssembly }),
   });
 
   assert.deepEqual(
@@ -321,6 +362,15 @@ await runTest("maps progressive assembly metadata into the debug trace", async (
     ["doc-t5:artifact:table_candidate:15"]
   );
   assert.equal(trace.assembly.progressive.sufficiency.status, "sufficient_with_limitations");
+  assert.equal(trace.agentWorkPlan.planId, agentWorkPlan.planId);
+  assert.equal(trace.agentWorkPlan.budgetMode, agentWorkPlan.budget.mode);
+  assert.equal(trace.agentWorkPlan.answerReadiness.status, "ready_with_limitations");
+  assert.equal(trace.agentWorkPlan.plannerEvaluator.noLlmPlanningExecuted, true);
+  assert.equal(trace.agentWorkPlan.modelCapabilitySummary.acceptedPayloadTypes.includes("text_excerpt"), true);
+  assert.equal(trace.agentWorkPlan.modelCapabilitySummary.unavailablePayloadTypes.includes("ocr_text"), true);
+  assert.equal(trace.agentWorkPlan.unavailableLanes.includes("ocr_lane"), true);
+  assert.equal(trace.agentWorkPlan.scopedPlanLinks.assemblyPlanId, "assembly:decision-1");
+  assert.equal(trace.agentWorkPlan.scopedPlanLinks.transportPlanId, "context-transport:decision-1");
   assert.equal(trace.renderedContext.text, null);
 });
 

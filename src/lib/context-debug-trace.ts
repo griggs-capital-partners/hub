@@ -15,6 +15,8 @@ import type {
   ContextDebugInspectionTask,
   ContextDebugKnowledgeArtifact,
   ContextDebugTrace,
+  AgentWorkPlan,
+  AgentWorkPlanDebugSummary,
   ContextLocation,
   ContextSelectionReason,
   ContextSourceEligibility,
@@ -36,6 +38,7 @@ type BuildConversationContextDebugTraceParams = {
     ConversationContextBundle,
     "text" | "sourceSelection" | "sourceDecisions" | "documentChunking" | "documentIntelligence" | "progressiveAssembly"
   > & {
+    agentWorkPlan?: AgentWorkPlan | null;
     agentControl?: AgentControlDebugSnapshot | null;
     asyncAgentWork?: AsyncAgentWorkDebugSnapshot | null;
     contextRegistry?: ContextRegistryDebugSnapshot | null;
@@ -842,6 +845,77 @@ function buildInspectorParityKey(params: {
   ].join("|");
 }
 
+function unique<T>(values: T[]): T[] {
+  return Array.from(new Set(values));
+}
+
+function buildAgentWorkPlanDebugSummary(params: {
+  agentWorkPlan?: AgentWorkPlan | null;
+  progressiveAssembly?: ConversationContextBundle["progressiveAssembly"] | null;
+}): AgentWorkPlanDebugSummary | null {
+  const workPlan = params.agentWorkPlan;
+  if (!workPlan) return null;
+
+  const transport = params.progressiveAssembly?.contextTransport?.debugSnapshot ?? null;
+  const manifest = transport?.modelCapabilityManifestUsed ?? null;
+  const transportUnavailablePayloads =
+    transport?.missingContextLaneProposals?.map((lane) => lane.missingPayloadType) ?? [];
+  const manifestUnavailablePayloads =
+    manifest?.unavailableLanes?.flatMap((lane) => lane.payloadTypes) ?? [];
+
+  return {
+    planId: workPlan.planId,
+    traceId: workPlan.traceId,
+    budgetMode: workPlan.budget.mode,
+    answerReadiness: params.progressiveAssembly
+      ? {
+          status: params.progressiveAssembly.sufficiency.readyForAnswer
+            ? params.progressiveAssembly.sufficiency.status === "sufficient"
+              ? "ready"
+              : "ready_with_limitations"
+            : params.progressiveAssembly.sufficiency.status === "blocked_by_policy"
+              ? "blocked"
+              : params.progressiveAssembly.sufficiency.status === "insufficient_needs_approval"
+                ? "approval_required"
+                : params.progressiveAssembly.sufficiency.status === "insufficient_needs_async"
+                  ? "async_recommended"
+                  : "not_ready",
+          readyForAnswer: params.progressiveAssembly.sufficiency.readyForAnswer,
+          confidence: params.progressiveAssembly.sufficiency.confidence,
+          reasons: params.progressiveAssembly.sufficiency.reasons,
+          limitations: params.progressiveAssembly.sufficiency.limitations,
+        }
+      : workPlan.answerReadiness,
+    plannerEvaluator: workPlan.plannerEvaluator,
+    modelCapabilitySummary: {
+      needs: workPlan.modelCapabilityNeeds,
+      acceptedPayloadTypes: manifest?.acceptedPayloadTypes ?? workPlan.modelCapabilityNeeds.flatMap((need) => need.acceptedPayloadTypes),
+      unavailablePayloadTypes: unique([
+        ...workPlan.modelCapabilityNeeds.flatMap((need) => need.unavailablePayloadTypes),
+        ...manifestUnavailablePayloads,
+        ...transportUnavailablePayloads,
+      ]),
+    },
+    sourceNeeds: workPlan.sourceNeeds,
+    capabilityNeeds: workPlan.capabilityNeeds,
+    unavailableLanes: unique([
+      ...(transport?.missingContextLaneProposals?.map((lane) => lane.id) ?? []),
+      ...(manifest?.unavailableLanes?.map((lane) => lane.laneId) ?? []),
+    ]),
+    asyncRecommendation: workPlan.asyncRecommendation,
+    truthfulLimitations: workPlan.truthfulLimitations,
+    scopedPlanLinks: {
+      ...workPlan.scopedPlanLinks,
+      assemblyPlanId: params.progressiveAssembly?.plan.id ?? workPlan.scopedPlanLinks.assemblyPlanId ?? null,
+      transportPlanId:
+        params.progressiveAssembly?.contextTransport?.plan?.planId ??
+        workPlan.scopedPlanLinks.transportPlanId ??
+        null,
+    },
+    noUnavailableToolExecutionClaimed: true,
+  };
+}
+
 export function buildConversationContextDebugTrace(
   params: BuildConversationContextDebugTraceParams
 ): ContextDebugTrace {
@@ -918,6 +992,10 @@ export function buildConversationContextDebugTrace(
       activeAgentIds: [...params.authority.activeAgentIds],
     },
     budgetProfile: buildBudgetProfile(params.bundle.documentChunking),
+    agentWorkPlan: buildAgentWorkPlanDebugSummary({
+      agentWorkPlan: params.bundle.agentWorkPlan ?? params.bundle.progressiveAssembly?.agentWorkPlan ?? null,
+      progressiveAssembly: params.bundle.progressiveAssembly,
+    }),
     agentControl,
     asyncAgentWork: params.bundle.asyncAgentWork ?? null,
     contextRegistry: params.bundle.contextRegistry ?? null,

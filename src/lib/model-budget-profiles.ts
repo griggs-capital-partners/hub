@@ -2,7 +2,13 @@ import type {
   AgentLlmConnectionProtocol,
   AgentLlmProvider,
 } from "./agent-llm-config";
-import { type ContextBudgetMode } from "./context-token-budget";
+import {
+  CONTEXT_BUDGET_MODES,
+  DEFAULT_CONTEXT_PROMPT_CACHE_STRATEGY,
+  type ContextBudgetMode,
+  type ContextCompactionStrategy,
+  type ContextPromptCacheStrategy,
+} from "./context-token-budget";
 import { CHAT_REPLY_MAX_OUTPUT_TOKENS } from "./chat-runtime-budgets";
 
 type BudgetProfileProvider = AgentLlmProvider | "unknown";
@@ -26,7 +32,18 @@ export type ModelBudgetProfile = {
   reservedResponseTokens: number;
   standardContextBudgetTokens: number;
   deepContextBudgetTokens: number;
+  auditContextBudgetTokens: number;
+  asyncDeepWorkContextBudgetTokens: number;
+  budgetModeDefaults: Record<ContextBudgetMode, ModelBudgetModeDefault>;
   notes: string;
+};
+
+export type ModelBudgetModeDefault = {
+  mode: ContextBudgetMode;
+  contextBudgetTokens: number;
+  maxOutputTokens: number;
+  compactionStrategies: ContextCompactionStrategy[];
+  promptCache: ContextPromptCacheStrategy;
 };
 
 function normalizeProvider(value: string | null | undefined): BudgetProfileProvider {
@@ -50,17 +67,82 @@ function normalizeModel(value: string | null | undefined) {
 }
 
 function buildProfile(
-  profile: Omit<ModelBudgetProfile, "maxOutputTokens" | "reservedResponseTokens"> & {
+  profile: Omit<
+    ModelBudgetProfile,
+    | "maxOutputTokens"
+    | "reservedResponseTokens"
+    | "auditContextBudgetTokens"
+    | "asyncDeepWorkContextBudgetTokens"
+    | "budgetModeDefaults"
+  > & {
     maxOutputTokens?: number;
     reservedResponseTokens?: number;
+    auditContextBudgetTokens?: number;
+    asyncDeepWorkContextBudgetTokens?: number;
   }
 ) {
-  return {
+  const completedProfile = {
     ...profile,
     maxOutputTokens: profile.maxOutputTokens ?? CHAT_REPLY_MAX_OUTPUT_TOKENS,
     reservedResponseTokens:
       profile.reservedResponseTokens ?? profile.maxOutputTokens ?? CHAT_REPLY_MAX_OUTPUT_TOKENS,
+    auditContextBudgetTokens: profile.auditContextBudgetTokens ?? profile.deepContextBudgetTokens,
+    asyncDeepWorkContextBudgetTokens:
+      profile.asyncDeepWorkContextBudgetTokens ?? profile.deepContextBudgetTokens,
+  };
+
+  return {
+    ...completedProfile,
+    budgetModeDefaults: buildBudgetModeDefaults(completedProfile),
   } satisfies ModelBudgetProfile;
+}
+
+function compactionStrategiesForMode(mode: ContextBudgetMode): ContextCompactionStrategy[] {
+  if (mode === "standard") {
+    return ["artifact_first", "deterministic_pack", "cache_reuse_candidate"];
+  }
+  if (mode === "async_deep_work") {
+    return ["artifact_first", "summary_then_excerpt", "deterministic_pack", "defer_to_async"];
+  }
+  return ["artifact_first", "summary_then_excerpt", "deterministic_pack", "cache_reuse_candidate"];
+}
+
+function buildBudgetModeDefaults(profile: {
+  maxOutputTokens: number;
+  standardContextBudgetTokens: number;
+  deepContextBudgetTokens: number;
+  auditContextBudgetTokens: number;
+  asyncDeepWorkContextBudgetTokens: number;
+}) {
+  return CONTEXT_BUDGET_MODES.reduce<Record<ContextBudgetMode, ModelBudgetModeDefault>>(
+    (defaults, mode) => {
+      defaults[mode] = {
+        mode,
+        contextBudgetTokens: contextBudgetForMode(profile, mode),
+        maxOutputTokens: profile.maxOutputTokens,
+        compactionStrategies: compactionStrategiesForMode(mode),
+        promptCache: DEFAULT_CONTEXT_PROMPT_CACHE_STRATEGY,
+      };
+      return defaults;
+    },
+    {} as Record<ContextBudgetMode, ModelBudgetModeDefault>
+  );
+}
+
+function contextBudgetForMode(
+  profile: Pick<
+    ModelBudgetProfile,
+    | "standardContextBudgetTokens"
+    | "deepContextBudgetTokens"
+    | "auditContextBudgetTokens"
+    | "asyncDeepWorkContextBudgetTokens"
+  >,
+  mode: ContextBudgetMode
+) {
+  if (mode === "deep") return profile.deepContextBudgetTokens;
+  if (mode === "audit") return profile.auditContextBudgetTokens;
+  if (mode === "async_deep_work") return profile.asyncDeepWorkContextBudgetTokens;
+  return profile.standardContextBudgetTokens;
 }
 
 export const MODEL_BUDGET_PROFILES = [
@@ -171,8 +253,7 @@ export function resolveContextBudgetTokens(
   profile: ModelBudgetProfile,
   mode: ContextBudgetMode = "standard"
 ) {
-  const requestedBudget =
-    mode === "deep" ? profile.deepContextBudgetTokens : profile.standardContextBudgetTokens;
+  const requestedBudget = contextBudgetForMode(profile, mode);
   const safeCeiling = Math.max(
     0,
     profile.maxContextTokens -
@@ -181,6 +262,26 @@ export function resolveContextBudgetTokens(
   );
 
   return Math.min(requestedBudget, safeCeiling);
+}
+
+export function resolveModelBudgetModeDefault(
+  profile: ModelBudgetProfile,
+  mode: ContextBudgetMode = "standard"
+) {
+  return {
+    ...profile.budgetModeDefaults[mode],
+    contextBudgetTokens: resolveContextBudgetTokens(profile, mode),
+  } satisfies ModelBudgetModeDefault;
+}
+
+export function resolveModelBudgetModeDefaults(profile: ModelBudgetProfile) {
+  return CONTEXT_BUDGET_MODES.reduce<Record<ContextBudgetMode, ModelBudgetModeDefault>>(
+    (defaults, mode) => {
+      defaults[mode] = resolveModelBudgetModeDefault(profile, mode);
+      return defaults;
+    },
+    {} as Record<ContextBudgetMode, ModelBudgetModeDefault>
+  );
 }
 
 export function resolveModelContextBudget(params: {
@@ -193,5 +294,6 @@ export function resolveModelContextBudget(params: {
     profile,
     mode: params.mode ?? "standard",
     contextBudgetTokens: resolveContextBudgetTokens(profile, params.mode),
+    budgetModeDefault: resolveModelBudgetModeDefault(profile, params.mode ?? "standard"),
   };
 }

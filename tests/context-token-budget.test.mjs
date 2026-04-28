@@ -8,6 +8,7 @@ const __dirname = path.dirname(__filename);
 
 const jiti = createJiti(import.meta.url, { moduleCache: false });
 const {
+  CONTEXT_BUDGET_MODES,
   estimateContextSectionTokens,
   estimateContextSectionsTokens,
   estimateFormattingOverheadTokens,
@@ -16,7 +17,13 @@ const {
   estimateTextTokens,
   estimateThreadMessageTokens,
   estimateThreadMessagesTokens,
+  normalizeContextBudgetMode,
 } = jiti(path.join(__dirname, "..", "src", "lib", "context-token-budget.ts"));
+
+assert.deepEqual(CONTEXT_BUDGET_MODES, ["standard", "deep", "audit", "async_deep_work"]);
+assert.equal(normalizeContextBudgetMode("audit"), "audit");
+assert.equal(normalizeContextBudgetMode("async_deep_work"), "async_deep_work");
+assert.equal(normalizeContextBudgetMode("unknown"), "standard");
 
 assert.equal(estimateTextTokens(""), 0);
 assert.equal(estimateTextTokens("abcd"), 1);

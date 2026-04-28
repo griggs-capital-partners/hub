@@ -247,8 +247,8 @@ runTest("visual inspection debug permits only actually produced rendered and vis
     progressiveAssembly: {
       visualInspection: {
         payloadsProduced: [
-          { id: "visual-payload:rendered-page-15", type: "rendered_page_image" },
-          { id: "visual-payload:vision-15", type: "vision_observation" },
+          { id: "visual-payload:rendered-page-15", type: "rendered_page_image", available: true },
+          { id: "visual-payload:vision-15", type: "vision_observation", available: true },
         ],
         visionObservations: [{ id: "vision:15" }],
       },
@@ -259,6 +259,51 @@ runTest("visual inspection debug permits only actually produced rendered and vis
   assert.equal(snapshot.executedTools.some((entry) => entry.toolId === "model_vision_inspector"), true);
   assert.equal(validateAnswerExecutionClaims("Rendered-page inspection ran and vision inspected page 15.", snapshot).ok, true);
   assertViolation("OCR extracted the page 15 cells.", snapshot, /OCR/);
+});
+
+runTest("planned visual payload support is not treated as rendered or vision execution", () => {
+  const snapshot = buildTruthfulExecutionClaimSnapshot({
+    progressiveAssembly: {
+      visualInspection: {
+        payloadsProduced: [
+          { id: "visual-payload:rendered-page-15", type: "rendered_page_image", available: false },
+          { id: "visual-payload:vision-15", type: "vision_observation", available: false },
+        ],
+        visionObservations: [],
+      },
+    },
+  });
+
+  assert.equal(snapshot.executedTools.some((entry) => entry.toolId === "rendered_page_renderer"), false);
+  assert.equal(snapshot.executedTools.some((entry) => entry.toolId === "model_vision_inspector"), false);
+  assertViolation("Rendered-page inspection ran and vision inspected page 15.", snapshot, /Rendered-page|Vision/);
+});
+
+runTest("AgentWorkPlan capability needs become deferred recommendations not execution evidence", () => {
+  const snapshot = buildTruthfulExecutionClaimSnapshot({
+    debugTrace: {
+      agentWorkPlan: {
+        capabilityNeeds: [
+          {
+            capability: "ocr",
+            state: "deferred",
+          },
+          {
+            capability: "vision_page_understanding",
+            state: "unavailable",
+          },
+        ],
+        truthfulLimitations: [
+          { summary: "OCR and vision are needed but no approved adapter ran." },
+        ],
+      },
+    },
+  });
+
+  assert.equal(snapshot.deferredCapabilities.includes("ocr"), true);
+  assert.equal(snapshot.recommendedCapabilities.includes("vision_page_understanding"), true);
+  assert.equal(snapshot.executedTools.some((entry) => /ocr|vision/i.test(entry.toolId)), false);
+  assert.equal(snapshot.limitations.includes("OCR and vision are needed but no approved adapter ran."), true);
 });
 
 runTest("async work creation is not completed extraction", () => {

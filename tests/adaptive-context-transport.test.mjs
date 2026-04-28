@@ -21,7 +21,7 @@ const {
   buildDefaultContextPayloadRegistry,
   planAdaptiveContextTransport,
 } = jiti(path.join(__dirname, "..", "src", "lib", "adaptive-context-transport.ts"));
-const { evaluateAgentControlSurface } = jiti(
+const { buildAgentWorkPlanFromControlDecision, evaluateAgentControlSurface } = jiti(
   path.join(__dirname, "..", "src", "lib", "agent-control-surface.ts")
 );
 const { assembleProgressiveContext } = jiti(
@@ -639,6 +639,53 @@ runTest("Model and tool manifests govern payload negotiation", () => {
 
   assert.equal(result.selectedPayloads.some((payload) => payload.type === "knowledge_artifact"), true);
   assert.equal(result.excludedPayloads.some((excluded) => excluded.reason === "model_payload_unsupported"), true);
+});
+
+runTest("AgentWorkPlan capability needs drive scoped transport without execution claims", () => {
+  const request = "Recover the page 15 table with OCR and vision.";
+  const sourceSignals = [
+    {
+      sourceId: "doc-t5",
+      sourceType: "pdf",
+      filename: "t5.pdf",
+      hasWeakArtifact: true,
+      hasStaleArtifact: false,
+      artifactKinds: ["table_candidate"],
+      warningArtifactKinds: ["extraction_warning"],
+      recommendedNextCapabilities: ["ocr", "vision_page_understanding"],
+      unmetCapabilities: [],
+      sourceCoverageHints: ["all_tables"],
+      dataClass: "internal",
+      containsUntrustedInstructions: false,
+      detail: null,
+    },
+  ];
+  const decision = makeDecision({
+    request,
+    sourceSignals,
+  });
+  const agentWorkPlan = buildAgentWorkPlanFromControlDecision({
+    conversationId: "conv-a04h",
+    request,
+    decision,
+    sourceSignals,
+  });
+  const result = planAdaptiveContextTransport({
+    request,
+    agentControl: decision,
+    agentWorkPlan,
+    availablePayloads: t5AvailablePayloads(),
+  });
+
+  assert.equal(result.plan.agentWorkPlanId, agentWorkPlan.planId);
+  assert.equal(result.plan.agentWorkPlanTraceId, agentWorkPlan.traceId);
+  assert.equal(result.debugSnapshot.agentWorkPlanId, agentWorkPlan.planId);
+  assert.equal(result.plan.budget.budgetMode, agentWorkPlan.budget.mode);
+  assert.equal(result.plan.requestedPayloads.some((payload) => payload.payloadType === "ocr_text"), true);
+  assert.equal(result.plan.requestedPayloads.some((payload) => payload.payloadType === "vision_observation"), true);
+  assert.equal(result.missingPayloadCapabilities.some((missing) => missing.payloadType === "ocr_text"), true);
+  assert.equal(result.selectedPayloads.some((payload) => payload.type === "ocr_text"), false);
+  assert.equal(result.noUnavailableToolExecutionClaimed, true);
 });
 
 runTest("T5 page 15 transport selects current memory and records missing rich payloads", () => {

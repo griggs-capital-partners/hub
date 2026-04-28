@@ -1,9 +1,24 @@
 import { CHAT_REPLY_MAX_OUTPUT_TOKENS, CHAT_REPLY_REQUEST_TIMEOUT_MS } from "./chat-runtime-budgets";
-import type { ContextBudgetMode } from "./context-token-budget";
+import {
+  DEFAULT_CONTEXT_PROMPT_CACHE_STRATEGY,
+  normalizeContextBudgetMode,
+  type ContextBudgetMode,
+  type ContextCompactionStrategy,
+} from "./context-token-budget";
 import type { InspectionCapability, ToolCostClass } from "./inspection-tool-broker";
+import type {
+  AgentWorkPlan,
+  AgentWorkPlanCapabilityNeed,
+  AgentWorkPlanDecision,
+  AgentWorkPlanLimitation,
+  AgentWorkPlanModelNeed,
+  AgentWorkPlanSourceNeed,
+  AgentWorkPlanStep,
+} from "./context-seams";
 import {
   DEFAULT_MODEL_BUDGET_PROFILE,
   resolveModelBudgetProfile,
+  resolveContextBudgetTokens,
   resolveModelContextBudget,
   type ModelBudgetProfile,
   type ModelBudgetProfileLookup,
@@ -281,6 +296,7 @@ export type AgentControlDecision = {
   decisionId: string;
   taskFidelityLevel: TaskFidelityLevel;
   runtimeBudgetProfile: RuntimeBudgetProfile;
+  budgetMode: ContextBudgetMode;
   budgetExpansionRequest: BudgetExpansionRequest;
   contextBudgetRequest: ContextBudgetRequest;
   outputBudgetRequest: OutputBudgetRequest;
@@ -329,6 +345,20 @@ export type AgentControlDecision = {
 };
 
 export type AgentControlDebugSnapshot = AgentControlDecision;
+
+export type AgentWorkPlanProjectionInput = {
+  conversationId?: string | null;
+  messageId?: string | null;
+  request?: string | null;
+  decision: AgentControlDecision;
+  sourceSignals?: AgentControlSourceSignal[];
+  artifactPromotion?: {
+    candidateCount: number;
+    acceptedCount: number;
+    rejectedCount: number;
+  } | null;
+  scopedPlanLinks?: Partial<AgentWorkPlan["scopedPlanLinks"]>;
+};
 
 type ProfilePlan = {
   contextMultiplier: number;
@@ -800,8 +830,7 @@ function buildBudgetRequests(params: {
     },
     mode: params.mode,
   });
-  const baseContextTokens =
-    params.mode === "deep" ? params.profile.deepContextBudgetTokens : params.profile.standardContextBudgetTokens;
+  const baseContextTokens = resolveContextBudgetTokens(params.profile, params.mode);
   const plan = PROFILE_PLAN[params.runtimeBudgetProfile];
   const requestedContextTokens = Math.ceil(baseContextTokens * plan.contextMultiplier);
   const requestedOutputTokens = Math.ceil(CHAT_REPLY_MAX_OUTPUT_TOKENS * plan.outputMultiplier);
@@ -947,6 +976,388 @@ function deriveExecutionMode(params: {
   return "synchronous" satisfies ExecutionMode;
 }
 
+function workPlanTaskType(fidelity: TaskFidelityLevel) {
+  if (fidelity === "highest_fidelity_ingestion") return "ingestion";
+  if (fidelity === "highest_fidelity_creation") return "creation";
+  if (fidelity === "audit_grade_answer") return "audit";
+  if (fidelity === "deep_inspection") return "inspection";
+  if (fidelity === "fast_answer") return "fast_answer";
+  return "grounded_answer";
+}
+
+function workPlanOutputExpectation(fidelity: TaskFidelityLevel) {
+  if (fidelity === "highest_fidelity_creation") return "deliverable_grade_output";
+  if (fidelity === "audit_grade_answer") return "audit_grade_answer";
+  if (fidelity === "highest_fidelity_ingestion") return "source_memory_and_gap_trace";
+  if (fidelity === "deep_inspection") return "grounded_answer_with_limitations";
+  return "grounded_answer";
+}
+
+function workPlanAnswerReadiness(decision: AgentControlDecision): AgentWorkPlan["answerReadiness"] {
+  if (decision.blockedByPolicy) {
+    return {
+      status: "blocked",
+      readyForAnswer: false,
+      confidence: 0,
+      reasons: decision.blockedByPolicyReasons,
+      limitations: ["Policy blocks the requested execution path."],
+    };
+  }
+
+  if (decision.approvalRequired) {
+    return {
+      status: "approval_required",
+      readyForAnswer: false,
+      confidence: 0.25,
+      reasons: decision.approvalRequiredReasons,
+      limitations: ["Approval is required before expanded execution can run."],
+    };
+  }
+
+  if (decision.asyncRecommended) {
+    return {
+      status: "async_recommended",
+      readyForAnswer: true,
+      confidence: 0.45,
+      reasons: [decision.asyncRecommendedReason ?? "Async or staged work is recommended."],
+      limitations: ["A synchronous answer may need limitations until async deep work runs."],
+    };
+  }
+
+  return {
+    status: decision.defaultBudgetSufficient ? "ready" : "ready_with_limitations",
+    readyForAnswer: true,
+    confidence: decision.defaultBudgetSufficient ? 0.8 : 0.6,
+    reasons: decision.defaultBudgetSufficient
+      ? ["Deterministic control decision stayed within current policy."]
+      : decision.defaultBudgetInsufficiencyReasons,
+    limitations: decision.defaultBudgetInsufficiencyReasons,
+  };
+}
+
+function capabilityPayloadTypes(capability: string) {
+  switch (capability) {
+    case "rendered_page_inspection":
+      return ["rendered_page_image", "page_crop_image"];
+    case "ocr":
+      return ["ocr_text"];
+    case "vision_page_understanding":
+      return ["vision_observation"];
+    case "document_ai_table_recovery":
+      return ["document_ai_result", "structured_table"];
+    case "source_connector_read":
+      return ["native_file_reference"];
+    case "code_repository_inspection":
+      return ["code_analysis_result"];
+    default:
+      return [];
+  }
+}
+
+function capabilityState(decision: AgentControlDecision): AgentWorkPlanCapabilityNeed["state"] {
+  if (decision.blockedByPolicy) return "unavailable";
+  if (decision.approvalRequired) return "approval_required";
+  if (decision.asyncRecommended) return "deferred";
+  return "needed";
+}
+
+function buildCapabilityNeeds(decision: AgentControlDecision): AgentWorkPlanCapabilityNeed[] {
+  const capabilities = unique([
+    ...decision.toolGovernance.recommendedCapabilities,
+    ...decision.toolGovernance.unmetCapabilities,
+    ...decision.externalEscalation.capabilities,
+  ]);
+  return capabilities.map((capability) => ({
+    capability,
+    state: capabilityState(decision),
+    payloadTypes: capabilityPayloadTypes(capability),
+    requiresApproval:
+      decision.approvalRequired ||
+      decision.externalEscalation.level === "approval_required",
+    asyncRecommended: decision.asyncRecommended || decision.externalEscalation.level === "recommended",
+    reason:
+      decision.externalEscalation.capabilities.includes(capability)
+        ? decision.externalEscalation.detail
+        : "Capability was recommended by deterministic control/tool governance.",
+    executionEvidenceIds: [],
+    noExecutionClaimed: true,
+  }));
+}
+
+function buildModelNeed(decision: AgentControlDecision): AgentWorkPlanModelNeed {
+  const request = decision.modelCapabilityRequest;
+  return {
+    capability: request.requestedCapability,
+    state: request.requiresProviderChange
+      ? request.withinPolicy
+        ? "needed"
+        : "approval_required"
+      : "planned",
+    currentProvider: request.currentProvider,
+    currentModel: request.currentModel,
+    currentProfileId: request.currentProfileId,
+    requiresProviderChange: request.requiresProviderChange,
+    acceptedPayloadTypes: [],
+    unavailablePayloadTypes: request.requestedCapability === "long_context" ? ["large_context"] : [],
+    reason: request.reason,
+    noExecutionClaimed: true,
+  };
+}
+
+function buildSourceNeeds(input: AgentWorkPlanProjectionInput): AgentWorkPlanSourceNeed[] {
+  const decision = input.decision;
+  return (input.sourceSignals ?? []).map((signal) => ({
+    sourceId: signal.sourceId,
+    sourceType: signal.sourceType,
+    scope: null,
+    state:
+      signal.hasStaleArtifact || signal.hasWeakArtifact
+        ? decision.approvalRequired
+          ? "approval_required"
+          : decision.asyncRecommended
+            ? "deferred"
+            : "needed"
+        : "planned",
+    coverageTarget: decision.sourceCoverageTarget,
+    reason: signal.detail ?? decision.sourceFreshness.detail,
+    detail:
+      signal.hasStaleArtifact
+        ? "Source has stale artifact memory."
+        : signal.hasWeakArtifact
+          ? "Source has weak or warning artifact memory."
+          : "Source is part of the deterministic context-control scope.",
+    executionEvidenceIds: [],
+  }));
+}
+
+function buildCompactionStrategies(decision: AgentControlDecision): ContextCompactionStrategy[] {
+  const strategies: ContextCompactionStrategy[] = ["artifact_first", "deterministic_pack"];
+  if (
+    decision.taskFidelityLevel === "deep_inspection" ||
+    decision.taskFidelityLevel === "highest_fidelity_ingestion" ||
+    decision.taskFidelityLevel === "highest_fidelity_creation" ||
+    decision.taskFidelityLevel === "audit_grade_answer"
+  ) {
+    strategies.push("summary_then_excerpt");
+  }
+  if (decision.asyncRecommended) {
+    strategies.push("defer_to_async");
+  } else {
+    strategies.push("cache_reuse_candidate");
+  }
+  return unique(strategies);
+}
+
+function buildWorkPlanSteps(decision: AgentControlDecision): {
+  approvedActionsNow: AgentWorkPlanStep[];
+  deferredActions: AgentWorkPlanStep[];
+} {
+  const approvedActionsNow: AgentWorkPlanStep[] = [];
+  const deferredActions: AgentWorkPlanStep[] = [];
+
+  approvedActionsNow.push({
+    id: "resolve_context",
+    label: "Resolve available context through the canonical resolver",
+    owner: "conversation_context",
+    state: "planned",
+    reason: "Resolver-owned context assembly is available inside current policy.",
+    traceEventIds: [],
+  });
+
+  approvedActionsNow.push({
+    id: "assemble_progressive_context",
+    label: "Assemble progressive context and assess sufficiency",
+    owner: "progressive_assembly",
+    state: "planned",
+    reason: "Progressive assembly owns sufficiency decisions.",
+    linkedPlanId: `assembly:${decision.decisionId}`,
+    traceEventIds: [],
+  });
+
+  approvedActionsNow.push({
+    id: "negotiate_adaptive_transport",
+    label: "Negotiate adaptive context transport",
+    owner: "adaptive_transport",
+    state: "planned",
+    reason: "Adaptive transport owns payload compatibility and lane exclusions.",
+    linkedPlanId: `context-transport:${decision.decisionId}`,
+    traceEventIds: [],
+  });
+
+  if (decision.asyncRecommended) {
+    deferredActions.push({
+      id: "async_deep_work",
+      label: "Recommend async deep work",
+      owner: "async_agent_work",
+      state: "deferred",
+      reason: decision.asyncRecommendedReason ?? "Deep work is outside the synchronous path.",
+      traceEventIds: [],
+    });
+  }
+
+  if (decision.externalEscalation.level !== "none") {
+    deferredActions.push({
+      id: "external_capability_expansion",
+      label: "Record missing or gated external capability expansion",
+      owner: "agent_control",
+      state: decision.externalEscalation.level === "approval_required" ? "approval_required" : "deferred",
+      reason: decision.externalEscalation.detail,
+      traceEventIds: [],
+    });
+  }
+
+  return { approvedActionsNow, deferredActions };
+}
+
+function buildWorkPlanDecisions(decision: AgentControlDecision): AgentWorkPlanDecision[] {
+  const traceEventIds = decision.traceEvents.map((event, index) => `agent-control:${index}:${event.type}`);
+  return [
+    {
+      id: "task_classification",
+      type: "classification",
+      state: "planned",
+      reason: decision.taskFidelityLevel,
+      detail: `Task classified as ${decision.taskFidelityLevel}.`,
+      traceEventIds,
+    },
+    {
+      id: "budget_mode",
+      type: "budget",
+      state: decision.approvalRequired ? "approval_required" : "planned",
+      reason: decision.runtimeBudgetProfile,
+      detail: decision.budgetExpansionRequest.detail,
+      traceEventIds,
+    },
+    {
+      id: "truthfulness_boundary",
+      type: "truthfulness",
+      state: "planned",
+      reason: "no_trace_no_claim",
+      detail: "Needed, recommended, unavailable, deferred, and approval-gated capabilities are not execution evidence.",
+      traceEventIds,
+    },
+  ];
+}
+
+function buildWorkPlanLimitations(decision: AgentControlDecision): AgentWorkPlanLimitation[] {
+  return [
+    ...decision.defaultBudgetInsufficiencyReasons.map((summary, index) => ({
+      id: `budget-limitation:${index}`,
+      state: "needed" as const,
+      summary,
+      traceEventIds: [],
+    })),
+    ...decision.externalEscalation.capabilities.map((capability) => ({
+      id: `capability-limitation:${capability}`,
+      state: decision.externalEscalation.level === "approval_required" ? "approval_required" as const : "deferred" as const,
+      summary: `Capability ${capability} is needed or recommended but not executed by this work plan.`,
+      capability,
+      traceEventIds: [],
+    })),
+  ];
+}
+
+export function buildAgentWorkPlanFromControlDecision(
+  input: AgentWorkPlanProjectionInput
+): AgentWorkPlan {
+  const decision = input.decision;
+  const capabilityNeeds = buildCapabilityNeeds(decision);
+  const sourceNeeds = buildSourceNeeds(input);
+  const modelCapabilityNeeds = [buildModelNeed(decision)];
+  const steps = buildWorkPlanSteps(decision);
+  const artifactPromotion = input.artifactPromotion ?? {
+    candidateCount: 0,
+    acceptedCount: 0,
+    rejectedCount: 0,
+  };
+
+  return {
+    planId: `agent-work-plan:${decision.decisionId}`,
+    traceId: `agent-work-trace:${decision.decisionId}`,
+    conversationId: input.conversationId ?? null,
+    messageId: input.messageId ?? null,
+    prompt: {
+      preview: input.request?.slice(0, 240) ?? null,
+      intentClassification: decision.taskFidelityLevel,
+      taskType: workPlanTaskType(decision.taskFidelityLevel),
+      outputExpectation: workPlanOutputExpectation(decision.taskFidelityLevel),
+    },
+    requiredFidelity: decision.taskFidelityLevel,
+    answerReadiness: workPlanAnswerReadiness(decision),
+    sourceCoverageTarget: decision.sourceCoverageTarget,
+    memoryReuse: {
+      state: decision.memoryDensity === "none" ? "unavailable" : "planned",
+      memoryDensity: decision.memoryDensity,
+      memoryRefreshDepth: decision.memoryRefreshDepth,
+      artifactReuseIntent: decision.inspectionDepth === "artifact_reuse_only" ? "planned" : "needed",
+      reason: decision.sourceFreshness.detail,
+    },
+    budget: {
+      mode: decision.budgetMode,
+      runtimeBudgetProfile: decision.runtimeBudgetProfile,
+      contextTokens: {
+        requested: decision.contextBudgetRequest.requestedTokens,
+        granted: decision.contextBudgetRequest.grantedTokens,
+        profileMax: decision.contextBudgetRequest.profileMaxTokens,
+      },
+      outputTokens: {
+        requested: decision.outputBudgetRequest.requestedTokens,
+        granted: decision.outputBudgetRequest.grantedTokens,
+        profileMax: decision.outputBudgetRequest.profileMaxTokens,
+      },
+      toolCalls: {
+        requested: decision.toolBudgetRequest.requestedToolCalls,
+        granted: decision.toolBudgetRequest.grantedToolCalls,
+      },
+      runtimeMs: {
+        requested: decision.runtimeBudgetRequest.requestedMs,
+        granted: decision.runtimeBudgetRequest.grantedMs,
+        syncCutoff: decision.runtimeBudgetRequest.syncCutoffMs,
+      },
+      compactionStrategies: buildCompactionStrategies(decision),
+      promptCache: DEFAULT_CONTEXT_PROMPT_CACHE_STRATEGY,
+    },
+    sourceNeeds,
+    capabilityNeeds,
+    modelCapabilityNeeds,
+    approvedActionsNow: steps.approvedActionsNow,
+    deferredActions: steps.deferredActions,
+    asyncRecommendation: {
+      state: decision.asyncRecommended
+        ? "deferred"
+        : decision.approvalRequired
+          ? "approval_required"
+          : "unavailable",
+      recommended: decision.asyncRecommended,
+      reason: decision.asyncRecommendedReason,
+    },
+    artifactPromotion: {
+      ...artifactPromotion,
+      state: artifactPromotion.candidateCount > 0 ? "planned" : "unavailable",
+      reason:
+        artifactPromotion.candidateCount > 0
+          ? "Artifact promotion candidates were proposed through the existing source-learning seam."
+          : "No artifact promotion candidates are present in this turn-level plan.",
+    },
+    truthfulLimitations: buildWorkPlanLimitations(decision),
+    unavailableCapabilities: capabilityNeeds.filter((need) => need.state === "unavailable"),
+    decisions: buildWorkPlanDecisions(decision),
+    plannerEvaluator: {
+      status: "not_configured",
+      noLlmPlanningExecuted: true,
+      reason: "WP1 records a placeholder only; no bounded LLM planner/evaluator is executed.",
+    },
+    scopedPlanLinks: {
+      agentControlDecisionId: decision.decisionId,
+      assemblyPlanId: `assembly:${decision.decisionId}`,
+      transportPlanId: `context-transport:${decision.decisionId}`,
+      asyncWorkItemId: null,
+      ...input.scopedPlanLinks,
+    },
+    noUnavailableToolExecutionClaimed: true,
+  };
+}
+
 function buildModelCapabilityRequest(params: {
   model: (ModelBudgetProfileLookup & { mode?: ContextBudgetMode | null }) | null | undefined;
   profile: ModelBudgetProfile;
@@ -1030,7 +1441,7 @@ export class AgentControlSurface {
     const lower = request.toLowerCase();
     const modelLookup = input.model ?? null;
     const profile = modelLookup ? resolveModelBudgetProfile(modelLookup) : DEFAULT_MODEL_BUDGET_PROFILE;
-    const mode = modelLookup?.mode ?? "standard";
+    const mode = normalizeContextBudgetMode(modelLookup?.mode, "standard");
     const policy = normalizePolicy(input.policy, profile);
     const policyLimits = buildPolicyLimits(policy, profile);
     const sourceSignals = input.sourceSignals ?? [];
@@ -1324,6 +1735,7 @@ export class AgentControlSurface {
       decisionId: `agent-control:${input.conversationId ?? "runtime"}:${runtimeBudgetProfile}`,
       taskFidelityLevel: fidelity,
       runtimeBudgetProfile,
+      budgetMode: mode,
       budgetExpansionRequest: {
         requestedProfile: requestedRuntimeProfile,
         approvedProfile: approvalRequired || blockedByPolicy ? "approval_required_expansion" : runtimeBudgetProfile,
