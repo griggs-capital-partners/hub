@@ -13,13 +13,16 @@ const {
   buildAgentControlSourceSignalsFromRegistry,
   buildContextRegistryDebugSnapshot,
   buildContextRegistryPackingCandidates,
+  buildDurableEmissionDebugSummary,
+  buildRegistryUpsertsFromAgentWorkPlan,
   buildRegistryUpsertsFromAsyncAgentWork,
+  buildRegistryUpsertsFromContextTransport,
   buildRegistryUpsertsFromProgressiveAssembly,
   buildRegistryUpsertsFromTruthfulExecutionSnapshot,
   mergeContextRegistryBatches,
   upsertTruthfulExecutionRegistryCandidates,
 } = jiti(path.join(__dirname, "..", "src", "lib", "capability-gap-context-debt-registry.ts"));
-const { evaluateAgentControlSurface } = jiti(
+const { buildAgentWorkPlanFromControlDecision, evaluateAgentControlSurface } = jiti(
   path.join(__dirname, "..", "src", "lib", "agent-control-surface.ts")
 );
 const {
@@ -259,6 +262,131 @@ function makeTruthfulSnapshot(overrides = {}) {
   };
 }
 
+function makeTransportResult(overrides = {}) {
+  const payload = {
+    id: "payload-rendered-page",
+    type: "rendered_page_image",
+    payloadClass: "source",
+    label: "Doc B rendered page candidate",
+    sourceId: "doc-b",
+    sourceType: "pdf",
+    representation: "image",
+    text: null,
+    data: null,
+    binaryRef: null,
+    approxTokens: 180,
+    confidence: null,
+    provenance: {
+      sourceId: "doc-b",
+      sourceType: "pdf",
+      sourceDocumentId: "doc-b",
+      location: { pageNumber: 7, locationLabel: "Doc B page 7" },
+    },
+    ownership: { scope: "thread" },
+    policy: {
+      allowedNow: true,
+      requiresApproval: false,
+      restrictions: [],
+      reason: "Test payload.",
+    },
+    persistence: {
+      artifactEligible: false,
+      sourceObservationEligible: false,
+      alreadyPersisted: false,
+      persistenceKey: null,
+    },
+    metadata: { pageNumber: 7 },
+  };
+  const debugSnapshot = {
+    planId: overrides.planId ?? "context-transport:wp2",
+    agentWorkPlanId: overrides.agentWorkPlanId ?? "agent-work-plan:wp2",
+    agentWorkPlanTraceId: overrides.agentWorkPlanTraceId ?? "agent-work-trace:wp2",
+    selectedPayloadIds: [],
+    selectedPayloadTypes: [],
+    excludedPayloads: [
+      {
+        payloadId: payload.id,
+        payloadType: payload.type,
+        requirementId: "req-rendered",
+        reason: "model_payload_unsupported",
+        detail: "Requested model cannot consume rendered page images.",
+        boundary: "model_capability",
+      },
+      {
+        payloadId: payload.id,
+        payloadType: payload.type,
+        requirementId: "req-rendered-budget",
+        reason: "budget_exhausted",
+        detail: "Rendered page payload was excluded because the transport budget was exhausted.",
+        estimatedTokensNeeded: 180,
+        boundary: "a03_budget",
+      },
+    ],
+    missingPayloadCapabilities: [
+      {
+        payloadType: "ocr_text",
+        sourceId: "doc-a",
+        reason: "OCR text payload is needed but unavailable in this runtime.",
+        requiresApproval: false,
+        asyncRecommended: true,
+      },
+    ],
+    missingContextLaneProposals: [
+      {
+        id: "missing-code-analysis-lane",
+        missingPayloadType: "code_analysis_result",
+        candidateContextLanes: ["code_analysis_result"],
+        status: "known_missing",
+        reason: "Code analysis payload lane is cataloged as future tooling only.",
+        boundary: "future_tool_boundary",
+      },
+    ],
+    budgetUsedByPayloadClass: {},
+    relationshipToA03PackingKernel: "transport_wraps_a03",
+    payloadPersistence: {
+      artifactEligiblePayloadIds: [],
+      sourceObservationEligiblePayloadIds: [],
+      alreadyPersistedPayloadIds: [],
+    },
+    catalogDebugSnapshot: null,
+    visualInspectionDebugSnapshot: null,
+    negotiationDecisions: [],
+    modelCapabilityManifestUsed: {
+      manifestId: "model-manifest:test",
+      modelId: "test-model",
+      provider: "test",
+      acceptedPayloadTypes: ["text_excerpt"],
+      preferredRepresentations: ["text"],
+      unavailableLanes: [
+        {
+          laneId: "native_file_lane",
+          payloadTypes: ["native_file_reference"],
+          reason: "Native file payload support is not available for this model.",
+        },
+      ],
+      nativePayloadSupport: [
+        {
+          payloadType: "native_file_reference",
+          supported: false,
+          reason: "Native model file lane unavailable.",
+        },
+      ],
+      capabilityFlags: {},
+      notes: [],
+    },
+    traceEvents: [],
+    noUnavailableToolExecutionClaimed: true,
+  };
+
+  return {
+    plan: {
+      planId: debugSnapshot.planId,
+      availablePayloads: [payload],
+    },
+    debugSnapshot,
+  };
+}
+
 runTest("creates T5 page 15 context debt and capability gaps without claiming unavailable execution", () => {
   const decision = makeDecision();
   const assembly = makeAssembly({ decision });
@@ -301,6 +429,221 @@ runTest("creates T5 page 15 context debt and capability gaps without claiming un
   }
 });
 
+runTest("AgentWorkPlan needs produce durable gap, debt, coverage, async, and attribution candidates", () => {
+  const sourceSignals = [
+    makeSourceSignal({
+      sourceId: "doc-a",
+      filename: "Doc A.pdf",
+      unmetCapabilities: ["ocr", "rendered_page_inspection"],
+      detail: "Doc A needs OCR and rendered page inspection for page-level coverage.",
+    }),
+    makeSourceSignal({
+      sourceId: "doc-b",
+      filename: "Doc B.pdf",
+      unmetCapabilities: ["source_connector_read"],
+      detail: "Doc B needs governed connector retrieval before deep inspection.",
+    }),
+  ];
+  const decision = makeDecision({
+    conversationId: "conv-wp2",
+    request: "Inspect both documents deeply and recover missing table evidence.",
+    sourceSignals,
+    patch: {
+      asyncRecommended: true,
+      asyncRecommendedReason: "The work is too deep for synchronous execution.",
+      executionMode: "async_recommended",
+    },
+  });
+  const workPlan = buildAgentWorkPlanFromControlDecision({
+    conversationId: "conv-wp2",
+    messageId: "msg-wp2",
+    request: "Inspect both documents deeply and recover missing table evidence.",
+    decision,
+    sourceSignals,
+  });
+  const enrichedWorkPlan = {
+    ...workPlan,
+    asyncRecommendation: {
+      state: "deferred",
+      recommended: true,
+      reason: "Async deep work is recommended, but no worker execution is part of WP2.",
+    },
+    capabilityNeeds: [
+      ...workPlan.capabilityNeeds,
+      {
+        capability: "code_repository_inspection",
+        state: "deferred",
+        payloadTypes: ["code_analysis_result"],
+        requiresApproval: false,
+        asyncRecommended: true,
+        reason: "Python/code analysis capability is needed later but unavailable now.",
+        executionEvidenceIds: [],
+        noExecutionClaimed: true,
+      },
+      {
+        capability: "source_connector_read",
+        state: "approval_required",
+        payloadTypes: ["native_file_reference"],
+        requiresApproval: true,
+        asyncRecommended: false,
+        reason: "Connector read needs a governed approval path.",
+        executionEvidenceIds: [],
+        noExecutionClaimed: true,
+      },
+      {
+        capability: "ocr",
+        state: "executed",
+        payloadTypes: ["ocr_text"],
+        requiresApproval: false,
+        asyncRecommended: false,
+        reason: "Executed-only capability needs must not become proposal records.",
+        executionEvidenceIds: ["tool:ocr-test"],
+        noExecutionClaimed: true,
+      },
+    ],
+    modelCapabilityNeeds: [
+      {
+        ...workPlan.modelCapabilityNeeds[0],
+        capability: "native_file_payload_support",
+        state: "unavailable",
+        requiresProviderChange: true,
+        acceptedPayloadTypes: ["text_excerpt"],
+        unavailablePayloadTypes: ["native_file_reference", "rendered_page_image"],
+        reason: "The current model profile cannot consume native files or rendered page images.",
+      },
+    ],
+    truthfulLimitations: [
+      ...workPlan.truthfulLimitations,
+      {
+        id: "truthful-python-needed",
+        state: "deferred",
+        summary: "Python analysis is needed later, but no Python execution occurred.",
+        capability: "code_repository_inspection",
+        sourceId: "doc-b",
+        traceEventIds: [],
+      },
+    ],
+  };
+
+  const batch = buildRegistryUpsertsFromAgentWorkPlan({
+    conversationId: "conv-wp2",
+    conversationDocumentId: null,
+    asyncState: "recommended",
+    agentWorkPlan: enrichedWorkPlan,
+    conversationDocumentIdsBySourceId: {
+      "doc-a": "doc-a",
+      "doc-b": "doc-b",
+    },
+  });
+
+  assert.ok(batch.contextDebtRecords.some((debt) => debt.kind === "async_required"));
+  assert.ok(batch.contextDebtRecords.some((debt) => debt.evidence.truthfulLimitation?.id === "truthful-python-needed"));
+  assert.ok(batch.capabilityGapRecords.some((gap) => gap.kind === "missing_connector"));
+  assert.ok(batch.capabilityGapRecords.some((gap) => gap.neededCapability === "code_repository_inspection"));
+  assert.ok(batch.capabilityGapRecords.some((gap) => gap.missingPayloadType === "native_file_reference"));
+  assert.ok(batch.capabilityGapRecords.every((gap) => gap.evidence.capabilityNeed?.state !== "executed"));
+  assert.ok(batch.sourceCoverageRecords.some((record) => record.conversationDocumentId === "doc-a"));
+  assert.ok(batch.sourceCoverageRecords.some((record) => record.conversationDocumentId === "doc-b"));
+  assert.ok(batch.sourceCoverageRecords.every((record) => record.coverageStatus !== "inspected"));
+  assert.ok(batch.sourceCoverageRecords.every((record) => record.inspectedBy.length === 0));
+  assert.ok(batch.contextDebtRecords.every((debt) => debt.evidence.executionClaimed !== true));
+  assert.ok(batch.capabilityGapRecords.every((gap) => gap.evidence.executionClaimed === false));
+});
+
+runTest("ContextTransport missing lanes and model incompatibilities produce durable proposal candidates", () => {
+  const batch = buildRegistryUpsertsFromContextTransport({
+    conversationId: "conv-wp2-transport",
+    conversationDocumentId: null,
+    transport: makeTransportResult(),
+    conversationDocumentIdsBySourceId: {
+      "doc-a": "doc-a",
+      "doc-b": "doc-b",
+    },
+  });
+
+  const ocrGap = batch.capabilityGapRecords.find((gap) => gap.missingPayloadType === "ocr_text");
+  assert.ok(ocrGap);
+  assert.equal(ocrGap.conversationDocumentId, "doc-a");
+  assert.equal(ocrGap.status, "detected");
+  assert.equal(ocrGap.evidence.executionClaimed, false);
+
+  const modelGap = batch.capabilityGapRecords.find((gap) => gap.missingModelCapability === "accepts:rendered_page_image");
+  assert.ok(modelGap);
+  assert.equal(modelGap.conversationDocumentId, "doc-b");
+  assert.equal(modelGap.kind, "missing_model_capability");
+
+  assert.ok(batch.capabilityGapRecords.some((gap) => gap.missingPayloadType === "code_analysis_result"));
+  assert.ok(batch.capabilityGapRecords.some((gap) => gap.missingPayloadType === "native_file_reference"));
+  assert.ok(batch.contextDebtRecords.some((debt) => debt.sourceLocator.pageNumber === 7));
+  assert.ok(batch.contextDebtRecords.every((debt) => debt.evidence.executionClaimed === false));
+});
+
+runTest("durable emission summary reports merged, deduped, source-linked, and ambiguous candidates", () => {
+  const sourceSignals = [
+    makeSourceSignal({
+      sourceId: "doc-a",
+      unmetCapabilities: ["ocr"],
+      detail: "Doc A still needs OCR.",
+    }),
+  ];
+  const decision = makeDecision({
+    conversationId: "conv-wp2-summary",
+    sourceSignals,
+    patch: {
+      asyncRecommended: true,
+      asyncRecommendedReason: "Async follow-up is useful.",
+      executionMode: "async_recommended",
+    },
+  });
+  const workPlan = buildAgentWorkPlanFromControlDecision({
+    conversationId: "conv-wp2-summary",
+    request: "Recover table body.",
+    decision,
+    sourceSignals,
+  });
+  const agentBatch = buildRegistryUpsertsFromAgentWorkPlan({
+    conversationId: "conv-wp2-summary",
+    agentWorkPlan: workPlan,
+    conversationDocumentIdsBySourceId: { "doc-a": "doc-a" },
+  });
+  const transportBatch = buildRegistryUpsertsFromContextTransport({
+    conversationId: "conv-wp2-summary",
+    transport: makeTransportResult(),
+    conversationDocumentIdsBySourceId: { "doc-a": "doc-a", "doc-b": "doc-b" },
+  });
+  const sourceBatches = [
+    { source: "agent_work_plan", batch: agentBatch },
+    { source: "adaptive_transport", batch: transportBatch },
+  ];
+  const combined = mergeContextRegistryBatches(...sourceBatches.map((entry) => entry.batch));
+  const registry = new InMemoryCapabilityGapContextDebtRegistry();
+  const first = registry.upsertBatch(combined);
+  const firstSummary = buildDurableEmissionDebugSummary({
+    sourceBatches,
+    candidateBatch: combined,
+    persistedSelection: first,
+    priorSelection: EMPTY_CONTEXT_REGISTRY_SELECTION,
+  });
+  const second = registry.upsertBatch(combined);
+  const secondSummary = buildDurableEmissionDebugSummary({
+    sourceBatches,
+    candidateBatch: combined,
+    persistedSelection: second,
+    priorSelection: first,
+  });
+  const debug = buildContextRegistryDebugSnapshot(second, { durableEmission: secondSummary });
+
+  assert.ok(firstSummary.candidateCount > 0);
+  assert.ok(firstSummary.createdOrPersistedCount > 0);
+  assert.ok(secondSummary.updatedOrMergedCount > 0);
+  assert.ok(secondSummary.dedupedOrAlreadyExistingCount > 0);
+  assert.ok(secondSummary.topMissingPayloadLanes.includes("ocr_text"));
+  assert.ok(secondSummary.recordsLinkedToDocumentCount > 0);
+  assert.ok(secondSummary.ambiguousAttributionCount > 0);
+  assert.equal(debug.durableEmission.candidateCount, secondSummary.candidateCount);
+  assert.equal(debug.durableEmission.noUnavailableToolExecutionClaimed, true);
+});
+
 runTest("upserts avoid duplicates and preserve links, async work, source coverage, and open selection", () => {
   const registry = new InMemoryCapabilityGapContextDebtRegistry();
   const decision = makeDecision();
@@ -337,6 +680,42 @@ runTest("upserts avoid duplicates and preserve links, async work, source coverag
   assert.ok(selected.capabilityGapRecords.some((gap) => gap.relatedContextDebtId === selected.contextDebtRecords[0].id));
   assert.ok(selected.sourceCoverageRecords.length >= 1);
   assert.ok(selected.contextDebtRecords[0].deferredCapabilities.includes("ocr"));
+});
+
+runTest("async candidate source coverage remains uninspected without execution evidence", () => {
+  const decision = makeDecision({
+    conversationId: "conv-async-truthful",
+    patch: {
+      asyncRecommended: true,
+      asyncRecommendedReason: "A staged follow-up is recommended.",
+      executionMode: "async_recommended",
+    },
+  });
+  const assembly = makeAssembly({ decision });
+  const queuedItem = createAsyncAgentWorkItemFromProgressiveAssembly({
+    conversationId: "conv-async-truthful",
+    conversationDocumentId: "doc-t5",
+    createdById: "user-1",
+    request: "Inspect the table later.",
+    controlDecision: decision,
+    assembly,
+  });
+  const queuedBatch = buildRegistryUpsertsFromAsyncAgentWork({
+    conversationId: "conv-async-truthful",
+    conversationDocumentId: "doc-t5",
+    item: queuedItem,
+  });
+  const completedWithoutToolsBatch = buildRegistryUpsertsFromAsyncAgentWork({
+    conversationId: "conv-async-truthful",
+    conversationDocumentId: "doc-t5",
+    item: runAsyncAgentWorkItem(queuedItem),
+  });
+
+  assert.ok(queuedBatch.sourceCoverageRecords.length > 0);
+  assert.ok(queuedBatch.sourceCoverageRecords.every((record) => record.coverageStatus !== "inspected"));
+  assert.ok(queuedBatch.sourceCoverageRecords.every((record) => record.inspectedBy.length === 0));
+  assert.ok(completedWithoutToolsBatch.sourceCoverageRecords.every((record) => record.evidence.inspectedCoverageUpdated === false));
+  assert.ok(completedWithoutToolsBatch.sourceCoverageRecords.every((record) => record.inspectedBy.length === 0));
 });
 
 runTest("truthful guard evidence creates debt/gaps and registry evidence feeds later guard snapshots", () => {

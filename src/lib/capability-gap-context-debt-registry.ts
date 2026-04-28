@@ -7,6 +7,12 @@ import type {
   AsyncAgentWorkDebugSnapshot,
   AsyncAgentWorkItem,
 } from "./async-agent-work-queue";
+import type {
+  ContextTransportDebugSnapshot,
+  ContextTransportResult,
+  ContextPayload,
+  ContextTransportExclusion,
+} from "./adaptive-context-transport";
 import type { ContextPackingCandidate } from "./context-packing-kernel";
 import type { InspectionCapability, ToolRuntimeClass } from "./inspection-tool-broker";
 import { prisma } from "./prisma";
@@ -15,6 +21,13 @@ import type {
   ProgressiveContextAssemblyResult,
 } from "./progressive-context-assembly";
 import type { TruthfulExecutionClaimSnapshot } from "./truthful-execution-claim-guard";
+import type {
+  AgentWorkPlan,
+  AgentWorkPlanCapabilityNeed,
+  AgentWorkPlanModelNeed,
+  AgentWorkPlanSourceNeed,
+  AgentWorkPlanState,
+} from "./context-seams";
 
 export type ContextDebtStatus =
   | "open"
@@ -421,7 +434,13 @@ export type SourceCoverageScope =
 export type SourceCoverageTarget = {
   target: AgentControlSourceCoverageTarget | string | null;
   detail: string;
-  requestedBy: "agent_control" | "progressive_assembly" | "async_work" | "truthful_guard";
+  requestedBy:
+    | "agent_control"
+    | "agent_work_plan"
+    | "progressive_assembly"
+    | "adaptive_transport"
+    | "async_work"
+    | "truthful_guard";
 };
 
 export type SourceCoverageRecord = {
@@ -465,10 +484,65 @@ export type SourceCoverageDebugSnapshot = {
   traceEvents: Array<Record<string, unknown>>;
 };
 
+export type DurableEmissionDebugSummary = {
+  candidateCount: number;
+  contextDebtCandidateCount: number;
+  capabilityGapCandidateCount: number;
+  sourceCoverageCandidateCount: number;
+  createdOrPersistedCount: number;
+  updatedOrMergedCount: number;
+  dedupedOrAlreadyExistingCount: number;
+  skippedCount: number;
+  alreadyResolvedCount: number;
+  insufficientEvidenceCount: number;
+  topMissingCapabilities: string[];
+  topMissingPayloadLanes: string[];
+  sourceCoverageGaps: Array<{
+    sourceId: string;
+    conversationDocumentId: string | null;
+    coverageStatus: SourceCoverageStatus;
+    target: string | null;
+  }>;
+  asyncCandidates: Array<{
+    state: string;
+    asyncAgentWorkItemId: string | null;
+    reason: string;
+  }>;
+  recordsLinkedToDocumentCount: number;
+  recordsLinkedToSourceCount: number;
+  conversationLevelRecordCount: number;
+  ambiguousAttributionCount: number;
+  skippedReasons: string[];
+  sourceBatchSummaries: Array<{
+    source: string;
+    contextDebtCandidates: number;
+    capabilityGapCandidates: number;
+    sourceCoverageCandidates: number;
+  }>;
+  noUnavailableToolExecutionClaimed: true;
+};
+
+export type DurableEmissionSourceBatch = {
+  source: string;
+  batch: ContextRegistryUpsertBatch;
+};
+
+export type DurableEmissionSkippedCandidate = {
+  source: string;
+  reason:
+    | "insufficient_evidence"
+    | "already_resolved"
+    | "executed_evidence_present"
+    | "not_actionable"
+    | "empty_candidate";
+  detail: string;
+};
+
 export type ContextRegistryDebugSnapshot = {
   contextDebt: ContextDebtDebugSnapshot;
   capabilityGaps: CapabilityGapDebugSnapshot;
   sourceCoverage: SourceCoverageDebugSnapshot;
+  durableEmission?: DurableEmissionDebugSummary | null;
   noUnavailableToolExecutionClaimed: true;
 };
 
@@ -615,6 +689,27 @@ const EXTERNAL_TABLE_RECOVERY_CAPABILITIES = [
   "document_ai_table_recovery",
 ] as const satisfies InspectionCapability[];
 
+const KNOWN_INSPECTION_CAPABILITIES = new Set<string>([
+  "text_extraction",
+  "pdf_page_classification",
+  "pdf_table_detection",
+  "pdf_table_body_recovery",
+  "rendered_page_inspection",
+  "ocr",
+  "vision_page_understanding",
+  "document_ai_table_recovery",
+  "geometry_layout_extraction",
+  "spreadsheet_inventory",
+  "spreadsheet_formula_map",
+  "docx_structure_extraction",
+  "pptx_slide_inventory",
+  "web_snapshot",
+  "source_connector_read",
+  "code_repository_inspection",
+  "artifact_summarization",
+  "artifact_validation",
+]);
+
 function nowIso(now: () => Date = () => new Date()) {
   return now().toISOString();
 }
@@ -645,6 +740,12 @@ function unique<T>(values: T[]) {
 
 function uniqueStrings(values: Array<string | null | undefined>) {
   return unique(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)));
+}
+
+function uniqueInspectionCapabilities(values: Array<string | null | undefined>): InspectionCapability[] {
+  return uniqueStrings(values).filter((value): value is InspectionCapability =>
+    KNOWN_INSPECTION_CAPABILITIES.has(value)
+  );
 }
 
 function normalizeKeySegment(value: string | null | undefined) {
@@ -1002,6 +1103,38 @@ function capabilityNeedsFromCapability(params: {
     ];
   }
 
+  if (params.capability === "source_connector_read") {
+    return [
+      {
+        ...shared,
+        kind: "missing_connector",
+        missingConnector: "source_connector_read",
+      } satisfies MissingConnectorNeed,
+    ];
+  }
+
+  if (params.capability === "web_snapshot") {
+    return [
+      {
+        ...shared,
+        kind: "missing_tool",
+        missingToolId: "web_snapshot",
+        candidateToolCategories: ["browser_automation", "connector"],
+      } satisfies MissingToolNeed,
+    ];
+  }
+
+  if (params.capability === "code_repository_inspection") {
+    return [
+      {
+        ...shared,
+        kind: "missing_tool",
+        missingToolId: "code_repository_inspection",
+        candidateToolCategories: ["code_sandbox", "connector", "local_sandboxed"],
+      } satisfies MissingToolNeed,
+    ];
+  }
+
   return [
     {
       ...shared,
@@ -1028,6 +1161,8 @@ function resolutionPathsForNeed(need: CapabilityNeed): CapabilityGapResolutionPa
     case "missing_approval_path":
       return ["add_approval_policy", "manual_review_needed"];
     case "missing_budget_profile":
+      return ["add_budget_profile", "manual_review_needed"];
+    case "missing_runtime_mode":
       return ["add_budget_profile", "manual_review_needed"];
     case "missing_validation_capability":
       return ["add_validation_tool", "add_benchmark_fixture"];
@@ -1534,6 +1669,22 @@ function asyncWorkLimitations(item: AsyncAgentWorkItem | AsyncAgentWorkDebugSnap
   return "limitations" in item ? item.limitations : item.result?.limitations ?? item.plan.limitations ?? [];
 }
 
+function asyncWorkExecutedToolIds(item: AsyncAgentWorkItem | AsyncAgentWorkDebugSnapshot) {
+  return "completionState" in item
+    ? item.completionState?.executedToolIds ?? []
+    : item.result?.executedToolIds ?? [];
+}
+
+function sourceCoverageStatusFromAsyncWork(item: AsyncAgentWorkItem | AsyncAgentWorkDebugSnapshot): SourceCoverageStatus {
+  if (asyncWorkExecutedToolIds(item).length > 0) {
+    return item.status === "completed" ? "inspected" : "inspected_with_limitations";
+  }
+  if (item.status === "waiting_for_approval" || item.status === "blocked_by_policy") {
+    return "blocked";
+  }
+  return "uninspected";
+}
+
 export function buildRegistryUpsertsFromAsyncAgentWork(params: {
   conversationId?: string | null;
   conversationDocumentId?: string | null;
@@ -1588,6 +1739,8 @@ export function buildRegistryUpsertsFromAsyncAgentWork(params: {
     (item.sourceLinks ?? []).map((link) => {
       const sourceId = link.sourceId;
       const locator = { sourceId, conversationDocumentId: link.conversationDocumentId };
+      const executedToolIds = asyncWorkExecutedToolIds(item);
+      const coverageStatus = sourceCoverageStatusFromAsyncWork(item);
       return {
         coverageKey: buildCoverageKey({
           conversationId,
@@ -1603,13 +1756,16 @@ export function buildRegistryUpsertsFromAsyncAgentWork(params: {
         sourceId,
         sourceScope: "conversation_document",
         sourceLocator: locator,
-        coverageStatus: item.status === "completed" ? "inspected" : "inspected_with_limitations",
+        coverageStatus,
         coverageTarget: {
           target: link.coverageTarget,
-          detail: "Async work preserved this source coverage target for future registry reuse.",
+          detail:
+            coverageStatus === "inspected" || coverageStatus === "inspected_with_limitations"
+              ? "Async work completed with execution evidence for this source coverage target."
+              : "Async work preserved this source coverage target for future registry reuse without marking it inspected.",
           requestedBy: "async_work",
         },
-        inspectedBy: ["async_agent_work_queue_v1"],
+        inspectedBy: executedToolIds.length > 0 ? ["async_agent_work_queue_v1", ...executedToolIds] : [],
         limitations: asyncWorkLimitations(item),
         relatedDebtIds: link.debtCandidateIds ?? [],
         selectedCandidateCount: 0,
@@ -1617,6 +1773,10 @@ export function buildRegistryUpsertsFromAsyncAgentWork(params: {
         evidence: {
           sourceLink: link,
           asyncAgentWorkItemId: workId,
+          asyncWorkStatus: item.status,
+          executedToolIds,
+          inspectedCoverageUpdated: executedToolIds.length > 0,
+          noUnavailableToolExecutionClaimed: true,
         },
         traceEvents: [
           {
@@ -1716,6 +1876,920 @@ export function buildRegistryUpsertsFromTruthfulExecutionSnapshot(params: {
   return {
     contextDebtRecords: debtInputs,
     capabilityGapRecords: gapInputs,
+    sourceCoverageRecords: [],
+  };
+}
+
+function emptyRegistryBatch(): ContextRegistryUpsertBatch {
+  return {
+    contextDebtRecords: [],
+    capabilityGapRecords: [],
+    sourceCoverageRecords: [],
+  };
+}
+
+function documentIdForSource(params: {
+  fallbackConversationDocumentId?: string | null;
+  conversationDocumentIdsBySourceId?: Record<string, string | null | undefined>;
+  sourceId?: string | null;
+}) {
+  if (params.fallbackConversationDocumentId) return params.fallbackConversationDocumentId;
+  if (!params.sourceId) return null;
+  return params.conversationDocumentIdsBySourceId?.[params.sourceId] ?? null;
+}
+
+function workPlanStateToDebtStatus(state: AgentWorkPlanState): ContextDebtStatus {
+  if (state === "approval_required") return "waiting_for_approval";
+  if (state === "unavailable") return "blocked_by_policy";
+  if (state === "deferred" || state === "planned") return "planned";
+  return "open";
+}
+
+function workPlanStateToGapStatus(state: AgentWorkPlanState, requiresApproval: boolean): CapabilityGapStatus {
+  if (requiresApproval || state === "approval_required") return "review_needed";
+  if (state === "unavailable") return "blocked";
+  if (state === "deferred") return "proposed";
+  if (state === "planned") return "planned";
+  return "detected";
+}
+
+function workPlanStateToSeverity(state: AgentWorkPlanState): ContextDebtSeverity {
+  if (state === "approval_required" || state === "unavailable") return "high";
+  if (state === "deferred") return "medium";
+  return "low";
+}
+
+function coverageStatusFromWorkPlanState(state: AgentWorkPlanState): SourceCoverageStatus {
+  if (state === "approval_required" || state === "unavailable") return "blocked";
+  return "uninspected";
+}
+
+function buildWorkPlanSourceCoverage(params: {
+  conversationId: string | null;
+  conversationDocumentId: string | null;
+  workPlan: AgentWorkPlan;
+  sourceNeed: AgentWorkPlanSourceNeed;
+}): SourceCoverageUpsertInput {
+  const sourceId = params.sourceNeed.sourceId;
+  const target = params.sourceNeed.coverageTarget ?? params.workPlan.sourceCoverageTarget;
+  const locator = {
+    sourceId,
+    conversationDocumentId: params.conversationDocumentId,
+    coverageTarget: target,
+    planId: params.workPlan.planId,
+    sourceNeedState: params.sourceNeed.state,
+    locationLabel: params.sourceNeed.detail ?? params.sourceNeed.reason,
+  };
+  const coverageKey = buildCoverageKey({
+    conversationId: params.conversationId,
+    conversationDocumentId: params.conversationDocumentId,
+    sourceId,
+    target,
+    locator,
+  });
+
+  return {
+    coverageKey,
+    workspaceId: null,
+    conversationId: params.conversationId,
+    conversationDocumentId: params.conversationDocumentId,
+    asyncAgentWorkItemId: null,
+    sourceId,
+    sourceScope: "conversation_document",
+    sourceLocator: locator,
+    coverageStatus: coverageStatusFromWorkPlanState(params.sourceNeed.state),
+    coverageTarget: {
+      target,
+      detail: params.sourceNeed.reason,
+      requestedBy: "agent_work_plan",
+    },
+    inspectedBy: [],
+    limitations: [
+      params.sourceNeed.detail ?? params.sourceNeed.reason,
+      "AgentWorkPlan recorded a coverage need; this does not mark the source as inspected.",
+    ],
+    relatedDebtIds: [],
+    selectedCandidateCount: 0,
+    totalCandidateCount: 0,
+    evidence: {
+      planId: params.workPlan.planId,
+      traceId: params.workPlan.traceId,
+      sourceNeed: params.sourceNeed,
+      asyncState: "not_created",
+      noUnavailableToolExecutionClaimed: true,
+    },
+    traceEvents: [
+      {
+        type: "source_coverage_record_created",
+        timestamp: nowIso(),
+        coverageKey,
+        detail: "Source coverage need materialized from AgentWorkPlan without claiming inspection.",
+      },
+    ],
+  };
+}
+
+function buildWorkPlanSourceDebt(params: {
+  conversationId: string | null;
+  conversationDocumentId: string | null;
+  workPlan: AgentWorkPlan;
+  sourceNeed: AgentWorkPlanSourceNeed;
+}): ContextDebtUpsertInput {
+  const gap = {
+    id: `agent-work-plan:${params.workPlan.planId}:source:${params.sourceNeed.sourceId}:${params.sourceNeed.coverageTarget ?? "coverage"}`,
+    kind: "insufficient_source_coverage",
+    sourceId: params.sourceNeed.sourceId,
+    candidateId: `agent-work-plan-source:${params.sourceNeed.sourceId}:${params.sourceNeed.coverageTarget ?? "coverage"}`,
+    severity: workPlanStateToSeverity(params.sourceNeed.state) === "high" ? "warning" : "info",
+    summary: `Source coverage need: ${params.sourceNeed.coverageTarget ?? params.workPlan.sourceCoverageTarget}`,
+    detail: params.sourceNeed.reason,
+    requiredCapability: null,
+    recommendedCapabilities: [],
+    requiresApproval: params.sourceNeed.state === "approval_required",
+    asyncRecommended: params.sourceNeed.state === "deferred" || params.workPlan.asyncRecommendation.recommended,
+    metadata: {
+      planId: params.workPlan.planId,
+      traceId: params.workPlan.traceId,
+      sourceNeed: params.sourceNeed,
+      noUnavailableToolExecutionClaimed: true,
+    },
+  } satisfies ContextGap;
+
+  return {
+    ...buildContextDebtFromGap({
+      conversationId: params.conversationId,
+      conversationDocumentId: params.conversationDocumentId,
+      gap,
+      candidate: null,
+    }),
+    status: workPlanStateToDebtStatus(params.sourceNeed.state),
+    sourceCoverageTarget: {
+      target: params.sourceNeed.coverageTarget ?? params.workPlan.sourceCoverageTarget,
+      detail: params.sourceNeed.reason,
+      requestedBy: "agent_work_plan",
+    },
+    evidence: {
+      planId: params.workPlan.planId,
+      traceId: params.workPlan.traceId,
+      sourceNeed: params.sourceNeed,
+      executed: false,
+      executionClaimed: false,
+      noUnavailableToolExecutionClaimed: true,
+    },
+  };
+}
+
+function buildWorkPlanCapabilityGaps(params: {
+  conversationId: string | null;
+  conversationDocumentId: string | null;
+  asyncAgentWorkItemId?: string | null;
+  workPlan: AgentWorkPlan;
+  capabilityNeed: AgentWorkPlanCapabilityNeed;
+}): CapabilityGapUpsertInput[] {
+  if (params.capabilityNeed.state === "executed") {
+    return [];
+  }
+
+  return capabilityNeedsFromCapability({
+    capability: params.capabilityNeed.capability,
+    reason: params.capabilityNeed.reason,
+    sourceId: null,
+    requiresApproval:
+      params.capabilityNeed.requiresApproval || params.capabilityNeed.state === "approval_required",
+    asyncRecommended:
+      params.capabilityNeed.asyncRecommended || params.capabilityNeed.state === "deferred",
+  }).map((need) =>
+    buildCapabilityGapFromNeed({
+      conversationId: params.conversationId,
+      conversationDocumentId: params.conversationDocumentId,
+      asyncAgentWorkItemId: params.asyncAgentWorkItemId ?? null,
+      severity: workPlanStateToSeverity(params.capabilityNeed.state),
+      status: workPlanStateToGapStatus(
+        params.capabilityNeed.state,
+        params.capabilityNeed.requiresApproval
+      ),
+      need,
+      evidence: {
+        planId: params.workPlan.planId,
+        traceId: params.workPlan.traceId,
+        capabilityNeed: params.capabilityNeed,
+        workPlanState: params.capabilityNeed.state,
+        payloadTypes: params.capabilityNeed.payloadTypes,
+        executed: false,
+        executionClaimed: false,
+        noUnavailableToolExecutionClaimed: true,
+      },
+    })
+  );
+}
+
+function buildWorkPlanModelGaps(params: {
+  conversationId: string | null;
+  conversationDocumentId: string | null;
+  workPlan: AgentWorkPlan;
+  modelNeed: AgentWorkPlanModelNeed;
+}): CapabilityGapUpsertInput[] {
+  const shouldRecord =
+    params.modelNeed.state !== "executed" &&
+    (params.modelNeed.requiresProviderChange ||
+      params.modelNeed.unavailablePayloadTypes.length > 0 ||
+      params.modelNeed.state === "approval_required" ||
+      params.modelNeed.state === "unavailable" ||
+      params.modelNeed.capability !== "current_model_ok");
+  if (!shouldRecord) {
+    return [];
+  }
+
+  const status = workPlanStateToGapStatus(params.modelNeed.state, params.modelNeed.state === "approval_required");
+  const modelCapabilityGap = buildCapabilityGapFromNeed({
+    conversationId: params.conversationId,
+    conversationDocumentId: params.conversationDocumentId,
+    severity: workPlanStateToSeverity(params.modelNeed.state),
+    status,
+    need: {
+      capability: params.modelNeed.capability,
+      kind: "missing_model_capability",
+      reason: params.modelNeed.reason,
+      sourceId: null,
+      requiresApproval: params.modelNeed.state === "approval_required",
+      asyncRecommended: params.workPlan.asyncRecommendation.recommended,
+      benchmarkFixtureIds: [],
+      missingModelCapability: params.modelNeed.capability,
+      candidateModelCapabilities: [
+        params.modelNeed.capability,
+        ...params.modelNeed.acceptedPayloadTypes,
+      ],
+    } satisfies MissingModelCapabilityNeed,
+    evidence: {
+      planId: params.workPlan.planId,
+      traceId: params.workPlan.traceId,
+      modelNeed: params.modelNeed,
+      executed: false,
+      executionClaimed: false,
+      noUnavailableToolExecutionClaimed: true,
+    },
+  });
+
+  const laneGaps = params.modelNeed.unavailablePayloadTypes.map((payloadType) =>
+    buildCapabilityGapFromNeed({
+      conversationId: params.conversationId,
+      conversationDocumentId: params.conversationDocumentId,
+      severity: "medium",
+      status,
+      need: {
+        capability: `model_payload_lane:${payloadType}`,
+        kind: "missing_context_lane",
+        reason: `Current model profile cannot consume payload type ${payloadType}. ${params.modelNeed.reason}`,
+        sourceId: null,
+        requiresApproval: params.modelNeed.state === "approval_required",
+        asyncRecommended: params.workPlan.asyncRecommendation.recommended,
+        benchmarkFixtureIds: [],
+        missingPayloadType: payloadType,
+        candidateContextLanes: [payloadType],
+      } satisfies MissingContextLaneNeed,
+      evidence: {
+        planId: params.workPlan.planId,
+        traceId: params.workPlan.traceId,
+        modelNeed: params.modelNeed,
+        payloadType,
+        workPlanState: params.modelNeed.state,
+        executed: false,
+        executionClaimed: false,
+        noUnavailableToolExecutionClaimed: true,
+      },
+    })
+  );
+
+  return [modelCapabilityGap, ...laneGaps];
+}
+
+function buildWorkPlanLimitationDebt(params: {
+  conversationId: string | null;
+  conversationDocumentId: string | null;
+  workPlan: AgentWorkPlan;
+  limitation: AgentWorkPlan["truthfulLimitations"][number];
+}): ContextDebtUpsertInput {
+  const sourceId = params.limitation.sourceId ?? null;
+  const gap = {
+    id: `agent-work-plan:${params.workPlan.planId}:limitation:${params.limitation.id}`,
+    kind: "external_escalation_needed",
+    sourceId,
+    candidateId: `agent-work-plan-limitation:${params.limitation.id}`,
+    severity: params.limitation.state === "approval_required" || params.limitation.state === "unavailable"
+      ? "warning"
+      : "info",
+    summary: params.limitation.summary,
+    detail: params.limitation.summary,
+    requiredCapability: null,
+    recommendedCapabilities: uniqueInspectionCapabilities([params.limitation.capability]),
+    requiresApproval: params.limitation.state === "approval_required",
+    asyncRecommended: params.limitation.state === "deferred",
+    metadata: {
+      planId: params.workPlan.planId,
+      traceId: params.workPlan.traceId,
+      limitation: params.limitation,
+      noUnavailableToolExecutionClaimed: true,
+    },
+  } satisfies ContextGap;
+
+  return {
+    ...buildContextDebtFromGap({
+      conversationId: params.conversationId,
+      conversationDocumentId: params.conversationDocumentId,
+      gap,
+      candidate: null,
+    }),
+    status: workPlanStateToDebtStatus(params.limitation.state),
+    evidence: {
+      planId: params.workPlan.planId,
+      traceId: params.workPlan.traceId,
+      truthfulLimitation: params.limitation,
+      executed: false,
+      executionClaimed: false,
+      noUnavailableToolExecutionClaimed: true,
+    },
+  };
+}
+
+function buildWorkPlanAsyncDebt(params: {
+  conversationId: string | null;
+  conversationDocumentId: string | null;
+  asyncAgentWorkItemId?: string | null;
+  asyncState?: string | null;
+  workPlan: AgentWorkPlan;
+}): ContextDebtUpsertInput | null {
+  if (!params.workPlan.asyncRecommendation.recommended) {
+    return null;
+  }
+
+  const locator = {
+    planId: params.workPlan.planId,
+    traceId: params.workPlan.traceId,
+    candidateId: "async_deep_work",
+    locationLabel: "AgentWorkPlan async deep work recommendation",
+  };
+  const debtKey = buildDebtKey({
+    conversationId: params.conversationId,
+    conversationDocumentId: params.conversationDocumentId,
+    sourceId: null,
+    kind: "async_required",
+    locator,
+  });
+  const asyncState = params.asyncState ?? (params.asyncAgentWorkItemId ? "queued" : "recommended");
+
+  return {
+    debtKey,
+    workspaceId: null,
+    conversationId: params.conversationId,
+    conversationDocumentId: params.conversationDocumentId,
+    asyncAgentWorkItemId: params.asyncAgentWorkItemId ?? null,
+    artifactKey: null,
+    sourceId: null,
+    kind: "async_required",
+    status:
+      params.workPlan.asyncRecommendation.state === "approval_required"
+        ? "waiting_for_approval"
+        : params.workPlan.asyncRecommendation.state === "unavailable"
+          ? "blocked_by_policy"
+          : "planned",
+    severity: "medium",
+    sourceScope: "conversation",
+    sourceLocator: locator,
+    title: "Async deep work is recommended",
+    description: params.workPlan.asyncRecommendation.reason ?? "AgentWorkPlan recommends async deep work.",
+    whyItMatters: "Future turns should preserve that this was a recommendation, not completed async execution.",
+    resolutionPath: "create_async_work_item",
+    resolutionPaths: ["create_async_work_item", "manual_review_needed"],
+    deferredCapabilities: [],
+    requiredApprovalReasons:
+      params.workPlan.asyncRecommendation.state === "approval_required" ? ["approval_required"] : [],
+    policyBlockers:
+      params.workPlan.asyncRecommendation.state === "unavailable" ? ["async_unavailable"] : [],
+    sourceCoverageTarget: {
+      target: params.workPlan.sourceCoverageTarget,
+      detail: params.workPlan.asyncRecommendation.reason ?? "Async deep work recommended.",
+      requestedBy: "agent_work_plan",
+    },
+    evidence: {
+      planId: params.workPlan.planId,
+      traceId: params.workPlan.traceId,
+      asyncRecommendation: params.workPlan.asyncRecommendation,
+      asyncState,
+      asyncAgentWorkItemId: params.asyncAgentWorkItemId ?? null,
+      inspectedCoverageUpdated: false,
+      executed: false,
+      executionClaimed: false,
+      noUnavailableToolExecutionClaimed: true,
+    },
+    linkedArtifactKeys: [],
+    traceEvents: [
+      traceDebt("context_debt_created", debtKey, "Async recommendation materialized from AgentWorkPlan without claiming completion."),
+    ],
+  };
+}
+
+export function buildRegistryUpsertsFromAgentWorkPlan(params: {
+  conversationId?: string | null;
+  conversationDocumentId?: string | null;
+  asyncAgentWorkItemId?: string | null;
+  asyncState?: string | null;
+  agentWorkPlan: AgentWorkPlan;
+  conversationDocumentIdsBySourceId?: Record<string, string | null | undefined>;
+}): ContextRegistryUpsertBatch {
+  const conversationId = params.conversationId ?? params.agentWorkPlan.conversationId ?? null;
+  const sourceDebtInputs = params.agentWorkPlan.sourceNeeds
+    .filter((sourceNeed) => sourceNeed.state !== "executed" && sourceNeed.state !== "planned")
+    .map((sourceNeed) => {
+      const conversationDocumentId = documentIdForSource({
+        fallbackConversationDocumentId: params.conversationDocumentId ?? null,
+        conversationDocumentIdsBySourceId: params.conversationDocumentIdsBySourceId,
+        sourceId: sourceNeed.sourceId,
+      });
+      return buildWorkPlanSourceDebt({
+        conversationId,
+        conversationDocumentId,
+        workPlan: params.agentWorkPlan,
+        sourceNeed,
+      });
+    });
+  const sourceCoverageInputs = params.agentWorkPlan.sourceNeeds
+    .filter((sourceNeed) => sourceNeed.state !== "executed" && sourceNeed.state !== "planned")
+    .map((sourceNeed) => {
+      const conversationDocumentId = documentIdForSource({
+        fallbackConversationDocumentId: params.conversationDocumentId ?? null,
+        conversationDocumentIdsBySourceId: params.conversationDocumentIdsBySourceId,
+        sourceId: sourceNeed.sourceId,
+      });
+      return buildWorkPlanSourceCoverage({
+        conversationId,
+        conversationDocumentId,
+        workPlan: params.agentWorkPlan,
+        sourceNeed,
+      });
+    });
+  const capabilityGapInputs = params.agentWorkPlan.capabilityNeeds.flatMap((capabilityNeed) =>
+    buildWorkPlanCapabilityGaps({
+      conversationId,
+      conversationDocumentId: params.conversationDocumentId ?? null,
+      asyncAgentWorkItemId: params.asyncAgentWorkItemId ?? null,
+      workPlan: params.agentWorkPlan,
+      capabilityNeed,
+    })
+  );
+  const modelGapInputs = params.agentWorkPlan.modelCapabilityNeeds.flatMap((modelNeed) =>
+    buildWorkPlanModelGaps({
+      conversationId,
+      conversationDocumentId: params.conversationDocumentId ?? null,
+      workPlan: params.agentWorkPlan,
+      modelNeed,
+    })
+  );
+  const limitationDebtInputs = params.agentWorkPlan.truthfulLimitations
+    .filter((limitation) => limitation.state !== "executed")
+    .map((limitation) =>
+      buildWorkPlanLimitationDebt({
+        conversationId,
+        conversationDocumentId: documentIdForSource({
+          fallbackConversationDocumentId: params.conversationDocumentId ?? null,
+          conversationDocumentIdsBySourceId: params.conversationDocumentIdsBySourceId,
+          sourceId: limitation.sourceId ?? null,
+        }),
+        workPlan: params.agentWorkPlan,
+        limitation,
+      })
+    );
+  const asyncDebt = buildWorkPlanAsyncDebt({
+    conversationId,
+    conversationDocumentId: params.conversationDocumentId ?? null,
+    asyncAgentWorkItemId: params.asyncAgentWorkItemId ?? null,
+    asyncState: params.asyncState ?? null,
+    workPlan: params.agentWorkPlan,
+  });
+
+  return {
+    contextDebtRecords: mergeDebtInputs([
+      ...sourceDebtInputs,
+      ...limitationDebtInputs,
+      ...(asyncDebt ? [asyncDebt] : []),
+    ]),
+    capabilityGapRecords: mergeCapabilityGapInputs([...capabilityGapInputs, ...modelGapInputs]),
+    sourceCoverageRecords: mergeCoverageInputs(sourceCoverageInputs),
+  };
+}
+
+function transportDebugSnapshot(
+  transport: ContextTransportResult | ContextTransportDebugSnapshot
+): ContextTransportDebugSnapshot {
+  return "debugSnapshot" in transport ? transport.debugSnapshot : transport;
+}
+
+function transportPlan(
+  transport: ContextTransportResult | ContextTransportDebugSnapshot
+) {
+  return "plan" in transport ? transport.plan : null;
+}
+
+function transportPayloadById(
+  transport: ContextTransportResult | ContextTransportDebugSnapshot
+) {
+  const plan = transportPlan(transport);
+  return new Map((plan?.availablePayloads ?? []).map((payload) => [payload.id, payload]));
+}
+
+function payloadTypeToCapability(payloadType: string) {
+  switch (payloadType) {
+    case "rendered_page_image":
+    case "page_crop_image":
+      return "rendered_page_inspection";
+    case "ocr_text":
+      return "ocr";
+    case "vision_observation":
+      return "vision_page_understanding";
+    case "document_ai_result":
+    case "structured_table":
+      return "document_ai_table_recovery";
+    case "native_file_reference":
+      return "source_connector_read";
+    case "code_analysis_result":
+      return "code_repository_inspection";
+    case "web_snapshot":
+      return "web_snapshot";
+    default:
+      return `payload_lane:${payloadType}`;
+  }
+}
+
+function transportStatusFromProposal(status: "proposed" | "known_missing" | "unsupported"): CapabilityGapStatus {
+  if (status === "unsupported") return "blocked";
+  if (status === "known_missing") return "detected";
+  return "proposed";
+}
+
+function transportMissingPayloadGap(params: {
+  conversationId: string | null;
+  conversationDocumentId: string | null;
+  transport: ContextTransportResult | ContextTransportDebugSnapshot;
+  payloadType: string;
+  sourceId: string | null;
+  reason: string;
+  requiresApproval: boolean;
+  asyncRecommended: boolean;
+  status?: CapabilityGapStatus;
+  candidateContextLanes?: string[];
+  evidence: Record<string, unknown>;
+}): CapabilityGapUpsertInput {
+  return buildCapabilityGapFromNeed({
+    conversationId: params.conversationId,
+    conversationDocumentId: params.conversationDocumentId,
+    sourceId: params.sourceId,
+    status: params.status ?? (params.requiresApproval ? "review_needed" : "detected"),
+    severity: params.requiresApproval ? "high" : "medium",
+    need: {
+      capability: `payload_lane:${params.payloadType}`,
+      kind: "missing_context_transport",
+      reason: params.reason,
+      sourceId: params.sourceId,
+      requiresApproval: params.requiresApproval,
+      asyncRecommended: params.asyncRecommended,
+      benchmarkFixtureIds: benchmarkFixturesForCapability(payloadTypeToCapability(params.payloadType)),
+      missingPayloadType: params.payloadType,
+      candidateContextLanes: uniqueStrings([
+        params.payloadType,
+        ...(params.candidateContextLanes ?? []),
+      ]),
+    } satisfies MissingContextLaneNeed,
+    evidence: {
+      ...params.evidence,
+      transportPlanId: transportDebugSnapshot(params.transport).planId,
+      executed: false,
+      executionClaimed: false,
+      noUnavailableToolExecutionClaimed: true,
+    },
+  });
+}
+
+function transportModelGap(params: {
+  conversationId: string | null;
+  conversationDocumentId: string | null;
+  transport: ContextTransportResult | ContextTransportDebugSnapshot;
+  payloadType: string;
+  sourceId: string | null;
+  reason: string;
+  evidence: Record<string, unknown>;
+}): CapabilityGapUpsertInput {
+  const snapshot = transportDebugSnapshot(params.transport);
+  return buildCapabilityGapFromNeed({
+    conversationId: params.conversationId,
+    conversationDocumentId: params.conversationDocumentId,
+    sourceId: params.sourceId,
+    status: "review_needed",
+    severity: "medium",
+    need: {
+      capability: `model_payload_support:${params.payloadType}`,
+      kind: "missing_model_capability",
+      reason: params.reason,
+      sourceId: params.sourceId,
+      requiresApproval: false,
+      asyncRecommended: false,
+      benchmarkFixtureIds: [],
+      missingModelCapability: `accepts:${params.payloadType}`,
+      candidateModelCapabilities: [
+        `accepts:${params.payloadType}`,
+        snapshot.modelCapabilityManifestUsed.modelId,
+      ],
+    } satisfies MissingModelCapabilityNeed,
+    evidence: {
+      ...params.evidence,
+      transportPlanId: snapshot.planId,
+      modelManifestId: snapshot.modelCapabilityManifestUsed.manifestId,
+      executed: false,
+      executionClaimed: false,
+      noUnavailableToolExecutionClaimed: true,
+    },
+  });
+}
+
+function transportApprovalGap(params: {
+  conversationId: string | null;
+  conversationDocumentId: string | null;
+  transport: ContextTransportResult | ContextTransportDebugSnapshot;
+  payloadType: string;
+  sourceId: string | null;
+  reason: string;
+  evidence: Record<string, unknown>;
+}): CapabilityGapUpsertInput {
+  return buildCapabilityGapFromNeed({
+    conversationId: params.conversationId,
+    conversationDocumentId: params.conversationDocumentId,
+    sourceId: params.sourceId,
+    status: "review_needed",
+    severity: "high",
+    need: {
+      capability: `approval_path:${params.payloadType}`,
+      kind: "missing_approval_path",
+      reason: params.reason,
+      sourceId: params.sourceId,
+      requiresApproval: true,
+      asyncRecommended: false,
+      benchmarkFixtureIds: [],
+      missingApprovalPath: `payload_transport:${params.payloadType}`,
+    } satisfies MissingApprovalPathNeed,
+    evidence: {
+      ...params.evidence,
+      transportPlanId: transportDebugSnapshot(params.transport).planId,
+      executed: false,
+      executionClaimed: false,
+      noUnavailableToolExecutionClaimed: true,
+    },
+  });
+}
+
+function transportDebtFromExclusion(params: {
+  conversationId: string | null;
+  conversationDocumentId: string | null;
+  transport: ContextTransportResult | ContextTransportDebugSnapshot;
+  exclusion: ContextTransportExclusion;
+  payload: ContextPayload | null;
+}): ContextDebtUpsertInput {
+  const sourceId = params.payload?.sourceId ?? null;
+  const recommendedCapabilities = uniqueInspectionCapabilities([
+    payloadTypeToCapability(params.exclusion.payloadType),
+  ]);
+  const gap = {
+    id: `transport:${transportDebugSnapshot(params.transport).planId}:excluded:${params.exclusion.payloadId ?? params.exclusion.payloadType}:${params.exclusion.reason}`,
+    kind:
+      params.exclusion.reason === "budget_exhausted" ||
+      params.exclusion.reason === "a03_budget_exhausted"
+        ? "excluded_candidate_budget"
+        : "external_escalation_needed",
+    sourceId,
+    candidateId: params.exclusion.payloadId ?? `transport:${params.exclusion.payloadType}:${params.exclusion.reason}`,
+    severity:
+      params.exclusion.reason === "approval_required" ||
+      params.exclusion.reason === "policy_blocked"
+        ? "blocking"
+        : "warning",
+    summary: `Transport excluded ${params.exclusion.payloadType}`,
+    detail: params.exclusion.detail,
+    requiredCapability: recommendedCapabilities[0] ?? null,
+    recommendedCapabilities,
+    budgetTokensNeeded: params.exclusion.estimatedTokensNeeded ?? null,
+    requiresApproval: params.exclusion.reason === "approval_required",
+    asyncRecommended:
+      params.exclusion.reason === "execution_not_available" ||
+      params.exclusion.reason === "non_text_lane_not_executable" ||
+      params.exclusion.boundary === "future_tool_boundary",
+    metadata: {
+      transportPlanId: transportDebugSnapshot(params.transport).planId,
+      exclusion: params.exclusion,
+      payloadProvenance: params.payload?.provenance ?? null,
+      noUnavailableToolExecutionClaimed: true,
+    },
+  } satisfies ContextGap;
+
+  return {
+    ...buildContextDebtFromGap({
+      conversationId: params.conversationId,
+      conversationDocumentId: params.conversationDocumentId,
+      gap,
+      candidate: null,
+    }),
+    sourceLocator: {
+      ...(params.payload?.provenance.location ?? {}),
+      sourceId,
+      payloadId: params.exclusion.payloadId,
+      payloadType: params.exclusion.payloadType,
+      candidateId: params.exclusion.payloadId ?? `transport:${params.exclusion.payloadType}`,
+      locationLabel: params.payload?.label ?? params.exclusion.detail,
+      attributionAmbiguous: sourceId == null,
+    },
+    sourceCoverageTarget: {
+      target: params.exclusion.payloadType,
+      detail: params.exclusion.detail,
+      requestedBy: "adaptive_transport",
+    },
+    evidence: {
+      transportPlanId: transportDebugSnapshot(params.transport).planId,
+      exclusion: params.exclusion,
+      payload: params.payload
+        ? {
+            id: params.payload.id,
+            type: params.payload.type,
+            provenance: params.payload.provenance,
+            metadata: params.payload.metadata,
+          }
+        : null,
+      executed: false,
+      executionClaimed: false,
+      noUnavailableToolExecutionClaimed: true,
+    },
+  };
+}
+
+export function buildRegistryUpsertsFromContextTransport(params: {
+  conversationId?: string | null;
+  conversationDocumentId?: string | null;
+  transport: ContextTransportResult | ContextTransportDebugSnapshot | null | undefined;
+  conversationDocumentIdsBySourceId?: Record<string, string | null | undefined>;
+}): ContextRegistryUpsertBatch {
+  if (!params.transport) {
+    return emptyRegistryBatch();
+  }
+
+  const transport = params.transport;
+  const snapshot = transportDebugSnapshot(transport);
+  const payloadById = transportPayloadById(transport);
+  const conversationId = params.conversationId ?? null;
+  const gapInputs: CapabilityGapUpsertInput[] = [];
+  const debtInputs: ContextDebtUpsertInput[] = [];
+
+  for (const missing of snapshot.missingPayloadCapabilities) {
+    const conversationDocumentId = documentIdForSource({
+      fallbackConversationDocumentId: params.conversationDocumentId ?? null,
+      conversationDocumentIdsBySourceId: params.conversationDocumentIdsBySourceId,
+      sourceId: missing.sourceId,
+    });
+    gapInputs.push(
+      transportMissingPayloadGap({
+        conversationId,
+        conversationDocumentId,
+        transport,
+        payloadType: missing.payloadType,
+        sourceId: missing.sourceId,
+        reason: missing.reason,
+        requiresApproval: missing.requiresApproval,
+        asyncRecommended: missing.asyncRecommended,
+        candidateContextLanes: [],
+        evidence: {
+          missingPayloadCapability: missing,
+          workPlanId: snapshot.agentWorkPlanId ?? null,
+          workPlanTraceId: snapshot.agentWorkPlanTraceId ?? null,
+        },
+      })
+    );
+  }
+
+  for (const proposal of snapshot.missingContextLaneProposals) {
+    gapInputs.push(
+      transportMissingPayloadGap({
+        conversationId,
+        conversationDocumentId: params.conversationDocumentId ?? null,
+        transport,
+        payloadType: proposal.missingPayloadType,
+        sourceId: null,
+        reason: proposal.reason,
+        requiresApproval: false,
+        asyncRecommended: proposal.boundary === "future_tool_boundary",
+        status: transportStatusFromProposal(proposal.status),
+        candidateContextLanes: proposal.candidateContextLanes,
+        evidence: {
+          missingContextLaneProposal: proposal,
+          workPlanId: snapshot.agentWorkPlanId ?? null,
+          workPlanTraceId: snapshot.agentWorkPlanTraceId ?? null,
+        },
+      })
+    );
+  }
+
+  for (const exclusion of snapshot.excludedPayloads) {
+    const payload = exclusion.payloadId ? payloadById.get(exclusion.payloadId) ?? null : null;
+    const conversationDocumentId = documentIdForSource({
+      fallbackConversationDocumentId: params.conversationDocumentId ?? null,
+      conversationDocumentIdsBySourceId: params.conversationDocumentIdsBySourceId,
+      sourceId: payload?.sourceId ?? null,
+    });
+    if (
+      exclusion.reason === "budget_exhausted" ||
+      exclusion.reason === "a03_budget_exhausted" ||
+      exclusion.reason === "execution_not_available" ||
+      exclusion.reason === "non_text_lane_not_executable" ||
+      exclusion.reason === "transport_lane_missing" ||
+      exclusion.reason === "policy_blocked" ||
+      exclusion.reason === "approval_required"
+    ) {
+      debtInputs.push(
+        transportDebtFromExclusion({
+          conversationId,
+          conversationDocumentId,
+          transport,
+          exclusion,
+          payload,
+        })
+      );
+    }
+
+    if (exclusion.reason === "model_payload_unsupported" || exclusion.reason === "representation_unsupported") {
+      gapInputs.push(
+        transportModelGap({
+          conversationId,
+          conversationDocumentId,
+          transport,
+          payloadType: exclusion.payloadType,
+          sourceId: payload?.sourceId ?? null,
+          reason: exclusion.detail,
+          evidence: { exclusion, payloadId: exclusion.payloadId },
+        })
+      );
+    }
+    if (exclusion.reason === "approval_required") {
+      gapInputs.push(
+        transportApprovalGap({
+          conversationId,
+          conversationDocumentId,
+          transport,
+          payloadType: exclusion.payloadType,
+          sourceId: payload?.sourceId ?? null,
+          reason: exclusion.detail,
+          evidence: { exclusion, payloadId: exclusion.payloadId },
+        })
+      );
+    }
+  }
+
+  for (const lane of snapshot.modelCapabilityManifestUsed.unavailableLanes ?? []) {
+    for (const payloadType of lane.payloadTypes) {
+      gapInputs.push(
+        transportMissingPayloadGap({
+          conversationId,
+          conversationDocumentId: params.conversationDocumentId ?? null,
+          transport,
+          payloadType,
+          sourceId: null,
+          reason: lane.reason,
+          requiresApproval: false,
+          asyncRecommended: false,
+          status: "detected",
+          candidateContextLanes: [lane.laneId],
+          evidence: {
+            modelUnavailableLane: lane,
+            modelManifestId: snapshot.modelCapabilityManifestUsed.manifestId,
+          },
+        })
+      );
+    }
+  }
+
+  for (const nativePayload of snapshot.modelCapabilityManifestUsed.nativePayloadSupport ?? []) {
+    if (nativePayload.supported) continue;
+    gapInputs.push(
+      transportModelGap({
+        conversationId,
+        conversationDocumentId: params.conversationDocumentId ?? null,
+        transport,
+        payloadType: nativePayload.payloadType,
+        sourceId: null,
+        reason: nativePayload.reason,
+        evidence: {
+          nativePayloadSupport: nativePayload,
+          modelManifestId: snapshot.modelCapabilityManifestUsed.manifestId,
+        },
+      })
+    );
+  }
+
+  return {
+    contextDebtRecords: mergeDebtInputs(debtInputs),
+    capabilityGapRecords: mergeCapabilityGapInputs(gapInputs),
     sourceCoverageRecords: [],
   };
 }
@@ -2173,6 +3247,148 @@ export function mergeContextRegistrySelections(
   };
 }
 
+function batchCandidateCount(batch: ContextRegistryUpsertBatch) {
+  return batch.contextDebtRecords.length + batch.capabilityGapRecords.length + batch.sourceCoverageRecords.length;
+}
+
+function batchRecordKeys(batch: ContextRegistryUpsertBatch) {
+  return [
+    ...batch.contextDebtRecords.map((record) => `debt:${record.debtKey}`),
+    ...batch.capabilityGapRecords.map((record) => `gap:${record.gapKey}`),
+    ...batch.sourceCoverageRecords.map((record) => `coverage:${record.coverageKey}`),
+  ];
+}
+
+function selectionRecordKeys(selection: ContextRegistrySelection | null | undefined) {
+  return new Set([
+    ...(selection?.contextDebtRecords ?? []).map((record) => `debt:${record.debtKey}`),
+    ...(selection?.capabilityGapRecords ?? []).map((record) => `gap:${record.gapKey}`),
+    ...(selection?.sourceCoverageRecords ?? []).map((record) => `coverage:${record.coverageKey}`),
+  ]);
+}
+
+function frequencyTop(values: string[], max = 8) {
+  const counts = new Map<string, number>();
+  for (const value of values.filter(Boolean)) {
+    counts.set(value, (counts.get(value) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, max)
+    .map(([value]) => value);
+}
+
+function recordHasDocumentLink(record: {
+  conversationDocumentId: string | null;
+}) {
+  return Boolean(record.conversationDocumentId);
+}
+
+function recordHasSourceLink(record: {
+  sourceId?: string | null;
+}) {
+  return Boolean(record.sourceId);
+}
+
+function recordHasAmbiguousAttribution(record: {
+  conversationDocumentId?: string | null;
+  sourceId?: string | null;
+  sourceLocator?: Record<string, unknown>;
+  evidence?: Record<string, unknown>;
+}) {
+  return Boolean(
+    record.sourceLocator?.attributionAmbiguous ||
+    record.evidence?.attributionAmbiguous ||
+    (!record.conversationDocumentId && !record.sourceId)
+  );
+}
+
+export function buildDurableEmissionDebugSummary(params: {
+  sourceBatches?: DurableEmissionSourceBatch[];
+  candidateBatch?: ContextRegistryUpsertBatch | null;
+  persistedSelection?: ContextRegistrySelection | null;
+  priorSelection?: ContextRegistrySelection | null;
+  skipped?: DurableEmissionSkippedCandidate[];
+}): DurableEmissionDebugSummary {
+  const sourceBatches = params.sourceBatches ?? [];
+  const candidateBatch =
+    params.candidateBatch ??
+    (sourceBatches.length > 0
+      ? mergeContextRegistryBatches(...sourceBatches.map((entry) => entry.batch))
+      : emptyRegistryBatch());
+  const rawCandidateCount =
+    sourceBatches.length > 0
+      ? sourceBatches.reduce((sum, entry) => sum + batchCandidateCount(entry.batch), 0)
+      : batchCandidateCount(candidateBatch);
+  const candidateKeys = new Set(batchRecordKeys(candidateBatch));
+  const priorKeys = selectionRecordKeys(params.priorSelection);
+  const persistedKeys = selectionRecordKeys(params.persistedSelection);
+  const persistedCandidateKeys = [...candidateKeys].filter((key) => persistedKeys.has(key));
+  const skipped = params.skipped ?? [];
+  const duplicateCandidateCount = Math.max(0, rawCandidateCount - candidateKeys.size);
+  const alreadyExistingCount = [...candidateKeys].filter((key) => priorKeys.has(key)).length;
+  const allRecords = [
+    ...candidateBatch.contextDebtRecords,
+    ...candidateBatch.capabilityGapRecords,
+    ...candidateBatch.sourceCoverageRecords,
+  ];
+
+  return {
+    candidateCount: candidateKeys.size,
+    contextDebtCandidateCount: candidateBatch.contextDebtRecords.length,
+    capabilityGapCandidateCount: candidateBatch.capabilityGapRecords.length,
+    sourceCoverageCandidateCount: candidateBatch.sourceCoverageRecords.length,
+    createdOrPersistedCount: persistedCandidateKeys.filter((key) => !priorKeys.has(key)).length,
+    updatedOrMergedCount: persistedCandidateKeys.filter((key) => priorKeys.has(key)).length,
+    dedupedOrAlreadyExistingCount: duplicateCandidateCount + alreadyExistingCount,
+    skippedCount: skipped.length,
+    alreadyResolvedCount: skipped.filter((entry) => entry.reason === "already_resolved").length,
+    insufficientEvidenceCount: skipped.filter((entry) => entry.reason === "insufficient_evidence").length,
+    topMissingCapabilities: frequencyTop([
+      ...candidateBatch.capabilityGapRecords.map((record) => record.neededCapability),
+      ...candidateBatch.contextDebtRecords.flatMap((record) => record.deferredCapabilities),
+    ]),
+    topMissingPayloadLanes: frequencyTop([
+      ...candidateBatch.capabilityGapRecords.flatMap((record) =>
+        uniqueStrings([record.missingPayloadType, ...record.candidateContextLanes])
+      ),
+      ...candidateBatch.sourceCoverageRecords.map((record) =>
+        typeof record.coverageTarget.target === "string" ? record.coverageTarget.target : null
+      ).filter((value): value is string => Boolean(value)),
+    ]),
+    sourceCoverageGaps: candidateBatch.sourceCoverageRecords.map((record) => ({
+      sourceId: record.sourceId,
+      conversationDocumentId: record.conversationDocumentId,
+      coverageStatus: record.coverageStatus,
+      target: typeof record.coverageTarget.target === "string" ? record.coverageTarget.target : null,
+    })),
+    asyncCandidates: candidateBatch.contextDebtRecords
+      .filter((record) => record.kind === "async_required" || record.asyncAgentWorkItemId)
+      .map((record) => ({
+        state:
+          typeof record.evidence.asyncState === "string"
+            ? record.evidence.asyncState
+            : record.asyncAgentWorkItemId
+              ? "queued"
+              : "recommended",
+        asyncAgentWorkItemId: record.asyncAgentWorkItemId,
+        reason: record.description,
+      })),
+    recordsLinkedToDocumentCount: allRecords.filter(recordHasDocumentLink).length,
+    recordsLinkedToSourceCount: allRecords.filter(recordHasSourceLink).length,
+    conversationLevelRecordCount: allRecords.filter((record) => !record.conversationDocumentId && !record.sourceId).length,
+    ambiguousAttributionCount: allRecords.filter(recordHasAmbiguousAttribution).length,
+    skippedReasons: uniqueStrings(skipped.map((entry) => `${entry.source}:${entry.reason}:${entry.detail}`)),
+    sourceBatchSummaries: sourceBatches.map((entry) => ({
+      source: entry.source,
+      contextDebtCandidates: entry.batch.contextDebtRecords.length,
+      capabilityGapCandidates: entry.batch.capabilityGapRecords.length,
+      sourceCoverageCandidates: entry.batch.sourceCoverageRecords.length,
+    })),
+    noUnavailableToolExecutionClaimed: true,
+  };
+}
+
 export function buildContextRegistryPackingCandidates(selection: ContextRegistrySelection): ContextPackingCandidate[] {
   const debtCandidates = selection.contextDebtRecords.map((record) => ({
     id: `registry:context-debt:${record.debtKey}`,
@@ -2286,7 +3502,10 @@ export function buildAgentControlSourceSignalsFromRegistry(selection: ContextReg
   });
 }
 
-export function buildContextRegistryDebugSnapshot(selection: ContextRegistrySelection): ContextRegistryDebugSnapshot {
+export function buildContextRegistryDebugSnapshot(
+  selection: ContextRegistrySelection,
+  options: { durableEmission?: DurableEmissionDebugSummary | null } = {}
+): ContextRegistryDebugSnapshot {
   const selectedDebt = selection.contextDebtRecords.filter((record) => !CONTEXT_DEBT_RESOLVED_STATUSES.has(record.status));
   const selectedGaps = selection.capabilityGapRecords.filter((record) => !CAPABILITY_GAP_RESOLVED_STATUSES.has(record.status));
 
@@ -2314,6 +3533,7 @@ export function buildContextRegistryDebugSnapshot(selection: ContextRegistrySele
       records: selection.sourceCoverageRecords,
       traceEvents: selection.sourceCoverageRecords.flatMap((record) => record.traceEvents),
     },
+    durableEmission: options.durableEmission ?? null,
     noUnavailableToolExecutionClaimed: true,
   };
 }

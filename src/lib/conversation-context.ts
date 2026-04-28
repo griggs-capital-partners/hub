@@ -97,12 +97,16 @@ import {
   buildAgentControlSourceSignalsFromRegistry,
   buildContextRegistryDebugSnapshot,
   buildContextRegistryPackingCandidates,
+  buildDurableEmissionDebugSummary,
+  buildRegistryUpsertsFromAgentWorkPlan,
   buildRegistryUpsertsFromAsyncAgentWork,
+  buildRegistryUpsertsFromContextTransport,
   buildRegistryUpsertsFromProgressiveAssembly,
   mergeContextRegistryBatches,
   mergeContextRegistrySelections,
   selectOpenContextRegistryRecords,
   upsertContextRegistryBatch,
+  type DurableEmissionSourceBatch,
   type ContextRegistryDebugSnapshot,
   type ContextRegistrySelection,
   type ContextRegistryUpsertBatch,
@@ -4212,6 +4216,7 @@ export async function resolveConversationContextBundle(params: {
   );
   const persistContextRegistry = dependencies.persistContextRegistry ?? persistDocumentIntelligence;
   const canUseDefaultContextRegistryPersistence = persistContextRegistry && hasContextRegistryPrismaDelegates();
+  let contextRegistryPersistenceSkippedReason: string | null = null;
   const listContextRegistry = dependencies.listContextRegistryRecords ?? (
     canUseDefaultContextRegistryPersistence
       ? async (input: { conversationId: string; conversationDocumentIds: string[]; request?: string | null }) =>
@@ -4223,7 +4228,28 @@ export async function resolveConversationContextBundle(params: {
   );
   const persistContextRegistryBatch = dependencies.upsertContextRegistryRecords ?? (
     canUseDefaultContextRegistryPersistence
-      ? upsertContextRegistryBatch
+      ? async (batch: ContextRegistryUpsertBatch) => {
+          if (
+            batch.contextDebtRecords.length === 0 &&
+            batch.capabilityGapRecords.length === 0 &&
+            batch.sourceCoverageRecords.length === 0
+          ) {
+            return EMPTY_CONTEXT_REGISTRY_SELECTION;
+          }
+          if (!params.conversationId) {
+            contextRegistryPersistenceSkippedReason = "missing_conversation_id";
+            return EMPTY_CONTEXT_REGISTRY_SELECTION;
+          }
+          const conversationExists = await prisma.conversation.findUnique({
+            where: { id: params.conversationId },
+            select: { id: true },
+          });
+          if (!conversationExists) {
+            contextRegistryPersistenceSkippedReason = "conversation_not_persisted";
+            return EMPTY_CONTEXT_REGISTRY_SELECTION;
+          }
+          return upsertContextRegistryBatch(batch);
+        }
       : async () => EMPTY_CONTEXT_REGISTRY_SELECTION
   );
   const requestedSources = resolveRequestedConversationContextSourcePlan(params.sourcePlan);
@@ -4975,28 +5001,86 @@ export async function resolveConversationContextBundle(params: {
     ? await persistAsyncWorkItem(runAsyncAgentWorkItem(asyncWorkItems[0]))
     : null;
   const asyncAgentWork = toAsyncAgentWorkDebugSnapshot(asyncAgentWorkItem);
+  const singleConversationDocumentId = documents.length === 1 ? documents[0].id : null;
+  const emptyContextRegistryBatch = {
+    contextDebtRecords: [],
+    capabilityGapRecords: [],
+    sourceCoverageRecords: [],
+  } satisfies ContextRegistryUpsertBatch;
+  const conversationDocumentIdsBySourceId = Object.fromEntries(
+    documents.map((document) => [document.id, document.id])
+  );
+  const progressiveAssemblyRegistryBatch = buildRegistryUpsertsFromProgressiveAssembly({
+    conversationId: params.conversationId,
+    conversationDocumentId: singleConversationDocumentId,
+    agentControl,
+    assembly: progressiveAssembly,
+  });
+  const agentWorkPlanRegistryBatch = buildRegistryUpsertsFromAgentWorkPlan({
+    conversationId: params.conversationId,
+    conversationDocumentId: singleConversationDocumentId,
+    asyncAgentWorkItemId: asyncAgentWorkItem?.id ?? null,
+    asyncState: asyncAgentWorkItem
+      ? "queued"
+      : agentWorkPlan.asyncRecommendation.recommended
+        ? "recommended"
+        : "not_created",
+    agentWorkPlan,
+    conversationDocumentIdsBySourceId,
+  });
+  const contextTransportRegistryBatch = buildRegistryUpsertsFromContextTransport({
+    conversationId: params.conversationId,
+    conversationDocumentId: singleConversationDocumentId,
+    transport: progressiveAssembly.contextTransport,
+    conversationDocumentIdsBySourceId,
+  });
+  const asyncAgentWorkRegistryBatch = asyncAgentWorkItem
+    ? buildRegistryUpsertsFromAsyncAgentWork({
+        conversationId: params.conversationId,
+        conversationDocumentId: asyncAgentWorkItem.conversationDocumentId,
+        item: asyncAgentWorkItem,
+      })
+    : emptyContextRegistryBatch;
+  const durableEmissionSourceBatches = [
+    {
+      source: "progressive_assembly",
+      batch: progressiveAssemblyRegistryBatch,
+    },
+    {
+      source: "agent_work_plan",
+      batch: agentWorkPlanRegistryBatch,
+    },
+    {
+      source: "adaptive_transport",
+      batch: contextTransportRegistryBatch,
+    },
+    {
+      source: "async_agent_work",
+      batch: asyncAgentWorkRegistryBatch,
+    },
+  ] satisfies DurableEmissionSourceBatch[];
   const contextRegistryUpserts = mergeContextRegistryBatches(
-    buildRegistryUpsertsFromProgressiveAssembly({
-      conversationId: params.conversationId,
-      conversationDocumentId: documents.length === 1 ? documents[0].id : null,
-      agentControl,
-      assembly: progressiveAssembly,
-    }),
-    asyncAgentWorkItem
-      ? buildRegistryUpsertsFromAsyncAgentWork({
-          conversationId: params.conversationId,
-          conversationDocumentId: asyncAgentWorkItem.conversationDocumentId,
-          item: asyncAgentWorkItem,
-        })
-      : {
-          contextDebtRecords: [],
-          capabilityGapRecords: [],
-          sourceCoverageRecords: [],
-        }
+    ...durableEmissionSourceBatches.map((entry) => entry.batch)
   );
   const persistedContextRegistry = await persistContextRegistryBatch(contextRegistryUpserts);
+  const durableEmission = buildDurableEmissionDebugSummary({
+    sourceBatches: durableEmissionSourceBatches,
+    candidateBatch: contextRegistryUpserts,
+    persistedSelection: persistedContextRegistry,
+    priorSelection: openContextRegistry,
+    skipped: contextRegistryPersistenceSkippedReason
+      ? [
+          {
+            source: "registry_persistence",
+            reason: "insufficient_evidence",
+            detail: contextRegistryPersistenceSkippedReason,
+          },
+        ]
+      : undefined,
+  });
   const contextRegistry = buildContextRegistryDebugSnapshot(
-    mergeContextRegistrySelections(openContextRegistry, persistedContextRegistry)
+    mergeContextRegistrySelections(openContextRegistry, persistedContextRegistry),
+    { durableEmission }
   );
   const artifactPromotion = artifactPromotionCandidateCount > 0
     ? {
