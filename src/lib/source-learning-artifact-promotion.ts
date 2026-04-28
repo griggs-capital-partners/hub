@@ -7,21 +7,14 @@ import type {
 } from "./document-intelligence";
 import { buildKnowledgeArtifactSourceLocationLabel } from "./document-intelligence";
 import { joinMarkdownSections } from "./context-formatting";
-
-export type SourceObservationType =
-  | "parser_text_excerpt"
-  | "extracted_text_chunk"
-  | "rendered_page_image"
-  | "page_crop_image"
-  | "ocr_text"
-  | "vision_observation"
-  | "document_ai_result"
-  | "structured_table_observation"
-  | "spreadsheet_range"
-  | "spreadsheet_formula_map"
-  | "connector_file_snapshot"
-  | "tool_observation"
-  | "manual_user_supplied_observation";
+export type {
+  SourceObservationType,
+  SourceObservationPromotionInput as SourceObservation,
+} from "./source-observations";
+import type {
+  SourceObservationPromotionInput as SourceObservation,
+  SourceObservationType,
+} from "./source-observations";
 
 export type ArtifactBucket =
   | "source_summary"
@@ -84,19 +77,6 @@ export type ArtifactMetadata = {
     reason?: string | null;
   };
   supportedByObservation: boolean;
-};
-
-export type SourceObservation = {
-  id: string;
-  type: SourceObservationType;
-  sourceDocumentId: string;
-  sourceVersion: string | null;
-  sourceLocator: ArtifactMetadata["sourceLocator"];
-  content: string;
-  payload: Record<string, unknown> | null;
-  extractionMethod: string;
-  confidence: number | null;
-  limitations: string[];
 };
 
 export type ArtifactPromotionCandidate = {

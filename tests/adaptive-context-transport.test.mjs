@@ -558,6 +558,26 @@ runTest("Existing source memory structures adapt into context payloads", () => {
     sourceObservationPayloads.map((payload) => payload.type).sort(),
     ["source_observation", "text_excerpt"]
   );
+  const sourceObservationTransport = planAdaptiveContextTransport({
+    request: "Use a source observation.",
+    availablePayloads: sourceObservationPayloads,
+    requestedPayloads: [
+      {
+        id: "need:source-observation",
+        payloadType: "source_observation",
+        required: false,
+        reason: "Source observation should be summarized in transport debug.",
+      },
+    ],
+  });
+  assert.equal(
+    sourceObservationTransport.debugSnapshot.sourceObservationSummary?.availablePayloadCount,
+    1
+  );
+  assert.equal(
+    sourceObservationTransport.debugSnapshot.sourceObservationSummary?.selectedObservationIds.includes("obs-page-15-title"),
+    true
+  );
 
   assert.equal(buildContextPayloadsFromKnowledgeArtifacts([makeArtifact()])[0].type, "knowledge_artifact");
   assert.equal(buildContextPayloadsFromContextDebtRecords([makeDebtRecord()])[0].type, "context_debt");

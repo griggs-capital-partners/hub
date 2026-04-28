@@ -545,6 +545,9 @@ await runTest("adds a parallel debug trace without changing the resolver-owned d
   assert.equal(bundle.debugTrace.agentWorkPlan.scopedPlanLinks.assemblyPlanId, bundle.progressiveAssembly.plan.id);
   assert.equal(bundle.debugTrace.agentWorkPlan.scopedPlanLinks.transportPlanId, bundle.progressiveAssembly.contextTransport.plan.planId);
   assert.equal(bundle.debugTrace.agentWorkPlan.plannerEvaluator.noLlmPlanningExecuted, true);
+  assert.equal(bundle.debugTrace.sourceObservations?.totalCompletedObservationCount > 0, true);
+  assert.equal(bundle.debugTrace.sourceObservations?.selectedForTransportCount > 0, true);
+  assert.equal(bundle.debugTrace.sourceObservations?.payloadPreviewSuppressed, true);
   assert.equal(bundle.debugTrace.documents.length, bundle.documentChunking.documents.length);
   assert.deepEqual(
     bundle.debugTrace.documents[0]?.selectedChunkIds,

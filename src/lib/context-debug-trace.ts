@@ -6,6 +6,7 @@ import {
 import type { AsyncAgentWorkDebugSnapshot } from "./async-agent-work-queue";
 import type { ContextRegistryDebugSnapshot } from "./capability-gap-context-debt-registry";
 import type { ArtifactPromotionDebugSnapshot } from "./source-learning-artifact-promotion";
+import type { SourceObservationDebugSummary } from "./source-observations";
 import type {
   ContextBudgetProfile,
   ContextChunkSelection,
@@ -43,6 +44,7 @@ type BuildConversationContextDebugTraceParams = {
     asyncAgentWork?: AsyncAgentWorkDebugSnapshot | null;
     contextRegistry?: ContextRegistryDebugSnapshot | null;
     artifactPromotion?: ArtifactPromotionDebugSnapshot | null;
+    sourceObservations?: SourceObservationDebugSummary | null;
   };
 };
 
@@ -1000,6 +1002,7 @@ export function buildConversationContextDebugTrace(
     asyncAgentWork: params.bundle.asyncAgentWork ?? null,
     contextRegistry: params.bundle.contextRegistry ?? null,
     artifactPromotion: params.bundle.artifactPromotion ?? null,
+    sourceObservations: params.bundle.sourceObservations ?? null,
     sourceEligibility: params.bundle.sourceDecisions.map(buildSourceEligibility),
     documents,
     chunks,

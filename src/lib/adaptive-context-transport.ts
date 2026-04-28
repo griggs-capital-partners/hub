@@ -5,7 +5,6 @@ import {
   type ContextPackingResult,
 } from "./context-packing-kernel";
 import {
-  DEFAULT_CONTEXT_PROMPT_CACHE_STRATEGY,
   estimateTextTokens,
   type ContextBudgetMode,
   type ContextCompactionStrategy,
@@ -27,8 +26,8 @@ import type {
 import type {
   ArtifactPromotionCandidate,
   ArtifactPromotionDecision,
-  SourceObservation,
 } from "./source-learning-artifact-promotion";
+import type { SourceObservation } from "./source-observations";
 import type {
   InspectionCapability,
   ToolCostClass,
@@ -454,6 +453,16 @@ export type ContextTransportDebugSnapshot = {
     sourceObservationEligiblePayloadIds: string[];
     alreadyPersistedPayloadIds: string[];
   };
+  sourceObservationSummary?: {
+    availablePayloadCount: number;
+    selectedPayloadCount: number;
+    excludedPayloadCount: number;
+    selectedObservationIds: string[];
+    excludedObservationIds: string[];
+    cappedOrBudgetExcludedCount: number;
+    countsByObservationType: Record<string, number>;
+    noUnavailableToolExecutionClaimed: true;
+  } | null;
   catalogDebugSnapshot: CatalogDebugSnapshot | null;
   visualInspectionDebugSnapshot: Record<string, unknown> | null;
   traceEvents: ContextTransportTrace[];
@@ -1064,21 +1073,26 @@ export function buildContextPayloadsFromSourceObservations(
   observations: SourceObservation[]
 ): ContextPayload[] {
   return observations.flatMap((observation) => {
+    const sourceDocumentId =
+      observation.sourceDocumentId ?? observation.conversationDocumentId ?? observation.sourceId ?? null;
+    const sourceType = observation.sourceKind ?? "thread_document";
     const shared = {
-      sourceId: observation.sourceDocumentId,
-      sourceType: "thread_document",
+      sourceId: sourceDocumentId,
+      sourceType,
       label: observation.sourceLocator.sourceLocationLabel ?? observation.id,
       text: observation.content,
       data: observation.payload,
       approxTokenCount: estimateTextTokens(observation.content),
       confidence: observation.confidence,
       provenance: {
-        sourceId: observation.sourceDocumentId,
-        sourceType: "thread_document",
-        sourceDocumentId: observation.sourceDocumentId,
+        sourceId: sourceDocumentId,
+        sourceType,
+        sourceDocumentId,
         sourceVersion: observation.sourceVersion,
         location: observation.sourceLocator,
         observationIds: [observation.id],
+        producedByToolId: observation.producer?.producerKind === "tool" ? observation.producer.producerId : null,
+        producedByModelId: observation.producer?.producerKind === "model" ? observation.producer.producerId : null,
         extractionMethod: observation.extractionMethod,
         confidence: observation.confidence,
       },
@@ -1090,6 +1104,9 @@ export function buildContextPayloadsFromSourceObservations(
       },
       metadata: {
         sourceObservationType: observation.type,
+        sourceObservationPayloadKind: observation.payloadKind,
+        sourceObservationProducerKind: observation.producer?.producerKind ?? null,
+        sourceObservationExecutionState: observation.producer?.executionState ?? null,
         limitations: observation.limitations,
       },
     };
@@ -1735,6 +1752,44 @@ function buildBudgetUsedByClass(payloads: ContextPayload[]) {
   }, {});
 }
 
+function buildTransportSourceObservationSummary(params: {
+  availablePayloads: ContextPayload[];
+  selectedPayloads: ContextPayload[];
+  excludedPayloads: ContextTransportExclusion[];
+}): NonNullable<ContextTransportDebugSnapshot["sourceObservationSummary"]> | null {
+  const available = params.availablePayloads.filter((payload) => payload.type === "source_observation");
+  const selected = params.selectedPayloads.filter((payload) => payload.type === "source_observation");
+  const excluded = params.excludedPayloads.filter((payload) => payload.payloadType === "source_observation");
+  if (available.length === 0 && selected.length === 0 && excluded.length === 0) {
+    return null;
+  }
+  const countsByObservationType: Record<string, number> = {};
+  for (const payload of available) {
+    const type =
+      typeof payload.metadata.sourceObservationType === "string"
+        ? payload.metadata.sourceObservationType
+        : "unknown";
+    countsByObservationType[type] = (countsByObservationType[type] ?? 0) + 1;
+  }
+  return {
+    availablePayloadCount: available.length,
+    selectedPayloadCount: selected.length,
+    excludedPayloadCount: excluded.length,
+    selectedObservationIds: selected.flatMap((payload) => payload.provenance.observationIds ?? []),
+    excludedObservationIds: excluded.flatMap((payload) => {
+      const matched = payload.payloadId
+        ? available.find((candidate) => candidate.id === payload.payloadId)
+        : null;
+      return matched?.provenance.observationIds ?? [];
+    }),
+    cappedOrBudgetExcludedCount: excluded.filter((payload) =>
+      payload.reason === "budget_exhausted" || payload.reason === "a03_budget_exhausted"
+    ).length,
+    countsByObservationType,
+    noUnavailableToolExecutionClaimed: true,
+  };
+}
+
 function debugSnapshot(params: {
   plan: ContextTransportPlan;
   selectedPayloads: ContextPayload[];
@@ -1786,6 +1841,11 @@ function debugSnapshot(params: {
         .filter((payload) => payload.persistence.alreadyPersisted)
         .map((payload) => payload.id),
     },
+    sourceObservationSummary: buildTransportSourceObservationSummary({
+      availablePayloads: params.plan.availablePayloads,
+      selectedPayloads: params.selectedPayloads,
+      excludedPayloads: params.excludedPayloads,
+    }),
     catalogDebugSnapshot: params.catalogDebugSnapshot ?? null,
     visualInspectionDebugSnapshot: params.visualInspectionDebugSnapshot ?? null,
     traceEvents: params.traceEvents,

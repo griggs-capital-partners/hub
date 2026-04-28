@@ -72,8 +72,21 @@ import {
   renderSourceMemoryBlocks,
   type ArtifactPromotionCandidate,
   type ArtifactPromotionDebugSnapshot,
-  type SourceObservation,
 } from "./source-learning-artifact-promotion";
+import {
+  buildSourceObservationDebugSummary,
+  buildSourceObservationNeeds,
+  buildSourceObservationsFromDocumentMetadata,
+  buildSourceObservationsFromKnowledgeArtifacts,
+  buildSourceObservationsFromPdfSignals,
+  buildSourceObservationsFromSelectedDocumentChunks,
+  mapSourceObservationToPromotionInput,
+  selectSourceObservationsForTransport,
+  type SourceObservation,
+  type SourceObservationDebugSummary,
+  type SourceObservationPromotionInput,
+  type SourceObservationTransportSelection,
+} from "./source-observations";
 import {
   buildAgentWorkPlanFromControlDecision,
   evaluateAgentControlSurface,
@@ -283,6 +296,7 @@ export type ConversationContextBundle = {
   asyncAgentWork: AsyncAgentWorkDebugSnapshot | null;
   contextRegistry: ContextRegistryDebugSnapshot;
   artifactPromotion: ArtifactPromotionDebugSnapshot | null;
+  sourceObservations: SourceObservationDebugSummary | null;
   debugTrace?: ContextDebugTrace | null;
 };
 
@@ -965,7 +979,7 @@ type ConversationContextResolverDependencies = {
   proposeArtifactPromotionCandidates?: (params: {
     conversationId: string;
     document: ConversationContextDocumentRecord;
-    sourceObservations: SourceObservation[];
+    sourceObservations: SourceObservationPromotionInput[];
     existingArtifacts: DocumentKnowledgeArtifactRecord[];
     currentUserPrompt: string | null;
   }) => Promise<ArtifactPromotionCandidate[]>;
@@ -1735,55 +1749,6 @@ function buildContextRegistrySection(selection: ContextRegistrySelection) {
         ])
       : null,
   ]);
-}
-
-function sourceObservationTypeFromContextKind(contextKind: string): SourceObservation["type"] {
-  if (contextKind === "spreadsheet") return "spreadsheet_range";
-  if (contextKind === "pdf") return "parser_text_excerpt";
-  return "extracted_text_chunk";
-}
-
-function buildSourceObservationsFromChunks(params: {
-  document: ConversationContextDocumentRecord;
-  contextKind: string;
-  chunks: ContextDocumentChunk[];
-}) {
-  return params.chunks.map((chunk) => ({
-    id: `${params.document.id}:chunk:${chunk.chunkIndex}`,
-    type: sourceObservationTypeFromContextKind(params.contextKind),
-    sourceDocumentId: params.document.id,
-    sourceVersion: null,
-    sourceLocator: {
-      pageNumberStart: chunk.pageNumberStart,
-      pageNumberEnd: chunk.pageNumberEnd,
-      pageLabelStart: chunk.pageLabelStart,
-      pageLabelEnd: chunk.pageLabelEnd,
-      tableId: chunk.tableId,
-      figureId: chunk.figureId,
-      sectionPath: [...chunk.sectionPath],
-      headingPath: [...chunk.headingPath],
-      sourceLocationLabel: buildThreadDocumentSourceBodyLocationLabel({
-        filename: params.document.filename,
-        chunk,
-      }),
-      charStart: chunk.charStart,
-      charEnd: chunk.charEnd,
-    },
-    content: chunk.text,
-    payload: {
-      chunkIndex: chunk.chunkIndex,
-      sourceType: chunk.sourceType,
-      visualClassification: chunk.visualClassification,
-      visualClassificationConfidence: chunk.visualClassificationConfidence,
-      visualClassificationReasonCodes: [...chunk.visualClassificationReasonCodes],
-    },
-    extractionMethod: params.contextKind === "pdf" ? "parser_pdf_text_extraction" : "parser_text_extraction",
-    confidence: chunk.visualClassificationConfidence === "high" ? 0.9 : chunk.visualClassificationConfidence === "medium" ? 0.7 : 0.6,
-    limitations:
-      chunk.visualClassification === "true_table"
-        ? ["Parser text observation may not contain structured table rows, columns, or cells."]
-        : ["Observation is extracted text substrate and is not automatically durable source learning."],
-  })) satisfies SourceObservation[];
 }
 
 function normalizeDebtKindLabel(kind: string) {
@@ -4301,6 +4266,8 @@ export async function resolveConversationContextBundle(params: {
   const progressiveArtifactCandidates: ContextPackingCandidate[] = [];
   const progressiveRawExcerptCandidates: ContextPackingCandidate[] = [];
   const progressiveTransportPayloads: ContextPayload[] = [];
+  const completedSourceObservations: SourceObservation[] = [];
+  const sourceObservationTransportSelections: SourceObservationTransportSelection[] = [];
   const artifactPromotionTraces: ArtifactPromotionDebugSnapshot["traces"] = [];
   let artifactPromotionCandidateCount = 0;
   let artifactPromotionAcceptedCount = 0;
@@ -4632,14 +4599,18 @@ export async function resolveConversationContextBundle(params: {
       storedInspectionTasksByDocument.set(document.id, inspectionTasks);
     }
 
-    const sourceObservations = buildSourceObservationsFromChunks({
+    const promotionSourceObservations = buildSourceObservationsFromSelectedDocumentChunks({
       document,
       contextKind,
       chunks: chunkCandidates,
-    });
-    progressiveTransportPayloads.push(
-      ...buildContextPayloadsFromSourceObservations(sourceObservations)
-    );
+      options: {
+        conversationId: params.conversationId,
+        maxObservationsPerDocument: 80,
+        selectedOnly: false,
+      },
+    })
+      .map(mapSourceObservationToPromotionInput)
+      .filter((observation): observation is SourceObservationPromotionInput => Boolean(observation));
     const shouldRunArtifactPromotion =
       Boolean(dependencies.proposeArtifactPromotionCandidates) ||
       Boolean(dependencies.upsertKnowledgeArtifact) ||
@@ -4649,13 +4620,13 @@ export async function resolveConversationContextBundle(params: {
         ? await dependencies.proposeArtifactPromotionCandidates({
             conversationId: params.conversationId,
             document,
-            sourceObservations,
+            sourceObservations: promotionSourceObservations,
             existingArtifacts: learnedArtifacts,
             currentUserPrompt: params.currentUserPrompt ?? null,
           })
         : proposeDeterministicSourceLearningCandidates({
             document,
-            sourceObservations,
+            sourceObservations: promotionSourceObservations,
             currentUserPrompt: params.currentUserPrompt ?? null,
           })
       : [];
@@ -4797,6 +4768,57 @@ export async function resolveConversationContextBundle(params: {
       );
       continue;
     }
+
+    const currentSourceObservations = [
+      ...buildSourceObservationsFromSelectedDocumentChunks({
+        document,
+        contextKind,
+        chunks: selection.selectedChunks,
+        options: {
+          conversationId: params.conversationId,
+          maxObservationsPerDocument: 12,
+        },
+      }),
+      ...buildSourceObservationsFromDocumentMetadata({
+        document,
+        contextKind,
+        sourceMetadata: sourceMetadataWithArtifacts,
+        options: {
+          conversationId: params.conversationId,
+          maxTextPreviewChars: 900,
+        },
+      }),
+      ...(contextKind === "pdf"
+        ? buildSourceObservationsFromPdfSignals({
+            document,
+            extractionMetadata: pdfExtractionMetadata,
+            options: {
+              conversationId: params.conversationId,
+              maxObservationsPerDocument: 8,
+              maxTextPreviewChars: 900,
+            },
+          })
+        : []),
+      ...buildSourceObservationsFromKnowledgeArtifacts({
+        document,
+        artifacts: artifactSelection.selectedArtifacts,
+        options: {
+          conversationId: params.conversationId,
+          maxObservationsPerDocument: 6,
+          maxTextPreviewChars: 900,
+        },
+      }),
+    ];
+    const transportSelection = selectSourceObservationsForTransport({
+      observations: currentSourceObservations,
+      maxObservations: 16,
+      maxObservationsPerDocument: 8,
+    });
+    completedSourceObservations.push(...currentSourceObservations);
+    sourceObservationTransportSelections.push(transportSelection);
+    progressiveTransportPayloads.push(
+      ...buildContextPayloadsFromSourceObservations(transportSelection.selectedObservations)
+    );
 
     const fullyIncluded =
       selection.selectedChunks.length === chunkCandidates.length &&
@@ -5091,6 +5113,24 @@ export async function resolveConversationContextBundle(params: {
         traces: artifactPromotionTraces,
       } satisfies ArtifactPromotionDebugSnapshot
     : null;
+  const sourceObservationSummary = buildSourceObservationDebugSummary({
+    observations: completedSourceObservations,
+    transportSelections: sourceObservationTransportSelections,
+    promotedArtifactCandidateCount: artifactPromotionCandidateCount,
+    observationDerivedGapDebtCandidateCount:
+      contextTransportRegistryBatch.contextDebtRecords.filter((record) =>
+        record.sourceLocator?.payloadType === "source_observation" ||
+        record.sourceCoverageTarget?.target === "source_observation"
+      ).length +
+      contextTransportRegistryBatch.capabilityGapRecords.filter((record) =>
+        record.missingPayloadType === "source_observation"
+      ).length,
+    missingObservationNeeds: buildSourceObservationNeeds({
+      sourceNeeds: agentWorkPlan.sourceNeeds,
+      capabilityNeeds: agentWorkPlan.capabilityNeeds,
+      modelNeeds: agentWorkPlan.modelCapabilityNeeds,
+    }),
+  });
 
   const bundle = {
     text: renderedText,
@@ -5118,6 +5158,7 @@ export async function resolveConversationContextBundle(params: {
     asyncAgentWork,
     contextRegistry,
     artifactPromotion,
+    sourceObservations: sourceObservationSummary,
   };
 
   return {
