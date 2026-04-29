@@ -13,6 +13,7 @@ const {
   buildTruthfulExecutionClaimContext,
   enforceTruthfulExecutionClaims,
   shouldUseBufferedTruthfulExecutionResponse,
+  TRUTHFUL_EXECUTION_CLAIM_SYSTEM_INSTRUCTIONS,
   validateAnswerExecutionClaims,
 } = jiti(path.join(__dirname, "..", "src", "lib", "truthful-execution-claim-guard.ts"));
 
@@ -344,6 +345,12 @@ runTest("runtime prompt context labels executed deferred unavailable and memory 
   assert.match(context, /Unavailable or not execution-enabled capabilities:/);
   assert.match(context, /asyncWorkStatus: completed_with_limitations/);
   assert.match(context, /reused artifact keys: table_candidate:15/);
+});
+
+runTest("producer states are explicitly framed as not execution", () => {
+  assert.match(TRUTHFUL_EXECUTION_CLAIM_SYSTEM_INSTRUCTIONS, /catalog_only, unavailable, missing, approval_required/);
+  assert.match(TRUTHFUL_EXECUTION_CLAIM_SYSTEM_INSTRUCTIONS, /native file lane being planned or cataloged is not evidence/);
+  assert.match(TRUTHFUL_EXECUTION_CLAIM_SYSTEM_INSTRUCTIONS, /table_body_recovery producer request, need, or unresolved result is not a recovered table body/);
 });
 
 runTest("enforcer replaces fake execution claims with a truthful correction", () => {

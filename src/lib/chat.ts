@@ -265,6 +265,22 @@ export type TeamChatRouteParityResult = {
   mismatchReason: string | null;
 };
 
+export type MessagesRouteConversationLookupSource =
+  | "shared_readable_helper"
+  | "readable_snapshot_fallback"
+  | "readable_snapshot_fallback_missing"
+  | "readable_snapshot_fallback_not_readable"
+  | "unreadable_access_snapshot";
+
+export type MessagesRouteReadableConversationSelection<
+  TConversation extends ReadableConversationAccessSnapshot,
+> = {
+  conversation: TConversation | null;
+  lookupSource: MessagesRouteConversationLookupSource;
+  fallbackReadable: boolean;
+  notFoundReason: string | null;
+};
+
 function isArchivedInScope(archivedAt: Date | null, scope: ConversationArchiveScope = "exclude") {
   if (scope === "include") {
     return true;
@@ -426,6 +442,100 @@ export function resolveTeamChatConversationAccessSnapshot(params: {
         }
       : null,
     membershipSummary,
+  };
+}
+
+export function reconcileMessagesRouteAccessWithReadableConversation(params: {
+  accessSnapshot: TeamChatConversationAccessSnapshot;
+  readableConversation: ReadableConversationAccessSnapshot | null | undefined;
+  sessionUserId: string;
+  messageCount?: number | null;
+}): TeamChatConversationAccessSnapshot {
+  const conversation = params.readableConversation;
+  if (!conversation || !isConversationReadableByUser(conversation, params.sessionUserId)) {
+    return params.accessSnapshot;
+  }
+
+  const userMembershipRemovedAt = conversation.members
+    .filter((member) => member.userId === params.sessionUserId)
+    .map((member) => serializeDateForAccessSnapshot(member.removedAt));
+
+  return {
+    ...params.accessSnapshot,
+    status: 200,
+    accessStatus: 200,
+    readable: true,
+    notFoundReason: null,
+    conversationExists: true,
+    archivedAt: serializeDateForAccessSnapshot(conversation.archivedAt),
+    projectId:
+      conversation.projectId ??
+      conversation.chatProjectId ??
+      params.accessSnapshot.projectId,
+    activeMembershipCountForUser:
+      userMembershipRemovedAt.filter((removedAt) => removedAt === null).length ||
+      params.accessSnapshot.activeMembershipCountForUser,
+    userMembershipRemovedAt:
+      userMembershipRemovedAt.length > 0
+        ? userMembershipRemovedAt
+        : params.accessSnapshot.userMembershipRemovedAt,
+    messageCount:
+      params.messageCount ??
+      params.accessSnapshot.messageCount,
+    readableHelperPassed: true,
+    postHelperLookupFailed: false,
+  };
+}
+
+export function selectMessagesRouteReadableConversation<
+  TConversation extends ReadableConversationAccessSnapshot,
+>(params: {
+  accessSnapshot: TeamChatConversationAccessSnapshot;
+  primaryConversation: TConversation | null | undefined;
+  fallbackConversation?: TConversation | null | undefined;
+  sessionUserId: string;
+}): MessagesRouteReadableConversationSelection<TConversation> {
+  if (isConversationReadableByUser(params.primaryConversation, params.sessionUserId)) {
+    return {
+      conversation: params.primaryConversation ?? null,
+      lookupSource: "shared_readable_helper",
+      fallbackReadable: false,
+      notFoundReason: null,
+    };
+  }
+
+  if (!params.accessSnapshot.readable || params.accessSnapshot.status !== 200) {
+    return {
+      conversation: null,
+      lookupSource: "unreadable_access_snapshot",
+      fallbackReadable: false,
+      notFoundReason: params.accessSnapshot.notFoundReason ?? "messages_access_not_readable",
+    };
+  }
+
+  if (!params.fallbackConversation) {
+    return {
+      conversation: null,
+      lookupSource: "readable_snapshot_fallback_missing",
+      fallbackReadable: false,
+      notFoundReason: "readable_snapshot_fallback_missing",
+    };
+  }
+
+  if (!isConversationReadableByUser(params.fallbackConversation, params.sessionUserId)) {
+    return {
+      conversation: null,
+      lookupSource: "readable_snapshot_fallback_not_readable",
+      fallbackReadable: false,
+      notFoundReason: "readable_snapshot_fallback_not_readable",
+    };
+  }
+
+  return {
+    conversation: params.fallbackConversation,
+    lookupSource: "readable_snapshot_fallback",
+    fallbackReadable: true,
+    notFoundReason: null,
   };
 }
 

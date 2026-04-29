@@ -18,6 +18,7 @@ const {
   buildRegistryUpsertsFromAsyncAgentWork,
   buildRegistryUpsertsFromContextTransport,
   buildRegistryUpsertsFromProgressiveAssembly,
+  buildRegistryUpsertsFromSourceObservationProducerResults,
   buildRegistryUpsertsFromTruthfulExecutionSnapshot,
   mergeContextRegistryBatches,
   upsertTruthfulExecutionRegistryCandidates,
@@ -833,6 +834,108 @@ runTest("resolved and dismissed records are not selected, while open debt/gaps b
   assert.equal(debug.noUnavailableToolExecutionClaimed, true);
   assert.ok(debug.contextDebt.selectedRecords.length > 0);
   assert.ok(debug.capabilityGaps.selectedRecords.length > 0);
+});
+
+runTest("routes unresolved SourceObservation producer results into existing durable debt and gaps", () => {
+  const batch = buildRegistryUpsertsFromSourceObservationProducerResults({
+    conversationId: "conv-producer",
+    conversationDocumentId: "doc-t5",
+    results: [
+      {
+        requestId: "producer-request-table",
+        request: {
+          id: "producer-request-table",
+          traceId: "trace-producer",
+          planId: "plan-producer",
+          conversationId: "conv-producer",
+          messageId: "msg-producer",
+          conversationDocumentId: "doc-t5",
+          sourceId: "doc-t5",
+          sourceKind: "pdf_page",
+          sourceLocator: {
+            pageNumberStart: 15,
+            pageLabelStart: "15",
+            tableId: "table-1",
+            sourceLocationLabel: "T5 page 15 table",
+          },
+          requestedObservationType: "structured_table_observation",
+          requestedCapabilityId: "pdf_table_body_recovery",
+          requestedPayloadType: "structured_table",
+          reason: "Parser detected a table but no body was recovered.",
+          priority: "high",
+          severity: "high",
+          sourceNeedId: "need-table",
+          workPlanDecisionId: null,
+          transportLaneNeed: null,
+          approvalPath: null,
+          producerId: "existing_parser_text_extraction",
+          input: null,
+          noExecutionClaimed: true,
+        },
+        producerId: "existing_parser_text_extraction",
+        capabilityId: "pdf_table_body_recovery",
+        state: "missing",
+        resolution: {
+          state: "missing",
+          producerId: "existing_parser_text_extraction",
+          capabilityId: "pdf_table_body_recovery",
+          payloadType: "structured_table",
+          governedBy: [
+            "context-catalog-bootstrap",
+            "inspection-tool-broker",
+            "adaptive-context-transport",
+          ],
+          catalogPayloadType: "structured_table",
+          catalogLaneId: "document_ai_table_lane",
+          brokerCapabilityId: "pdf_table_body_recovery",
+          executableNow: true,
+          reason: "No completed structured table observation exists in current deterministic evidence.",
+          requiresApproval: false,
+          blockedByPolicy: false,
+          asyncRecommended: false,
+          noExecutionClaimed: true,
+        },
+        observations: [],
+        observationIds: [],
+        output: null,
+        unresolvedNeeds: [
+          {
+            id: "producer-need-table",
+            observationType: "structured_table_observation",
+            sourceId: "doc-t5",
+            conversationDocumentId: "doc-t5",
+            capability: "pdf_table_body_recovery",
+            payloadType: "structured_table",
+            state: "unavailable",
+            reason: "Table body recovery could not complete from current deterministic evidence.",
+            noExecutionClaimed: true,
+          },
+          {
+            id: "producer-need-ocr",
+            observationType: "ocr_text",
+            sourceId: "doc-t5",
+            conversationDocumentId: "doc-t5",
+            capability: "ocr",
+            payloadType: "ocr_text",
+            state: "unavailable",
+            reason: "OCR is unavailable in WP3B.",
+            noExecutionClaimed: true,
+          },
+        ],
+        evidence: null,
+        reason: "No completed structured table observation exists in current deterministic evidence.",
+        recommendedResolution: "Route this unresolved producer result through existing durable gap/debt emission.",
+        requiresApproval: false,
+        asyncRecommended: false,
+        noExecutionClaimed: true,
+      },
+    ],
+  });
+
+  assert.ok(batch.contextDebtRecords.some((debt) => debt.kind === "missing_table_body"));
+  assert.ok(batch.capabilityGapRecords.some((gap) => gap.missingToolId === "ocr"));
+  assert.ok(batch.capabilityGapRecords.every((gap) => gap.evidence.noUnavailableToolExecutionClaimed));
+  assert.ok(batch.contextDebtRecords.every((debt) => debt.evidence.noUnavailableToolExecutionClaimed));
 });
 
 runTest("empty registry selection remains safe for resolver defaults", () => {

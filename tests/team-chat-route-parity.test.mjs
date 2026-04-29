@@ -15,11 +15,14 @@ const jiti = createJiti(import.meta.url, {
 
 const {
   evaluateTeamChatRouteParity,
+  reconcileMessagesRouteAccessWithReadableConversation,
   resolveTeamChatConversationAccessSnapshot,
+  selectMessagesRouteReadableConversation,
 } = jiti(path.join(__dirname, "..", "src", "lib", "chat.ts"));
 const {
   TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION,
   logTeamChatDetailRouteDiagnostics,
+  resolveTeamChatConversationRouteParams,
 } = jiti(path.join(__dirname, "..", "src", "lib", "chat-route-diagnostics.ts"));
 
 const failures = [];
@@ -105,6 +108,123 @@ await runTest("projectless active-member thread with zero messages remains messa
   assert.equal(snapshot.status, 200);
   assert.equal(snapshot.messageCount, 0);
   assert.equal(snapshot.notFoundReason, null);
+});
+
+await runTest("messages route params resolve from promised and plain dynamic params", async () => {
+  assert.deepEqual(
+    await resolveTeamChatConversationRouteParams(Promise.resolve({ id: "thread-promised" })),
+    {
+      id: "thread-promised",
+      paramsIdResolved: true,
+    }
+  );
+  assert.deepEqual(
+    await resolveTeamChatConversationRouteParams({ id: "thread-plain" }),
+    {
+      id: "thread-plain",
+      paramsIdResolved: true,
+    }
+  );
+  assert.deepEqual(
+    await resolveTeamChatConversationRouteParams({}),
+    {
+      id: "",
+      paramsIdResolved: false,
+    }
+  );
+});
+
+await runTest("messages route reconciles stale 404 snapshots with shared readable helper", async () => {
+  const staleDeniedSnapshot = makeAccessSnapshot({
+    conversationId: "thread-readable",
+    members: [
+      makeMembership({
+        userId: "user-1",
+        removedAt: new Date("2026-04-27T12:10:00.000Z"),
+      }),
+    ],
+  });
+  assert.equal(staleDeniedSnapshot.status, 404);
+
+  const reconciled = reconcileMessagesRouteAccessWithReadableConversation({
+    accessSnapshot: staleDeniedSnapshot,
+    sessionUserId: "user-1",
+    readableConversation: {
+      id: "thread-readable",
+      archivedAt: null,
+      chatProjectId: null,
+      members: [
+        {
+          userId: "user-1",
+          removedAt: null,
+        },
+      ],
+    },
+  });
+
+  assert.equal(reconciled.status, 200);
+  assert.equal(reconciled.accessStatus, 200);
+  assert.equal(reconciled.readable, true);
+  assert.equal(reconciled.notFoundReason, null);
+  assert.equal(reconciled.readableHelperPassed, true);
+  assert.deepEqual(
+    evaluateTeamChatRouteParity({
+      listConversationIds: ["thread-readable"],
+      messageAccessSnapshots: [reconciled],
+    })[0].mismatchReason,
+    null
+  );
+});
+
+await runTest("messages route uses readable snapshot fallback only when fallback conversation passes readability", async () => {
+  const readableSnapshot = makeAccessSnapshot({
+    conversationId: "thread-readable",
+    sessionUserId: "user-1",
+    members: [makeMembership({ userId: "user-1", removedAt: null })],
+  });
+  const readableFallback = {
+    id: "thread-readable",
+    archivedAt: null,
+    chatProjectId: null,
+    members: [
+      {
+        userId: "user-1",
+        removedAt: null,
+      },
+    ],
+  };
+
+  const selected = selectMessagesRouteReadableConversation({
+    accessSnapshot: readableSnapshot,
+    primaryConversation: null,
+    fallbackConversation: readableFallback,
+    sessionUserId: "user-1",
+  });
+
+  assert.equal(selected.conversation, readableFallback);
+  assert.equal(selected.lookupSource, "readable_snapshot_fallback");
+  assert.equal(selected.fallbackReadable, true);
+  assert.equal(selected.notFoundReason, null);
+
+  const deniedFallback = selectMessagesRouteReadableConversation({
+    accessSnapshot: readableSnapshot,
+    primaryConversation: null,
+    fallbackConversation: {
+      ...readableFallback,
+      members: [
+        {
+          userId: "user-1",
+          removedAt: new Date("2026-04-27T12:10:00.000Z"),
+        },
+      ],
+    },
+    sessionUserId: "user-1",
+  });
+
+  assert.equal(deniedFallback.conversation, null);
+  assert.equal(deniedFallback.lookupSource, "readable_snapshot_fallback_not_readable");
+  assert.equal(deniedFallback.fallbackReadable, false);
+  assert.equal(deniedFallback.notFoundReason, "readable_snapshot_fallback_not_readable");
 });
 
 await runTest("mixed shared and direct-agent threads are message-readable for active user", async () => {

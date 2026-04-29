@@ -107,6 +107,9 @@ export const TRUTHFUL_EXECUTION_CLAIM_SYSTEM_INSTRUCTIONS =
   "- Only claim a tool was called, processing ran, extraction completed, memory was updated, or artifacts were persisted when that action is present in executed tool traces, async work results, inspection task results, or persisted artifact records provided in this prompt.\n" +
   "- Deferred capabilities, recommended capabilities, unavailable capabilities, and unmet capability review items are not executed tools.\n" +
   "- Async work item creation, planning, queuing, or completion with limitations is not the same as OCR, vision, rendered-page inspection, document-AI extraction, or high-fidelity ingestion completion.\n" +
+  "- SourceObservation producer states catalog_only, unavailable, missing, approval_required, blocked_by_policy, deferred, skipped, or failed are not execution and do not prove table recovery, connector reads, native-file use, OCR, vision, rendered-page inspection, Python analysis, spreadsheet analysis, or document-AI extraction.\n" +
+  "- A native file lane being planned or cataloged is not evidence that a native file was attached to a model call or read through a connector.\n" +
+  "- A table_body_recovery producer request, need, or unresolved result is not a recovered table body; only completed_with_evidence SourceObservations or persisted table_extraction artifacts can support that claim.\n" +
   "- Do not invent bracketed tool-call transcripts such as `[Call Tool: ...]` or `[Calling Tool: ...]`. Mention tools only when the runtime tool trace lists the exact tool id as executed.\n" +
   "- If OCR, vision, rendered-page inspection, document-AI table recovery, document_processor, or table_extraction_enhanced are unavailable or deferred, describe them as unavailable/deferred/recommended, not executed.\n" +
   "- Do not say `processing complete`, `extraction complete`, `high-fidelity ingestion completed`, or `memory updated` unless the execution evidence section proves it.\n" +
@@ -753,6 +756,7 @@ export function renderTruthfulExecutionClaimContext(snapshot: TruthfulExecutionC
     "Answering consequence:",
     "- If OCR, vision, rendered-page inspection, document-AI, document_processor, or table_extraction_enhanced are not listed under Executed tools, say they did not run.",
     "- If async work exists, report only its actual status and steps; do not describe it as completed extraction unless extraction is listed under Executed tools or persisted artifacts.",
+    "- If producer requests are unresolved, describe them as needs/gaps/proposals, not as completed source inspection.",
   ].join("\n");
 }
 

@@ -28,6 +28,7 @@ import type {
   AgentWorkPlanSourceNeed,
   AgentWorkPlanState,
 } from "./context-seams";
+import type { SourceObservationProducerResult } from "./source-observation-producers";
 
 export type ContextDebtStatus =
   | "open"
@@ -2624,6 +2625,221 @@ function transportDebtFromExclusion(params: {
       noUnavailableToolExecutionClaimed: true,
     },
   };
+}
+
+function producerResultIsTableRecovery(result: SourceObservationProducerResult) {
+  return (
+    result.request.requestedCapabilityId === "pdf_table_body_recovery" ||
+    result.request.requestedPayloadType === "structured_table" ||
+    result.request.requestedObservationType === "structured_table_observation"
+  );
+}
+
+function producerResultGapKind(result: SourceObservationProducerResult): ContextGap["kind"] {
+  if (result.state === "blocked_by_policy") return "blocked_by_policy";
+  if (result.state === "approval_required") return "approval_required";
+  if (producerResultIsTableRecovery(result)) return "missing_table_body";
+  if (result.state === "missing" || result.state === "unavailable") return "external_escalation_needed";
+  if (result.state === "catalog_only" || result.state === "deferred") return "raw_parser_output_insufficient";
+  return "external_escalation_needed";
+}
+
+function producerResultRecommendedCapabilities(result: SourceObservationProducerResult) {
+  return uniqueInspectionCapabilities([
+    result.request.requestedCapabilityId,
+    result.capabilityId,
+    ...result.unresolvedNeeds.map((need) => need.capability ?? null),
+    ...(producerResultIsTableRecovery(result)
+      ? [
+          "rendered_page_inspection",
+          "ocr",
+          "vision_page_understanding",
+          "document_ai_table_recovery",
+        ]
+      : []),
+    payloadTypeToCapability(result.request.requestedPayloadType ?? ""),
+  ]);
+}
+
+function producerResultDebtFromGap(params: {
+  conversationId: string | null;
+  conversationDocumentId: string | null;
+  result: SourceObservationProducerResult;
+  gap: ContextGap;
+}): ContextDebtUpsertInput {
+  const request = params.result.request;
+  const locator = {
+    ...(request.sourceLocator ?? {}),
+    sourceId: request.sourceId ?? params.result.evidence?.sourceIds[0] ?? null,
+    conversationDocumentId: request.conversationDocumentId ?? params.conversationDocumentId,
+    producerRequestId: request.id,
+    producerId: params.result.producerId,
+    capabilityId: params.result.capabilityId,
+    payloadType: request.requestedPayloadType ?? null,
+    observationType: request.requestedObservationType,
+    resultState: params.result.state,
+    locationLabel:
+      request.sourceLocator?.sourceLocationLabel ??
+      params.result.reason,
+    attributionAmbiguous: !request.sourceId && !request.conversationDocumentId,
+  };
+  return {
+    ...buildContextDebtFromGap({
+      conversationId: params.conversationId,
+      conversationDocumentId: params.conversationDocumentId,
+      gap: params.gap,
+      candidate: null,
+    }),
+    sourceLocator: locator,
+    sourceCoverageTarget: {
+      target: request.requestedPayloadType ?? request.requestedObservationType,
+      requestedBy: "source_observation_producer",
+      producerRequestId: request.id,
+      resultState: params.result.state,
+    },
+    evidence: {
+      producerRequest: request,
+      producerResult: {
+        requestId: params.result.requestId,
+        producerId: params.result.producerId,
+        capabilityId: params.result.capabilityId,
+        state: params.result.state,
+        reason: params.result.reason,
+        unresolvedNeedCount: params.result.unresolvedNeeds.length,
+      },
+      executed: false,
+      executionClaimed: false,
+      noUnavailableToolExecutionClaimed: true,
+    },
+  };
+}
+
+export function buildRegistryUpsertsFromSourceObservationProducerResults(params: {
+  conversationId?: string | null;
+  conversationDocumentId?: string | null;
+  results?: SourceObservationProducerResult[] | null;
+  conversationDocumentIdsBySourceId?: Record<string, string | null | undefined>;
+}): ContextRegistryUpsertBatch {
+  const debtInputs: ContextDebtUpsertInput[] = [];
+  const gapInputs: CapabilityGapUpsertInput[] = [];
+  const conversationId = params.conversationId ?? null;
+
+  for (const result of params.results ?? []) {
+    if (result.state === "completed_with_evidence" || result.state === "skipped") {
+      continue;
+    }
+    const request = result.request;
+    const sourceId = request.sourceId ?? null;
+    const conversationDocumentId = documentIdForSource({
+      fallbackConversationDocumentId: request.conversationDocumentId ?? params.conversationDocumentId ?? null,
+      conversationDocumentIdsBySourceId: params.conversationDocumentIdsBySourceId,
+      sourceId,
+    });
+    const recommendedCapabilities = producerResultRecommendedCapabilities(result);
+    const gap = {
+      id: `source-observation-producer:${request.id}:${result.state}`,
+      kind: producerResultGapKind(result),
+      sourceId,
+      candidateId: request.id,
+      severity:
+        result.state === "approval_required" || result.state === "blocked_by_policy"
+          ? "blocking"
+          : producerResultIsTableRecovery(result)
+            ? "warning"
+            : "info",
+      summary: `SourceObservation producer unresolved: ${request.requestedObservationType}`,
+      detail: result.reason,
+      requiredCapability: recommendedCapabilities[0] ?? null,
+      recommendedCapabilities,
+      budgetTokensNeeded: null,
+      requiresApproval: result.requiresApproval,
+      asyncRecommended: result.asyncRecommended,
+      metadata: {
+        producerRequestId: request.id,
+        producerId: result.producerId,
+        capabilityId: result.capabilityId,
+        payloadType: request.requestedPayloadType ?? null,
+        resultState: result.state,
+        recommendedResolution: result.recommendedResolution ?? null,
+        noUnavailableToolExecutionClaimed: true,
+      },
+    } satisfies ContextGap;
+
+    debtInputs.push(
+      producerResultDebtFromGap({
+        conversationId,
+        conversationDocumentId,
+        result,
+        gap,
+      })
+    );
+
+    const needs =
+      result.unresolvedNeeds.length > 0
+        ? result.unresolvedNeeds
+        : [
+            {
+              capability: result.capabilityId,
+              reason: result.reason,
+              sourceId,
+              requiresApproval: result.requiresApproval,
+              asyncRecommended: result.asyncRecommended,
+            },
+          ];
+
+    for (const need of needs) {
+      const capability = "capability" in need && typeof need.capability === "string"
+        ? need.capability
+        : result.capabilityId;
+      const reason = "reason" in need && typeof need.reason === "string"
+        ? need.reason
+        : result.reason;
+      const source = "sourceId" in need ? need.sourceId ?? sourceId : sourceId;
+      const capabilityNeeds = capabilityNeedsFromCapability({
+        capability,
+        reason,
+        sourceId: source,
+        requiresApproval: result.requiresApproval,
+        asyncRecommended: result.asyncRecommended,
+      });
+      for (const capabilityNeed of capabilityNeeds) {
+        gapInputs.push(
+          buildCapabilityGapFromNeed({
+            conversationId,
+            conversationDocumentId,
+            relatedContextDebtKey: debtInputs[debtInputs.length - 1]?.debtKey ?? null,
+            sourceId: source,
+            severity: result.requiresApproval ? "high" : producerResultIsTableRecovery(result) ? "high" : "medium",
+            status:
+              result.state === "approval_required"
+                ? "review_needed"
+                : result.state === "blocked_by_policy"
+                  ? "blocked"
+                  : result.state === "catalog_only" || result.state === "deferred"
+                    ? "proposed"
+                    : "detected",
+            need: capabilityNeed,
+            evidence: {
+              producerRequest: request,
+              producerResultState: result.state,
+              producerId: result.producerId,
+              capabilityId: result.capabilityId,
+              payloadType: request.requestedPayloadType ?? null,
+              executed: false,
+              executionClaimed: false,
+              noUnavailableToolExecutionClaimed: true,
+            },
+          })
+        );
+      }
+    }
+  }
+
+  return mergeContextRegistryBatches({
+    contextDebtRecords: debtInputs,
+    capabilityGapRecords: gapInputs,
+    sourceCoverageRecords: [],
+  });
 }
 
 export function buildRegistryUpsertsFromContextTransport(params: {

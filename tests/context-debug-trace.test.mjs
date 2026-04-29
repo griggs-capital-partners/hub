@@ -219,6 +219,8 @@ function makeBundle(overrides = {}) {
     },
     agentWorkPlan: overrides.agentWorkPlan,
     progressiveAssembly: overrides.progressiveAssembly,
+    sourceObservations: overrides.sourceObservations ?? null,
+    sourceObservationProducers: overrides.sourceObservationProducers ?? null,
   };
 }
 
@@ -270,6 +272,78 @@ await runTest("maps an empty executed bundle without mutating the input", async 
   assert.equal(trace.renderedContext.text, null);
   assert.equal(trace.renderedContext.safeTextPreview, null);
   assert.equal(trace.inspectorParity.payloadMatchesRenderedContext, true);
+});
+
+await runTest("includes trace-safe SourceObservation producer summary", async () => {
+  const producerSummary = {
+    producerRequestCount: 2,
+    resultCount: 2,
+    completedWithEvidenceCount: 1,
+    countsByState: {
+      completed_with_evidence: 1,
+      missing: 1,
+    },
+    countsByProducerId: {
+      existing_parser_text_extraction: 2,
+    },
+    countsByCapabilityId: {
+      pdf_table_body_recovery: 2,
+    },
+    countsByRequestedObservationType: {
+      structured_table_observation: 2,
+    },
+    nativeFileLane: {
+      plannedCount: 0,
+      supportedCount: 0,
+      unavailableCount: 0,
+      catalogOnlyCount: 0,
+    },
+    tableBodyRecovery: {
+      requestedCount: 2,
+      attemptedDeterministicCount: 2,
+      completedCount: 1,
+      unavailableCount: 1,
+    },
+    missingProducerNeedCount: 4,
+    durableGapDebtCandidateCount: 3,
+    sourceDocumentAttributionCount: 2,
+    ambiguousAttributionCount: 0,
+    selectedForTransportCount: 1,
+    cappedOrDroppedCount: 0,
+    reusedCatalogIdentifierCount: 4,
+    newlyIntroducedIdentifierCount: 0,
+    reusedCatalogIdentifiers: [
+      "existing_parser_text_extraction",
+      "pdf_table_body_recovery",
+      "structured_table",
+      "document_ai_table_lane",
+    ],
+    newIdentifiers: [],
+    missingProducerNeeds: [
+      {
+        requestId: "producer-request-table",
+        producerId: "existing_parser_text_extraction",
+        capabilityId: "pdf_table_body_recovery",
+        payloadType: "structured_table",
+        state: "missing",
+        reason: "No completed structured table observation exists in current deterministic evidence.",
+      },
+    ],
+    noUnavailableToolExecutionClaimed: true,
+  };
+  const trace = buildConversationContextDebugTrace({
+    conversationId: "thread-producer-summary",
+    authority: makeAuthority(),
+    currentUserPrompt: "What does the table say?",
+    bundle: makeBundle({
+      sourceObservationProducers: producerSummary,
+    }),
+  });
+
+  assert.equal(trace.sourceObservationProducers.producerRequestCount, 2);
+  assert.equal(trace.sourceObservationProducers.tableBodyRecovery.completedCount, 1);
+  assert.equal(trace.sourceObservationProducers.newlyIntroducedIdentifierCount, 0);
+  assert.equal(trace.sourceObservationProducers.noUnavailableToolExecutionClaimed, true);
 });
 
 await runTest("maps progressive assembly metadata into the debug trace", async () => {

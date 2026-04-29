@@ -6,6 +6,7 @@ import {
 import type { AsyncAgentWorkDebugSnapshot } from "./async-agent-work-queue";
 import type { ContextRegistryDebugSnapshot } from "./capability-gap-context-debt-registry";
 import type { ArtifactPromotionDebugSnapshot } from "./source-learning-artifact-promotion";
+import type { SourceObservationProducerDebugSummary } from "./source-observation-producers";
 import type { SourceObservationDebugSummary } from "./source-observations";
 import type {
   ContextBudgetProfile,
@@ -45,6 +46,7 @@ type BuildConversationContextDebugTraceParams = {
     contextRegistry?: ContextRegistryDebugSnapshot | null;
     artifactPromotion?: ArtifactPromotionDebugSnapshot | null;
     sourceObservations?: SourceObservationDebugSummary | null;
+    sourceObservationProducers?: SourceObservationProducerDebugSummary | null;
   };
 };
 
@@ -1003,6 +1005,7 @@ export function buildConversationContextDebugTrace(
     contextRegistry: params.bundle.contextRegistry ?? null,
     artifactPromotion: params.bundle.artifactPromotion ?? null,
     sourceObservations: params.bundle.sourceObservations ?? null,
+    sourceObservationProducers: params.bundle.sourceObservationProducers ?? null,
     sourceEligibility: params.bundle.sourceDecisions.map(buildSourceEligibility),
     documents,
     chunks,

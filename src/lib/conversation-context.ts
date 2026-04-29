@@ -88,6 +88,16 @@ import {
   type SourceObservationTransportSelection,
 } from "./source-observations";
 import {
+  buildProducerRequestsFromAgentWorkPlan,
+  buildProducerRequestsFromTableSignals,
+  buildProducerRequestsFromTransportNeeds,
+  buildSourceObservationProducerDebugSummary,
+  runDeterministicSourceObservationProducers,
+  type SourceObservationProducerDebugSummary,
+  type SourceObservationProducerRequest,
+  type SourceObservationProducerResult,
+} from "./source-observation-producers";
+import {
   buildAgentWorkPlanFromControlDecision,
   evaluateAgentControlSurface,
   type AgentControlDebugSnapshot,
@@ -115,6 +125,7 @@ import {
   buildRegistryUpsertsFromAsyncAgentWork,
   buildRegistryUpsertsFromContextTransport,
   buildRegistryUpsertsFromProgressiveAssembly,
+  buildRegistryUpsertsFromSourceObservationProducerResults,
   mergeContextRegistryBatches,
   mergeContextRegistrySelections,
   selectOpenContextRegistryRecords,
@@ -297,6 +308,7 @@ export type ConversationContextBundle = {
   contextRegistry: ContextRegistryDebugSnapshot;
   artifactPromotion: ArtifactPromotionDebugSnapshot | null;
   sourceObservations: SourceObservationDebugSummary | null;
+  sourceObservationProducers: SourceObservationProducerDebugSummary | null;
   debugTrace?: ContextDebugTrace | null;
 };
 
@@ -4268,6 +4280,8 @@ export async function resolveConversationContextBundle(params: {
   const progressiveTransportPayloads: ContextPayload[] = [];
   const completedSourceObservations: SourceObservation[] = [];
   const sourceObservationTransportSelections: SourceObservationTransportSelection[] = [];
+  const sourceObservationProducerRequests: SourceObservationProducerRequest[] = [];
+  const sourceObservationProducerResults: SourceObservationProducerResult[] = [];
   const artifactPromotionTraces: ArtifactPromotionDebugSnapshot["traces"] = [];
   let artifactPromotionCandidateCount = 0;
   let artifactPromotionAcceptedCount = 0;
@@ -4819,6 +4833,20 @@ export async function resolveConversationContextBundle(params: {
     progressiveTransportPayloads.push(
       ...buildContextPayloadsFromSourceObservations(transportSelection.selectedObservations)
     );
+    const tableProducerRequests = buildProducerRequestsFromTableSignals({
+      observations: currentSourceObservations,
+      traceId: params.conversationId ? `${params.conversationId}:source-observation-producers` : null,
+      conversationId: params.conversationId,
+    });
+    if (tableProducerRequests.length > 0) {
+      sourceObservationProducerRequests.push(...tableProducerRequests);
+      sourceObservationProducerResults.push(
+        ...runDeterministicSourceObservationProducers({
+          requests: tableProducerRequests,
+          observations: currentSourceObservations,
+        })
+      );
+    }
 
     const fullyIncluded =
       selection.selectedChunks.length === chunkCandidates.length &&
@@ -4957,6 +4985,39 @@ export async function resolveConversationContextBundle(params: {
       ...buildContextPayloadsFromSourceCoverageRecords(openContextRegistry.sourceCoverageRecords),
     ],
   });
+  const sourceObservationNeeds = buildSourceObservationNeeds({
+    sourceNeeds: agentWorkPlan.sourceNeeds,
+    capabilityNeeds: agentWorkPlan.capabilityNeeds,
+    modelNeeds: agentWorkPlan.modelCapabilityNeeds,
+  });
+  const additionalProducerRequests = [
+    ...buildProducerRequestsFromAgentWorkPlan({
+      agentWorkPlan,
+      sourceObservationNeeds,
+    }),
+    ...buildProducerRequestsFromTransportNeeds({
+      transport: progressiveAssembly.contextTransport,
+      traceId: agentWorkPlan.traceId,
+      planId: agentWorkPlan.planId,
+      conversationId: params.conversationId,
+      messageId: agentWorkPlan.messageId ?? null,
+    }),
+  ];
+  const existingProducerRequestIds = new Set(sourceObservationProducerRequests.map((request) => request.id));
+  const newProducerRequests = additionalProducerRequests.filter((request) => {
+    if (existingProducerRequestIds.has(request.id)) return false;
+    existingProducerRequestIds.add(request.id);
+    return true;
+  });
+  if (newProducerRequests.length > 0) {
+    sourceObservationProducerRequests.push(...newProducerRequests);
+    sourceObservationProducerResults.push(
+      ...runDeterministicSourceObservationProducers({
+        requests: newProducerRequests,
+        observations: completedSourceObservations,
+      })
+    );
+  }
   const selectedExcerptIdsForNormalContext = new Set(
     progressiveAssembly.expandedContextBundle.selectedExcerptIds
   );
@@ -5056,6 +5117,12 @@ export async function resolveConversationContextBundle(params: {
     transport: progressiveAssembly.contextTransport,
     conversationDocumentIdsBySourceId,
   });
+  const sourceObservationProducerRegistryBatch = buildRegistryUpsertsFromSourceObservationProducerResults({
+    conversationId: params.conversationId,
+    conversationDocumentId: singleConversationDocumentId,
+    results: sourceObservationProducerResults,
+    conversationDocumentIdsBySourceId,
+  });
   const asyncAgentWorkRegistryBatch = asyncAgentWorkItem
     ? buildRegistryUpsertsFromAsyncAgentWork({
         conversationId: params.conversationId,
@@ -5075,6 +5142,10 @@ export async function resolveConversationContextBundle(params: {
     {
       source: "adaptive_transport",
       batch: contextTransportRegistryBatch,
+    },
+    {
+      source: "source_observation_producers",
+      batch: sourceObservationProducerRegistryBatch,
     },
     {
       source: "async_agent_work",
@@ -5113,6 +5184,15 @@ export async function resolveConversationContextBundle(params: {
         traces: artifactPromotionTraces,
       } satisfies ArtifactPromotionDebugSnapshot
     : null;
+  const sourceObservationProducerSummary = buildSourceObservationProducerDebugSummary({
+    requests: sourceObservationProducerRequests,
+    results: sourceObservationProducerResults,
+    transportSelections: sourceObservationTransportSelections,
+    durableGapDebtCandidateCount:
+      sourceObservationProducerRegistryBatch.contextDebtRecords.length +
+      sourceObservationProducerRegistryBatch.capabilityGapRecords.length +
+      sourceObservationProducerRegistryBatch.sourceCoverageRecords.length,
+  });
   const sourceObservationSummary = buildSourceObservationDebugSummary({
     observations: completedSourceObservations,
     transportSelections: sourceObservationTransportSelections,
@@ -5125,11 +5205,7 @@ export async function resolveConversationContextBundle(params: {
       contextTransportRegistryBatch.capabilityGapRecords.filter((record) =>
         record.missingPayloadType === "source_observation"
       ).length,
-    missingObservationNeeds: buildSourceObservationNeeds({
-      sourceNeeds: agentWorkPlan.sourceNeeds,
-      capabilityNeeds: agentWorkPlan.capabilityNeeds,
-      modelNeeds: agentWorkPlan.modelCapabilityNeeds,
-    }),
+    missingObservationNeeds: sourceObservationNeeds,
   });
 
   const bundle = {
@@ -5159,6 +5235,7 @@ export async function resolveConversationContextBundle(params: {
     contextRegistry,
     artifactPromotion,
     sourceObservations: sourceObservationSummary,
+    sourceObservationProducers: sourceObservationProducerSummary,
   };
 
   return {

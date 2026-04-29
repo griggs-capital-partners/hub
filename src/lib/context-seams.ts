@@ -10,6 +10,7 @@ import type { AsyncAgentWorkDebugSnapshot } from "./async-agent-work-queue";
 import type { ContextTransportDebugSnapshot } from "./adaptive-context-transport";
 import type { ContextRegistryDebugSnapshot } from "./capability-gap-context-debt-registry";
 import type { ArtifactPromotionDebugSnapshot } from "./source-learning-artifact-promotion";
+import type { SourceObservationProducerDebugSummary } from "./source-observation-producers";
 import type { SourceObservationDebugSummary } from "./source-observations";
 import type { ProgressiveContextAssemblyResult } from "./progressive-context-assembly";
 import type { VisualInspectionDebugSnapshot } from "./visual-inspection-pack";
@@ -673,6 +674,7 @@ export interface ContextDebugTrace {
   contextRegistry?: ContextRegistryDebugSnapshot | null;
   artifactPromotion?: ArtifactPromotionDebugSnapshot | null;
   sourceObservations?: SourceObservationDebugSummary | null;
+  sourceObservationProducers?: SourceObservationProducerDebugSummary | null;
   sourceEligibility: ContextSourceEligibility[];
   documents: ContextDebugDocument[];
   chunks: ContextDebugChunk[];

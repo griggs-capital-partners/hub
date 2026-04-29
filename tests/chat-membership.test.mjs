@@ -135,6 +135,7 @@ await runTest("messages route top marker includes diagnostic version before acce
     timestamp: "2026-04-27T12:00:00.000Z",
     routeTopMarkerReached: true,
     routeHandlerTopMarkerReached: true,
+    paramsIdResolved: true,
   });
 });
 

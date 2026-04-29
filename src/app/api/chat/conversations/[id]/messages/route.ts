@@ -24,10 +24,13 @@ import {
   getConversationForMessagesRoute,
   getReadableConversationForUser,
   getTeamChatConversationAccessSnapshot,
+  isConversationReadableByUser,
   isMissingChatTablesError,
   listMessagesForConversation,
+  reconcileMessagesRouteAccessWithReadableConversation,
   resolveConversationRuntimeState,
   serializeConversation,
+  selectMessagesRouteReadableConversation,
 } from "@/lib/chat";
 import type { LlmMessage } from "@/lib/agent-llm";
 import { resolveAgentLlmRoutingPolicy } from "@/lib/agent-task-context";
@@ -37,6 +40,7 @@ import {
   TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION,
   buildTeamChatMessagesRouteTopMarker,
   logTeamChatDetailRouteDiagnostics,
+  resolveTeamChatConversationRouteParams,
 } from "@/lib/chat-route-diagnostics";
 import {
   getSanitizedDatabaseTarget,
@@ -165,6 +169,7 @@ function logMessagesRouteTopMarker(params: {
   conversationId: string;
   sessionUserId: string | null;
   sessionUserEmail: string | null;
+  paramsIdResolved: boolean;
 }) {
   const marker = buildTeamChatMessagesRouteTopMarker(params);
   console.info(
@@ -197,6 +202,9 @@ function buildMessagesAccessLogPayload(params: {
   sessionUserEmail: string | null;
   access: MessagesAccessLogSnapshot;
   routeTopMarkerReached: boolean;
+  paramsIdResolved: boolean;
+  conversationLookupSource?: string;
+  readableSnapshotFallbackPassed?: boolean;
   notFoundReason?: string | null;
   serializationFailed?: boolean;
   errorName?: string | null;
@@ -222,6 +230,9 @@ function buildMessagesAccessLogPayload(params: {
     postHelperLookupFailed: params.access.postHelperLookupFailed,
     routeTopMarkerReached: params.routeTopMarkerReached,
     routeHandlerTopMarkerReached: params.routeTopMarkerReached,
+    paramsIdResolved: params.paramsIdResolved,
+    conversationLookupSource: params.conversationLookupSource ?? null,
+    readableSnapshotFallbackPassed: params.readableSnapshotFallbackPassed ?? false,
     serializationFailed: params.serializationFailed ?? false,
     sourceRouteFile: "src/app/api/chat/conversations/[id]/messages/route.ts",
     routeHandlerMarker: "messages-route-parity-v1",
@@ -278,11 +289,12 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { id } = await params;
+  const { id, paramsIdResolved } = await resolveTeamChatConversationRouteParams(params);
   const routeTopMarkerReached = logMessagesRouteTopMarker({
     conversationId: id,
     sessionUserId: null,
     sessionUserEmail: null,
+    paramsIdResolved,
   });
   const session = await auth();
 
@@ -294,10 +306,50 @@ export async function GET(
   }
 
   try {
-    const accessSnapshot = await getTeamChatConversationAccessSnapshot({
-      conversationId: id,
+    const [accessSnapshotRaw, primaryConversation] = await Promise.all([
+      getTeamChatConversationAccessSnapshot({
+        conversationId: id,
+        sessionUserId: session.user.id,
+      }),
+      getReadableConversationForUser(id, session.user.id),
+    ]);
+
+    const fallbackConversation =
+      !primaryConversation && accessSnapshotRaw.readable
+        ? await getConversationForMessagesRoute(id)
+        : null;
+    const readableSelection = selectMessagesRouteReadableConversation({
+      accessSnapshot: accessSnapshotRaw,
+      primaryConversation,
+      fallbackConversation,
       sessionUserId: session.user.id,
     });
+    const conversation = readableSelection.conversation;
+    const accessSnapshot = reconcileMessagesRouteAccessWithReadableConversation({
+      accessSnapshot: accessSnapshotRaw,
+      readableConversation: conversation,
+      sessionUserId: session.user.id,
+    });
+    if (!conversation || readableSelection.lookupSource !== "shared_readable_helper") {
+      console.info(
+        "[chat/messages][GET][access_lookup]",
+        JSON.stringify({
+          dbTarget: getSanitizedDatabaseTarget(),
+          route: TEAM_CHAT_MESSAGES_ROUTE,
+          diagnosticVersion: TEAM_CHAT_ROUTE_DIAGNOSTIC_VERSION,
+          conversationId: id,
+          sessionUserId: session.user.id,
+          sessionUserEmail: session.user.email ?? null,
+          accessSnapshotReadable: accessSnapshotRaw.readable,
+          accessSnapshotStatus: accessSnapshotRaw.status,
+          primaryReadable: isConversationReadableByUser(primaryConversation, session.user.id),
+          fallbackAttempted: Boolean(fallbackConversation) || (!primaryConversation && accessSnapshotRaw.readable),
+          fallbackReadable: readableSelection.fallbackReadable,
+          conversationLookupSource: readableSelection.lookupSource,
+          notFoundReason: readableSelection.notFoundReason,
+        })
+      );
+    }
     const accessDiagnostic = await logTeamChatDetailRouteDiagnostics({
       route: TEAM_CHAT_MESSAGES_ROUTE,
       session: {
@@ -305,23 +357,31 @@ export async function GET(
         email: session.user.email ?? null,
       },
       conversationId: id,
-      accessFound: accessSnapshot.readable,
+      accessFound: Boolean(conversation),
       accessSnapshot,
       readableHelperPassed: accessSnapshot.readableHelperPassed,
       postHelperLookupFailed: false,
       routeTopMarkerReached,
+      paramsIdResolved,
+      notFoundReason: readableSelection.notFoundReason ?? accessSnapshot.notFoundReason,
       sourceRouteFile: "src/app/api/chat/conversations/[id]/messages/route.ts",
       routeHandlerMarker: "messages-route-parity-v1",
     });
 
-    if (accessSnapshot.status !== 200) {
+    if (!conversation) {
       const diagnostic = buildMessagesAccessLogPayload({
         conversationId: id,
         sessionUserId: session.user.id,
         sessionUserEmail: session.user.email ?? null,
         access: accessSnapshot,
         routeTopMarkerReached,
-        notFoundReason: accessSnapshot.notFoundReason ?? accessDiagnostic.notFoundReason,
+        paramsIdResolved,
+        conversationLookupSource: readableSelection.lookupSource,
+        readableSnapshotFallbackPassed: readableSelection.fallbackReadable,
+        notFoundReason:
+          readableSelection.notFoundReason ??
+          accessSnapshot.notFoundReason ??
+          accessDiagnostic.notFoundReason,
       });
       console.warn(
         "[chat/messages][GET][not_found]",
@@ -330,48 +390,6 @@ export async function GET(
       return NextResponse.json(
         { error: "Conversation not found", diagnostic },
         { status: 404, headers: TEAM_CHAT_NO_STORE_HEADERS }
-      );
-    }
-
-    const conversation = await getConversationForMessagesRoute(id);
-    if (!conversation) {
-      const postHelperAccess = {
-        ...accessSnapshot,
-        postHelperLookupFailed: true,
-      };
-      await logTeamChatDetailRouteDiagnostics({
-        route: TEAM_CHAT_MESSAGES_ROUTE,
-        session: {
-          userId: session.user.id,
-          email: session.user.email ?? null,
-        },
-        conversationId: id,
-        accessFound: true,
-        accessSnapshot: postHelperAccess,
-        readableHelperPassed: true,
-        postHelperLookupFailed: true,
-        routeTopMarkerReached,
-        notFoundReason: "post_helper_conversation_lookup_failed",
-        sourceRouteFile: "src/app/api/chat/conversations/[id]/messages/route.ts",
-        routeHandlerMarker: "messages-route-parity-v1",
-      });
-      const diagnostic = buildMessagesAccessLogPayload({
-        conversationId: id,
-        sessionUserId: session.user.id,
-        sessionUserEmail: session.user.email ?? null,
-        access: postHelperAccess,
-        routeTopMarkerReached,
-        notFoundReason: "post_helper_conversation_lookup_failed",
-      });
-
-      console.error(
-        "[chat/messages][GET][post_helper_conversation_lookup_failed]",
-        JSON.stringify(diagnostic)
-      );
-
-      return NextResponse.json(
-        { error: "Failed to load conversation messages", diagnostic },
-        { status: 500, headers: TEAM_CHAT_NO_STORE_HEADERS }
       );
     }
 
@@ -395,6 +413,7 @@ export async function GET(
         readableHelperPassed: true,
         postHelperLookupFailed: true,
         routeTopMarkerReached,
+        paramsIdResolved,
         notFoundReason: "post_helper_message_query_failed",
         sourceRouteFile: "src/app/api/chat/conversations/[id]/messages/route.ts",
         routeHandlerMarker: "messages-route-parity-v1",
@@ -408,6 +427,7 @@ export async function GET(
           messageCount: failureDiagnostic.messageCount,
         },
         routeTopMarkerReached,
+        paramsIdResolved,
         notFoundReason: "post_helper_message_query_failed",
         errorName: error instanceof Error ? error.name : "UnknownError",
         errorMessage: error instanceof Error ? error.message : String(error),
@@ -444,6 +464,7 @@ export async function GET(
         readableHelperPassed: true,
         postHelperLookupFailed: false,
         routeTopMarkerReached,
+        paramsIdResolved,
         serializationFailed: true,
         notFoundReason: "message_serialization_failed",
         sourceRouteFile: "src/app/api/chat/conversations/[id]/messages/route.ts",
@@ -455,6 +476,7 @@ export async function GET(
         sessionUserEmail: session.user.email ?? null,
         access: serializationAccess,
         routeTopMarkerReached,
+        paramsIdResolved,
         serializationFailed: true,
         notFoundReason: "message_serialization_failed",
         errorName: error instanceof Error ? error.name : "UnknownError",
@@ -529,6 +551,7 @@ export async function GET(
         sessionUserEmail: session.user.email ?? null,
         routeTopMarkerReached,
         routeHandlerTopMarkerReached: routeTopMarkerReached,
+        paramsIdResolved,
         errorName: error instanceof Error ? error.name : "UnknownError",
         errorMessage: error instanceof Error ? error.message : String(error),
       })

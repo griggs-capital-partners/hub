@@ -32,6 +32,7 @@ type TeamChatDetailRouteDiagnosticParams = {
   postHelperLookupFailed?: boolean;
   routeTopMarkerReached?: boolean;
   routeHandlerTopMarkerReached?: boolean;
+  paramsIdResolved?: boolean;
   serializationFailed?: boolean;
   sourceRouteFile?: string;
   routeHandlerMarker?: string;
@@ -53,6 +54,7 @@ export function buildTeamChatMessagesRouteTopMarker(params: {
   sessionUserId: string | null;
   sessionUserEmail: string | null;
   timestamp?: string;
+  paramsIdResolved?: boolean;
 }) {
   return {
     route: TEAM_CHAT_MESSAGES_ROUTE,
@@ -63,6 +65,7 @@ export function buildTeamChatMessagesRouteTopMarker(params: {
     timestamp: params.timestamp ?? new Date().toISOString(),
     routeTopMarkerReached: true,
     routeHandlerTopMarkerReached: true,
+    paramsIdResolved: params.paramsIdResolved ?? Boolean(params.conversationId),
   };
 }
 
@@ -79,11 +82,24 @@ type TeamChatDetailRouteDiagnostic = ConversationDiagnosticSnapshot & {
   postHelperLookupFailed: boolean;
   routeTopMarkerReached: boolean;
   routeHandlerTopMarkerReached: boolean;
+  paramsIdResolved: boolean;
   serializationFailed: boolean;
   sourceRouteFile: string | null;
   routeHandlerMarker: string | null;
   notFoundReason: string | null;
 };
+
+export async function resolveTeamChatConversationRouteParams(
+  params: Promise<{ id?: string }> | { id?: string }
+) {
+  const resolved = await params;
+  const id = typeof resolved?.id === "string" ? resolved.id.trim() : "";
+
+  return {
+    id,
+    paramsIdResolved: id.length > 0,
+  };
+}
 
 function shouldLogTeamChatRouteDiagnostics() {
   return process.env.NODE_ENV !== "production";
@@ -187,6 +203,7 @@ export async function logTeamChatDetailRouteDiagnostics(
   const snapshot = accessSnapshotToConversationDiagnosticSnapshot(fallbackSnapshot);
   const routeTopMarkerReached =
     params.routeTopMarkerReached ?? params.routeHandlerTopMarkerReached ?? false;
+  const paramsIdResolved = params.paramsIdResolved ?? Boolean(params.conversationId);
   const notFoundReason = params.notFoundReason !== undefined
     ? params.notFoundReason
     : !params.accessFound && fallbackSnapshot.readable
@@ -205,6 +222,7 @@ export async function logTeamChatDetailRouteDiagnostics(
     postHelperLookupFailed: params.postHelperLookupFailed ?? fallbackSnapshot.postHelperLookupFailed,
     routeTopMarkerReached,
     routeHandlerTopMarkerReached: routeTopMarkerReached,
+    paramsIdResolved,
     serializationFailed: params.serializationFailed ?? false,
     sourceRouteFile: params.sourceRouteFile ?? null,
     routeHandlerMarker: params.routeHandlerMarker ?? null,
