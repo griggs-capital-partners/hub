@@ -38,7 +38,13 @@ type BuildConversationContextDebugTraceParams = {
   currentUserPrompt?: string | null;
   bundle: Pick<
     ConversationContextBundle,
-    "text" | "sourceSelection" | "sourceDecisions" | "documentChunking" | "documentIntelligence" | "progressiveAssembly"
+    | "text"
+    | "sourceSelection"
+    | "sourceDecisions"
+    | "documentChunking"
+    | "documentIntelligence"
+    | "progressiveAssembly"
+    | "uploadedDocumentDigestionLocal"
   > & {
     agentWorkPlan?: AgentWorkPlan | null;
     agentControl?: AgentControlDebugSnapshot | null;
@@ -1006,6 +1012,7 @@ export function buildConversationContextDebugTrace(
     artifactPromotion: params.bundle.artifactPromotion ?? null,
     sourceObservations: params.bundle.sourceObservations ?? null,
     sourceObservationProducers: params.bundle.sourceObservationProducers ?? null,
+    uploadedDocumentDigestionLocal: params.bundle.uploadedDocumentDigestionLocal ?? null,
     sourceEligibility: params.bundle.sourceDecisions.map(buildSourceEligibility),
     documents,
     chunks,

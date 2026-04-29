@@ -221,6 +221,7 @@ function makeBundle(overrides = {}) {
     progressiveAssembly: overrides.progressiveAssembly,
     sourceObservations: overrides.sourceObservations ?? null,
     sourceObservationProducers: overrides.sourceObservationProducers ?? null,
+    uploadedDocumentDigestionLocal: overrides.uploadedDocumentDigestionLocal ?? null,
   };
 }
 
@@ -344,6 +345,72 @@ await runTest("includes trace-safe SourceObservation producer summary", async ()
   assert.equal(trace.sourceObservationProducers.tableBodyRecovery.completedCount, 1);
   assert.equal(trace.sourceObservationProducers.newlyIntroducedIdentifierCount, 0);
   assert.equal(trace.sourceObservationProducers.noUnavailableToolExecutionClaimed, true);
+});
+
+await runTest("includes uploaded-document local digestion trace summary", async () => {
+  const localSummary = {
+    traceId: "trace-local",
+    planId: "plan-local",
+    conversationDocumentId: "doc-local",
+    sourceId: "doc-local",
+    filename: "source.pdf",
+    contextKind: "pdf",
+    dependencyInventory: {
+      inspected: true,
+      packageDependenciesInspected: true,
+      dependencyVersions: { "pdf-parse": "2.4.5" },
+      availableDependencies: ["pdf-parse"],
+      missingDependencies: ["tesseract"],
+      safeSandboxAvailable: false,
+      localBinaryExecutionAllowed: false,
+      packageInstallOrDeploymentAttempted: false,
+      optionalLocalTools: [],
+      externalCandidates: [],
+      noSecretsIncluded: true,
+      noExecutionClaimed: true,
+    },
+    inventoryInspectedBeforeProducerSelection: true,
+    executionBackedLocalProducerLimit: 3,
+    executedLocalProducerCount: 2,
+    executedLocalProducers: [
+      {
+        producerId: "parser_text_extraction",
+        capabilityId: "text_extraction",
+        observationCount: 1,
+        evidenceObservationIds: ["obs-1"],
+      },
+    ],
+    availableButNotNeededLocalProducers: [],
+    unavailableCatalogOnlyLocalProducers: [],
+    externalCandidateProducers: [],
+    skippedDeferredProducers: [],
+    producerStatesByToolCapability: {},
+    completedObservationCount: 3,
+    completedObservationCountsByType: { chunk_excerpt: 1, source_coverage_signal: 1 },
+    missingObservationNeeds: [],
+    durableGapDebtCandidateCount: 0,
+    selectedTransportObservationCount: 2,
+    cappedTransportObservationCount: 1,
+    noExecutionWarnings: ["No external calls made."],
+    noExternalCallsMade: true,
+    noPackageInstallOrDeploymentAttempted: true,
+    noConnectorReadsOrBrowserSnapshots: true,
+    noToolOutputBypassesSourceObservation: true,
+    noExecutionClaimWithoutCompletedWithEvidence: true,
+  };
+  const trace = buildConversationContextDebugTrace({
+    conversationId: "thread-local-digestion",
+    authority: makeAuthority(),
+    currentUserPrompt: "Summarize the uploaded document.",
+    bundle: makeBundle({
+      uploadedDocumentDigestionLocal: [localSummary],
+    }),
+  });
+
+  assert.equal(trace.uploadedDocumentDigestionLocal.length, 1);
+  assert.equal(trace.uploadedDocumentDigestionLocal[0].inventoryInspectedBeforeProducerSelection, true);
+  assert.equal(trace.uploadedDocumentDigestionLocal[0].executedLocalProducerCount, 2);
+  assert.equal(trace.uploadedDocumentDigestionLocal[0].noExternalCallsMade, true);
 });
 
 await runTest("maps progressive assembly metadata into the debug trace", async () => {

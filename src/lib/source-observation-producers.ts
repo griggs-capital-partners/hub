@@ -402,6 +402,8 @@ const PAYLOAD_TO_LANE: Record<string, string> = {
 
 const CURRENT_EVIDENCE_PRODUCER_IDS = new Set([
   "parser_text_extraction",
+  "pdf_context_extraction",
+  "spreadsheet_range_reader",
   "existing_parser_text_extraction",
   "source_observation_reuse",
 ]);
@@ -427,6 +429,10 @@ const CANONICAL_IDENTIFIER_SET = new Set([
   ...Object.values(PAYLOAD_TO_PRODUCER),
   ...Object.values(PAYLOAD_TO_LANE),
   "pdf_table_body_recovery",
+  "pdf_context_extraction",
+  "pdf_text_extraction",
+  "spreadsheet_inventory",
+  "spreadsheet_range_reader",
   "existing_parser_text_extraction",
 ]);
 

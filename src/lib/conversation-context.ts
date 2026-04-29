@@ -76,12 +76,8 @@ import {
 import {
   buildSourceObservationDebugSummary,
   buildSourceObservationNeeds,
-  buildSourceObservationsFromDocumentMetadata,
-  buildSourceObservationsFromKnowledgeArtifacts,
-  buildSourceObservationsFromPdfSignals,
   buildSourceObservationsFromSelectedDocumentChunks,
   mapSourceObservationToPromotionInput,
-  selectSourceObservationsForTransport,
   type SourceObservation,
   type SourceObservationDebugSummary,
   type SourceObservationPromotionInput,
@@ -116,6 +112,11 @@ import {
   buildContextPayloadsFromSourceObservations,
   type ContextPayload,
 } from "./adaptive-context-transport";
+import {
+  buildUploadedDocumentDigestionLocalBaseline,
+  withUploadedDocumentDigestionLocalDurableGapCount,
+  type UploadedDocumentDigestionLocalDebugSummary,
+} from "./upload-document-digestion-local";
 import {
   EMPTY_CONTEXT_REGISTRY_SELECTION,
   buildAgentControlSourceSignalsFromRegistry,
@@ -310,6 +311,7 @@ export type ConversationContextBundle = {
   artifactPromotion: ArtifactPromotionDebugSnapshot | null;
   sourceObservations: SourceObservationDebugSummary | null;
   sourceObservationProducers: SourceObservationProducerDebugSummary | null;
+  uploadedDocumentDigestionLocal: UploadedDocumentDigestionLocalDebugSummary[] | null;
   debugTrace?: ContextDebugTrace | null;
 };
 
@@ -4283,6 +4285,7 @@ export async function resolveConversationContextBundle(params: {
   const sourceObservationTransportSelections: SourceObservationTransportSelection[] = [];
   const sourceObservationProducerRequests: SourceObservationProducerRequest[] = [];
   const sourceObservationProducerResults: SourceObservationProducerResult[] = [];
+  const uploadedDocumentDigestionLocalSummaries: UploadedDocumentDigestionLocalDebugSummary[] = [];
   const artifactPromotionTraces: ArtifactPromotionDebugSnapshot["traces"] = [];
   let artifactPromotionCandidateCount = 0;
   let artifactPromotionAcceptedCount = 0;
@@ -4784,53 +4787,28 @@ export async function resolveConversationContextBundle(params: {
       continue;
     }
 
-    const currentSourceObservations = [
-      ...buildSourceObservationsFromSelectedDocumentChunks({
-        document,
-        contextKind,
-        chunks: selection.selectedChunks,
-        options: {
-          conversationId: params.conversationId,
-          maxObservationsPerDocument: 12,
-        },
-      }),
-      ...buildSourceObservationsFromDocumentMetadata({
-        document,
-        contextKind,
-        sourceMetadata: sourceMetadataWithArtifacts,
-        options: {
-          conversationId: params.conversationId,
-          maxTextPreviewChars: 900,
-        },
-      }),
-      ...(contextKind === "pdf"
-        ? buildSourceObservationsFromPdfSignals({
-            document,
-            extractionMetadata: pdfExtractionMetadata,
-            options: {
-              conversationId: params.conversationId,
-              maxObservationsPerDocument: 8,
-              maxTextPreviewChars: 900,
-            },
-          })
-        : []),
-      ...buildSourceObservationsFromKnowledgeArtifacts({
-        document,
-        artifacts: artifactSelection.selectedArtifacts,
-        options: {
-          conversationId: params.conversationId,
-          maxObservationsPerDocument: 6,
-          maxTextPreviewChars: 900,
-        },
-      }),
-    ];
-    const transportSelection = selectSourceObservationsForTransport({
-      observations: currentSourceObservations,
-      maxObservations: 16,
-      maxObservationsPerDocument: 8,
+    const localDigestion = buildUploadedDocumentDigestionLocalBaseline({
+      document,
+      contextKind,
+      selectedChunks: selection.selectedChunks,
+      sourceMetadata: sourceMetadataWithArtifacts,
+      pdfExtractionMetadata,
+      selectedArtifacts: artifactSelection.selectedArtifacts,
+      observationOptions: {
+        conversationId: params.conversationId,
+        maxObservationsPerDocument: 12,
+        maxTextPreviewChars: 900,
+      },
+      transportMaxObservations: 16,
+      transportMaxObservationsPerDocument: 8,
     });
+    const currentSourceObservations = localDigestion.observations;
+    const transportSelection = localDigestion.transportSelection;
     completedSourceObservations.push(...currentSourceObservations);
     sourceObservationTransportSelections.push(transportSelection);
+    sourceObservationProducerRequests.push(...localDigestion.producerRequests);
+    sourceObservationProducerResults.push(...localDigestion.producerResults);
+    uploadedDocumentDigestionLocalSummaries.push(localDigestion.debugSummary);
     progressiveTransportPayloads.push(
       ...buildContextPayloadsFromSourceObservations(transportSelection.selectedObservations)
     );
@@ -5199,14 +5177,24 @@ export async function resolveConversationContextBundle(params: {
         traces: artifactPromotionTraces,
       } satisfies ArtifactPromotionDebugSnapshot
     : null;
+  const sourceObservationProducerDurableGapDebtCandidateCount =
+    sourceObservationProducerRegistryBatch.contextDebtRecords.length +
+    sourceObservationProducerRegistryBatch.capabilityGapRecords.length +
+    sourceObservationProducerRegistryBatch.sourceCoverageRecords.length;
+  const uploadedDocumentDigestionLocal =
+    uploadedDocumentDigestionLocalSummaries.length > 0
+      ? uploadedDocumentDigestionLocalSummaries.map((summary) =>
+          withUploadedDocumentDigestionLocalDurableGapCount(
+            summary,
+            sourceObservationProducerDurableGapDebtCandidateCount
+          )
+        )
+      : null;
   const sourceObservationProducerSummary = buildSourceObservationProducerDebugSummary({
     requests: sourceObservationProducerRequests,
     results: sourceObservationProducerResults,
     transportSelections: sourceObservationTransportSelections,
-    durableGapDebtCandidateCount:
-      sourceObservationProducerRegistryBatch.contextDebtRecords.length +
-      sourceObservationProducerRegistryBatch.capabilityGapRecords.length +
-      sourceObservationProducerRegistryBatch.sourceCoverageRecords.length,
+    durableGapDebtCandidateCount: sourceObservationProducerDurableGapDebtCandidateCount,
   });
   const sourceObservationSummary = buildSourceObservationDebugSummary({
     observations: completedSourceObservations,
@@ -5251,6 +5239,7 @@ export async function resolveConversationContextBundle(params: {
     artifactPromotion,
     sourceObservations: sourceObservationSummary,
     sourceObservationProducers: sourceObservationProducerSummary,
+    uploadedDocumentDigestionLocal,
   };
 
   return {
