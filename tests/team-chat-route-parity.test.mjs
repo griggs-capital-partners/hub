@@ -16,6 +16,7 @@ const jiti = createJiti(import.meta.url, {
 const {
   evaluateTeamChatRouteParity,
   reconcileMessagesRouteAccessWithReadableConversation,
+  resolveMessagesRouteAccessGate,
   resolveTeamChatConversationAccessSnapshot,
   selectMessagesRouteReadableConversation,
 } = jiti(path.join(__dirname, "..", "src", "lib", "chat.ts"));
@@ -225,6 +226,24 @@ await runTest("messages route uses readable snapshot fallback only when fallback
   assert.equal(deniedFallback.lookupSource, "readable_snapshot_fallback_not_readable");
   assert.equal(deniedFallback.fallbackReadable, false);
   assert.equal(deniedFallback.notFoundReason, "readable_snapshot_fallback_not_readable");
+});
+
+await runTest("messages route never masks a list-readable snapshot as 404", async () => {
+  const readableSnapshot = makeAccessSnapshot({
+    conversationId: "thread-readable",
+    sessionUserId: "user-1",
+    members: [makeMembership({ userId: "user-1", removedAt: null })],
+  });
+
+  const gate = resolveMessagesRouteAccessGate({
+    accessSnapshot: readableSnapshot,
+    directConversation: null,
+    sessionUserId: "user-1",
+  });
+
+  assert.equal(gate.status, "lookup_mismatch");
+  assert.equal(gate.httpStatus, 500);
+  assert.equal(gate.notFoundReason, "readable_route_lookup_mismatch");
 });
 
 await runTest("mixed shared and direct-agent threads are message-readable for active user", async () => {

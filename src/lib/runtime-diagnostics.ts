@@ -1,4 +1,4 @@
-import { normalizeAgentLlmConfig } from "@/lib/agent-llm-config";
+import { normalizeAgentLlmConfig } from "./agent-llm-config";
 
 type LegacyLlmFields = {
   llmEndpointUrl?: string | null;
@@ -27,6 +27,51 @@ function sanitizeUrlTarget(raw: string | null | undefined) {
 
 export function getSanitizedDatabaseTarget() {
   return sanitizeUrlTarget(process.env.DATABASE_URL);
+}
+
+export function describeUnknownRuntimeError(error: unknown) {
+  if (error instanceof Error) {
+    return {
+      name: error.name || "Error",
+      message: error.message || "Unknown error",
+    };
+  }
+
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    const nestedError = record.error;
+    if (nestedError instanceof Error) {
+      return {
+        name: nestedError.name || "Error",
+        message: nestedError.message || "Unknown error",
+      };
+    }
+
+    const rawName = typeof record.name === "string" && record.name.trim()
+      ? record.name.trim()
+      : typeof record.type === "string" && record.type.trim()
+        ? record.type.trim()
+        : "UnknownError";
+    const rawMessage = typeof record.message === "string" && record.message.trim()
+      ? record.message.trim()
+      : typeof record.reason === "string" && record.reason.trim()
+        ? record.reason.trim()
+        : null;
+
+    return {
+      name: rawName,
+      message:
+        rawMessage ??
+        (String(error) === "[object ErrorEvent]"
+          ? "A runtime ErrorEvent was thrown without a message."
+          : String(error)),
+    };
+  }
+
+  return {
+    name: "UnknownError",
+    message: typeof error === "string" && error.trim() ? error.trim() : String(error),
+  };
 }
 
 export function summarizeAgentLlmConnections(
@@ -60,4 +105,3 @@ export function summarizeAgentLlmConnections(
     };
   });
 }
-

@@ -22,6 +22,7 @@ import { resolveConversationContextBundle } from "@/lib/conversation-context";
 import { logTeamChatDetailRouteDiagnostics } from "@/lib/chat-route-diagnostics";
 import { prisma } from "@/lib/prisma";
 import {
+  describeUnknownRuntimeError,
   getSanitizedDatabaseTarget,
   summarizeAgentLlmConnections,
 } from "@/lib/runtime-diagnostics";
@@ -61,6 +62,88 @@ function buildReadiness(llmStatus: string, llmLastError: string | null) {
     canSend: false,
     label: "Not connected",
     detail: "This agent does not have an LLM endpoint configured yet.",
+  };
+}
+
+type RuntimeErrorDescription = ReturnType<typeof describeUnknownRuntimeError>;
+
+type OptionalRuntimeValue<T> = {
+  label: string;
+  value: T | null;
+  error: RuntimeErrorDescription | null;
+};
+
+async function resolveOptionalRuntimeValue<T>(
+  label: string,
+  load: () => Promise<T>
+): Promise<OptionalRuntimeValue<T>> {
+  try {
+    return {
+      label,
+      value: await load(),
+      error: null,
+    };
+  } catch (error) {
+    return {
+      label,
+      value: null,
+      error: describeUnknownRuntimeError(error),
+    };
+  }
+}
+
+function renderRuntimeContextWarning(contextError: RuntimeErrorDescription | null) {
+  if (!contextError) return "";
+
+  return [
+    "Runtime context warning:",
+    "The thread context resolver was unavailable for this inspection.",
+    `Reason: ${contextError.message}`,
+    "Do not claim that thread documents, source memories, or retrieved context were inspected from this diagnostic payload.",
+  ].join(" ");
+}
+
+function logOptionalRuntimeFailures(params: {
+  route: string;
+  conversationId: string;
+  agentId: string;
+  sessionUserId: string;
+  sessionUserEmail: string | null;
+  results: Array<OptionalRuntimeValue<unknown>>;
+}) {
+  for (const result of params.results) {
+    if (!result.error) continue;
+
+    console.warn(
+      "[chat/inspect][GET][runtime-prep-degraded]",
+      JSON.stringify({
+        dbTarget: getSanitizedDatabaseTarget(),
+        route: params.route,
+        conversationId: params.conversationId,
+        agentId: params.agentId,
+        sessionUserId: params.sessionUserId,
+        sessionUserEmail: params.sessionUserEmail,
+        stage: result.label,
+        errorName: result.error.name,
+        errorMessage: result.error.message,
+      })
+    );
+  }
+}
+
+function buildEmptySourceSelection(): Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceSelection"] {
+  return {
+    requestMode: "default",
+    consideredSourceIds: [],
+    defaultCandidateSourceIds: [],
+    explicitUserRequestedSourceIds: [],
+    requestedSourceIds: [],
+    plannerProposedSourceIds: [],
+    policyRequiredSourceIds: [],
+    fallbackCandidateSourceIds: [],
+    allowedSourceIds: [],
+    executedSourceIds: [],
+    excludedSourceIds: [],
   };
 }
 
@@ -154,11 +237,21 @@ export async function GET(
     const shouldPersistThreadLlmState =
       serializeConversationLlmThreadState(threadLlmState) !== serializeConversationLlmThreadState(storedThreadLlmState);
     const latestUserPrompt = recentMessages.find((entry) => !entry.senderAgentId)?.body ?? null;
+    const endpointConfigured = hasAgentLlmConnection(llmConfig) || Boolean(agent.llmEndpointUrl?.trim());
+    const targetRuntimeConfig = threadExecutionTarget ? buildExecutionTargetRuntimeConfig(threadExecutionTarget) : null;
+    const llmHealthResult = await resolveOptionalRuntimeValue("llm_health", () =>
+      probeAgentLlm(targetRuntimeConfig ?? agent)
+    );
+    const llmHealth = llmHealthResult.value ?? {
+      llmStatus: endpointConfigured ? "offline" : "disconnected",
+      llmModel: threadExecutionTarget?.model ?? agent.llmModel ?? null,
+      llmLastCheckedAt: new Date(),
+      llmLastError: llmHealthResult.error?.message ?? "Unable to reach the configured LLM endpoint",
+    };
 
-    const [llmHealth, orgContext, contextBundle, senderUser] = await Promise.all([
-      probeAgentLlm(threadExecutionTarget ? buildExecutionTargetRuntimeConfig(threadExecutionTarget) : agent),
-      buildOrgContext(),
-      resolveConversationContextBundle({
+    const [orgContextResult, contextBundleResult, senderUserResult] = await Promise.all([
+      resolveOptionalRuntimeValue("org_context", () => buildOrgContext()),
+      resolveOptionalRuntimeValue("conversation_context", () => resolveConversationContextBundle({
         conversationId: conversation.id,
         authority: {
           requestingUserId: session.user.id,
@@ -177,13 +270,20 @@ export async function GET(
               },
             }
           : null,
-      }),
-      prisma.user.findUnique({
+      })),
+      resolveOptionalRuntimeValue("sender_user", () => prisma.user.findUnique({
         where: { id: session.user.id },
         select: { displayName: true, name: true },
-      }),
+      })),
     ]);
-    const endpointConfigured = hasAgentLlmConnection(llmConfig) || Boolean(agent.llmEndpointUrl?.trim());
+    logOptionalRuntimeFailures({
+      route: "api/chat/conversations/[id]/inspect.GET",
+      conversationId: conversation.id,
+      agentId: agent.id,
+      sessionUserId: session.user.id,
+      sessionUserEmail: session.user.email ?? null,
+      results: [llmHealthResult, orgContextResult, contextBundleResult, senderUserResult],
+    });
 
     if (!endpointConfigured || llmHealth.llmStatus !== "online") {
       console.warn(
@@ -229,27 +329,66 @@ export async function GET(
             },
           })
         : Promise.resolve(null),
-    ]);
+    ]).catch((error) => {
+      const persistError = describeUnknownRuntimeError(error);
+      console.warn(
+        "[chat/inspect][GET][status-persist-failed]",
+        JSON.stringify({
+          dbTarget: getSanitizedDatabaseTarget(),
+          conversationId: conversation.id,
+          sessionUserId: session.user.id,
+          sessionUserEmail: session.user.email ?? null,
+          agentId: agent.id,
+          errorName: persistError.name,
+          errorMessage: persistError.message,
+        })
+      );
+    });
 
-    const currentUserName = senderUser?.displayName || senderUser?.name || null;
+    const orgContext = orgContextResult.value ?? "";
+    const contextBundle = contextBundleResult.value;
+    const currentUserName = senderUserResult.value?.displayName || senderUserResult.value?.name || null;
     const history = recentMessages.reverse().map((entry) => ({
       role: entry.senderAgentId ? ("assistant" as const) : ("user" as const),
       content: entry.body,
     }));
-    const truthfulExecutionClaims = buildTruthfulExecutionClaimSnapshot({
-      documentIntelligence: contextBundle.documentIntelligence,
-      agentControl: contextBundle.agentControl,
-      progressiveAssembly: contextBundle.progressiveAssembly,
-      asyncAgentWork: contextBundle.asyncAgentWork,
-      debugTrace: contextBundle.debugTrace,
-    });
-    const truthfulExecutionContext = renderTruthfulExecutionClaimContext(truthfulExecutionClaims);
-    const runtimeOrgContext = [orgContext, contextBundle.text, truthfulExecutionContext].filter(Boolean).join("\n\n");
+    const truthfulExecutionClaims = contextBundle
+      ? buildTruthfulExecutionClaimSnapshot({
+          documentIntelligence: contextBundle.documentIntelligence,
+          agentControl: contextBundle.agentControl,
+          progressiveAssembly: contextBundle.progressiveAssembly,
+          asyncAgentWork: contextBundle.asyncAgentWork,
+          debugTrace: contextBundle.debugTrace,
+        })
+      : null;
+    const truthfulExecutionContext = truthfulExecutionClaims
+      ? renderTruthfulExecutionClaimContext(truthfulExecutionClaims)
+      : "";
+    const contextFailureSource = contextBundleResult.error
+      ? [{
+          kind: "runtime-context",
+          label: "Runtime context",
+          target: "conversation_context",
+          status: "failed" as const,
+          domain: "thread",
+          scope: "thread",
+          detail: `Context preparation failed: ${contextBundleResult.error.message}`,
+        }]
+      : [];
+    const runtimeContextWarning = renderRuntimeContextWarning(contextBundleResult.error);
+    const runtimeOrgContext = [
+      orgContext,
+      contextBundle?.text,
+      truthfulExecutionContext,
+      runtimeContextWarning,
+    ].filter(Boolean).join("\n\n");
     const runtimePreview = buildAgentRuntimePreview({
       ...agent,
+      ...(targetRuntimeConfig ?? {}),
+      llmThinkingMode: threadExecutionTarget?.thinkingMode ?? agent.llmThinkingMode,
       orgContext: runtimeOrgContext,
-      contextSources: contextBundle.summarySources,
-      resolvedSources: contextBundle.sources,
+      contextSources: contextBundle?.summarySources ?? [],
+      resolvedSources: contextBundle?.sources ?? contextFailureSource,
       currentUserName,
       history,
     });
@@ -285,22 +424,22 @@ export async function GET(
           recentHistoryCount: runtimePreview.recentHistoryCount,
           historyWindowSize: CHAT_HISTORY_MESSAGE_WINDOW,
           knowledgeSources: runtimePreview.knowledgeSources,
-          sourceSelection: contextBundle.sourceSelection,
-          sourceDecisions: contextBundle.sourceDecisions,
-          resolvedSources: contextBundle.sources,
-          documentChunking: contextBundle.documentChunking,
-          documentIntelligence: contextBundle.documentIntelligence,
-          agentControl: contextBundle.agentControl,
-          asyncAgentWork: contextBundle.asyncAgentWork,
+          sourceSelection: contextBundle?.sourceSelection ?? buildEmptySourceSelection(),
+          sourceDecisions: contextBundle?.sourceDecisions ?? [],
+          resolvedSources: contextBundle?.sources ?? contextFailureSource,
+          documentChunking: contextBundle?.documentChunking ?? null,
+          documentIntelligence: contextBundle?.documentIntelligence ?? null,
+          agentControl: contextBundle?.agentControl ?? null,
+          asyncAgentWork: contextBundle?.asyncAgentWork ?? null,
           truthfulExecutionClaims,
-          debugTrace: contextBundle.debugTrace,
+          debugTrace: contextBundle?.debugTrace ?? null,
         },
         payload: {
           currentUserName,
           systemPrompt: runtimePreview.systemPrompt,
           history: runtimePreview.history,
           orgContext: runtimeOrgContext,
-          resolvedContextText: contextBundle.text,
+          resolvedContextText: contextBundle?.text ?? "",
         },
       },
       { headers: TEAM_CHAT_NO_STORE_HEADERS }
@@ -313,6 +452,7 @@ export async function GET(
       );
     }
 
+    const runtimeError = describeUnknownRuntimeError(error);
     console.error(
       "[chat/inspect][GET]",
       JSON.stringify({
@@ -320,8 +460,8 @@ export async function GET(
         conversationId: id,
         sessionUserId: session.user.id,
         sessionUserEmail: session.user.email ?? null,
-        errorName: error instanceof Error ? error.name : "UnknownError",
-        errorMessage: error instanceof Error ? error.message : String(error),
+        errorName: runtimeError.name,
+        errorMessage: runtimeError.message,
       })
     );
     return NextResponse.json(

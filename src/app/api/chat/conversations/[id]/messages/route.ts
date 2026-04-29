@@ -24,13 +24,12 @@ import {
   getConversationForMessagesRoute,
   getReadableConversationForUser,
   getTeamChatConversationAccessSnapshot,
-  isConversationReadableByUser,
   isMissingChatTablesError,
   listMessagesForConversation,
   reconcileMessagesRouteAccessWithReadableConversation,
+  resolveMessagesRouteAccessGate,
   resolveConversationRuntimeState,
   serializeConversation,
-  selectMessagesRouteReadableConversation,
 } from "@/lib/chat";
 import type { LlmMessage } from "@/lib/agent-llm";
 import { resolveAgentLlmRoutingPolicy } from "@/lib/agent-task-context";
@@ -43,6 +42,7 @@ import {
   resolveTeamChatConversationRouteParams,
 } from "@/lib/chat-route-diagnostics";
 import {
+  describeUnknownRuntimeError,
   getSanitizedDatabaseTarget,
   summarizeAgentLlmConnections,
 } from "@/lib/runtime-diagnostics";
@@ -157,6 +157,82 @@ type RuntimeSnapshot = {
     resolvedContextText: string;
   };
 };
+
+type RuntimeErrorDescription = ReturnType<typeof describeUnknownRuntimeError>;
+
+type OptionalRuntimeValue<T> = {
+  label: string;
+  value: T | null;
+  error: RuntimeErrorDescription | null;
+};
+
+async function resolveOptionalRuntimeValue<T>(
+  label: string,
+  load: () => Promise<T>
+): Promise<OptionalRuntimeValue<T>> {
+  try {
+    return {
+      label,
+      value: await load(),
+      error: null,
+    };
+  } catch (error) {
+    return {
+      label,
+      value: null,
+      error: describeUnknownRuntimeError(error),
+    };
+  }
+}
+
+function renderRuntimeContextWarning(
+  contextError: RuntimeErrorDescription | null
+) {
+  if (!contextError) return "";
+
+  return [
+    "Runtime context warning:",
+    "The thread context resolver was unavailable for this turn.",
+    `Reason: ${contextError.message}`,
+    "Do not claim that thread documents, source memories, or retrieved context were inspected for this response.",
+  ].join(" ");
+}
+
+function logOptionalRuntimeFailures(params: {
+  route: string;
+  conversationId: string;
+  agentId: string;
+  sessionUserId: string;
+  sessionUserEmail: string | null;
+  results: Array<OptionalRuntimeValue<unknown>>;
+}) {
+  for (const result of params.results) {
+    if (!result.error) continue;
+
+    console.warn(
+      "[chat/messages][runtime-prep-degraded]",
+      JSON.stringify({
+        dbTarget: getSanitizedDatabaseTarget(),
+        route: params.route,
+        conversationId: params.conversationId,
+        agentId: params.agentId,
+        sessionUserId: params.sessionUserId,
+        sessionUserEmail: params.sessionUserEmail,
+        stage: result.label,
+        errorName: result.error.name,
+        errorMessage: result.error.message,
+      })
+    );
+  }
+}
+
+function isLlmRuntimeFailureStage(stage: string) {
+  return stage === "llm_health" || stage === "llm_stream" || stage === "llm_generate";
+}
+
+function formatRuntimeFailureStage(stage: string) {
+  return stage.replace(/_/g, " ");
+}
 
 function serializeRuntimeHistory(history: LlmMessage[]) {
   return history.map((entry) => ({
@@ -306,31 +382,26 @@ export async function GET(
   }
 
   try {
-    const [accessSnapshotRaw, primaryConversation] = await Promise.all([
+    const [accessSnapshotRaw, conversation] = await Promise.all([
       getTeamChatConversationAccessSnapshot({
         conversationId: id,
         sessionUserId: session.user.id,
       }),
-      getReadableConversationForUser(id, session.user.id),
+      getConversationForMessagesRoute(id),
     ]);
 
-    const fallbackConversation =
-      !primaryConversation && accessSnapshotRaw.readable
-        ? await getConversationForMessagesRoute(id)
-        : null;
-    const readableSelection = selectMessagesRouteReadableConversation({
+    const accessGate = resolveMessagesRouteAccessGate({
       accessSnapshot: accessSnapshotRaw,
-      primaryConversation,
-      fallbackConversation,
+      directConversation: conversation,
       sessionUserId: session.user.id,
     });
-    const conversation = readableSelection.conversation;
+    const conversationReadable = accessGate.directConversationReadable;
     const accessSnapshot = reconcileMessagesRouteAccessWithReadableConversation({
       accessSnapshot: accessSnapshotRaw,
-      readableConversation: conversation,
+      readableConversation: accessGate.conversation,
       sessionUserId: session.user.id,
     });
-    if (!conversation || readableSelection.lookupSource !== "shared_readable_helper") {
+    if (!conversation || !conversationReadable || !accessSnapshotRaw.readable) {
       console.info(
         "[chat/messages][GET][access_lookup]",
         JSON.stringify({
@@ -342,11 +413,10 @@ export async function GET(
           sessionUserEmail: session.user.email ?? null,
           accessSnapshotReadable: accessSnapshotRaw.readable,
           accessSnapshotStatus: accessSnapshotRaw.status,
-          primaryReadable: isConversationReadableByUser(primaryConversation, session.user.id),
-          fallbackAttempted: Boolean(fallbackConversation) || (!primaryConversation && accessSnapshotRaw.readable),
-          fallbackReadable: readableSelection.fallbackReadable,
-          conversationLookupSource: readableSelection.lookupSource,
-          notFoundReason: readableSelection.notFoundReason,
+          directConversationFound: Boolean(conversation),
+          directConversationReadable: conversationReadable,
+          conversationLookupSource: "access_snapshot_authorized_direct_lookup",
+          notFoundReason: accessSnapshotRaw.notFoundReason,
         })
       );
     }
@@ -363,12 +433,12 @@ export async function GET(
       postHelperLookupFailed: false,
       routeTopMarkerReached,
       paramsIdResolved,
-      notFoundReason: readableSelection.notFoundReason ?? accessSnapshot.notFoundReason,
+      notFoundReason: accessSnapshot.notFoundReason,
       sourceRouteFile: "src/app/api/chat/conversations/[id]/messages/route.ts",
       routeHandlerMarker: "messages-route-parity-v1",
     });
 
-    if (!conversation) {
+    if (accessGate.status === "not_found") {
       const diagnostic = buildMessagesAccessLogPayload({
         conversationId: id,
         sessionUserId: session.user.id,
@@ -376,10 +446,8 @@ export async function GET(
         access: accessSnapshot,
         routeTopMarkerReached,
         paramsIdResolved,
-        conversationLookupSource: readableSelection.lookupSource,
-        readableSnapshotFallbackPassed: readableSelection.fallbackReadable,
         notFoundReason:
-          readableSelection.notFoundReason ??
+          accessGate.notFoundReason ??
           accessSnapshot.notFoundReason ??
           accessDiagnostic.notFoundReason,
       });
@@ -393,9 +461,57 @@ export async function GET(
       );
     }
 
+    if (accessGate.status === "lookup_mismatch") {
+      const diagnostic = buildMessagesAccessLogPayload({
+        conversationId: id,
+        sessionUserId: session.user.id,
+        sessionUserEmail: session.user.email ?? null,
+        access: accessSnapshot,
+        routeTopMarkerReached,
+        paramsIdResolved,
+        conversationLookupSource: "access_snapshot_authorized_direct_lookup",
+        notFoundReason: accessGate.notFoundReason,
+      });
+      console.error(
+        "[chat/messages][GET][readable_route_lookup_mismatch]",
+        JSON.stringify({
+          ...diagnostic,
+          accessSnapshotReadable: accessSnapshotRaw.readable,
+          directConversationFound: Boolean(conversation),
+          directConversationReadable: conversationReadable,
+        })
+      );
+      return NextResponse.json(
+        { error: "Readable conversation could not be loaded by the messages route", diagnostic },
+        { status: accessGate.httpStatus, headers: TEAM_CHAT_NO_STORE_HEADERS }
+      );
+    }
+
+    const readableConversation = accessGate.conversation;
+    if (!readableConversation) {
+      const diagnostic = buildMessagesAccessLogPayload({
+        conversationId: id,
+        sessionUserId: session.user.id,
+        sessionUserEmail: session.user.email ?? null,
+        access: accessSnapshot,
+        routeTopMarkerReached,
+        paramsIdResolved,
+        conversationLookupSource: "access_snapshot_authorized_direct_lookup",
+        notFoundReason: "readable_route_lookup_mismatch",
+      });
+      console.error(
+        "[chat/messages][GET][readable_route_lookup_mismatch]",
+        JSON.stringify(diagnostic)
+      );
+      return NextResponse.json(
+        { error: "Readable conversation could not be loaded by the messages route", diagnostic },
+        { status: 500, headers: TEAM_CHAT_NO_STORE_HEADERS }
+      );
+    }
+
     let messages: Awaited<ReturnType<typeof listMessagesForConversation>>;
     try {
-      messages = await listMessagesForConversation(conversation.id);
+      messages = await listMessagesForConversation(readableConversation.id);
     } catch (error) {
       const failureAccess = {
         ...accessSnapshot,
@@ -446,7 +562,7 @@ export async function GET(
 
     let serializedConversation: ReturnType<typeof serializeConversation>;
     try {
-      serializedConversation = serializeConversation(conversation);
+      serializedConversation = serializeConversation(readableConversation);
     } catch (error) {
       const serializationAccess = {
         ...accessSnapshot,
@@ -495,14 +611,14 @@ export async function GET(
     }
 
     if (messages.length === 0) {
-      const runtimeState = resolveConversationRuntimeState(conversation);
+      const runtimeState = resolveConversationRuntimeState(readableConversation);
       const activeAgent = runtimeState.activeAgentMember?.agent ?? null;
 
       console.warn(
         "[chat/messages][GET][empty]",
         JSON.stringify({
           dbTarget: getSanitizedDatabaseTarget(),
-          conversationId: conversation.id,
+          conversationId: readableConversation.id,
           sessionUserId: session.user.id,
           sessionUserEmail: session.user.email ?? null,
           activeMembershipCount: runtimeState.activeMembers.length,
@@ -519,9 +635,9 @@ export async function GET(
                 llmThinkingMode: activeAgent.llmThinkingMode,
               })
             : [],
-          conversationUpdatedAt: conversation.updatedAt.toISOString(),
-          conversationCreatedAt: conversation.createdAt.toISOString(),
-          latestConversationMessageId: conversation.messages[0]?.id ?? null,
+          conversationUpdatedAt: readableConversation.updatedAt.toISOString(),
+          conversationCreatedAt: readableConversation.createdAt.toISOString(),
+          latestConversationMessageId: readableConversation.messages[0]?.id ?? null,
         })
       );
     }
@@ -632,6 +748,7 @@ export async function POST(
             model: string | null;
             region: string | null;
           } | null = null;
+          let failureStage = "message_history";
 
           try {
             const recentMessages = await prisma.chatMessage.findMany({
@@ -669,10 +786,29 @@ export async function POST(
               routingPolicy: resolveAgentLlmRoutingPolicy(agent.abilities),
             });
             const selectedTarget = threadLlmPlan.target;
+            selectedTargetSummary = selectedTarget
+              ? {
+                  connectionId: selectedTarget.connectionId,
+                  provider: selectedTarget.provider,
+                  model: selectedTarget.model,
+                  region: selectedTarget.region,
+                }
+              : null;
+            const selectedRuntimeConfig = selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : null;
+            const selectedThinkingMode = selectedTarget?.thinkingMode ?? agent.llmThinkingMode;
+            const enableThinking = resolveThinkingMode({ ...agent, llmThinkingMode: selectedThinkingMode }, message);
+            writeEvent({ type: "meta", thinking: enableThinking });
 
-            const [orgContext, contextBundle, senderUser] = await Promise.all([
-              buildOrgContext(),
-              resolveConversationContextBundle({
+            failureStage = "llm_health";
+            const llmHealth = await probeAgentLlm(selectedRuntimeConfig ?? agent);
+            if (llmHealth.llmStatus !== "online") {
+              throw new Error(llmHealth.llmLastError || "LLM brain is offline");
+            }
+
+            failureStage = "runtime_context";
+            const [orgContextResult, contextBundleResult, senderUserResult] = await Promise.all([
+              resolveOptionalRuntimeValue("org_context", () => buildOrgContext()),
+              resolveOptionalRuntimeValue("conversation_context", () => resolveConversationContextBundle({
                 conversationId: conversation.id,
                 authority: {
                   requestingUserId: session.user.id,
@@ -691,54 +827,62 @@ export async function POST(
                       },
                     }
                   : null,
-              }),
-              prisma.user.findUnique({
+              })),
+              resolveOptionalRuntimeValue("sender_user", () => prisma.user.findUnique({
                 where: { id: session.user.id },
                 select: { displayName: true, name: true },
-              }),
+              })),
             ]);
-            selectedTargetSummary = selectedTarget
-              ? {
-                  connectionId: selectedTarget.connectionId,
-                  provider: selectedTarget.provider,
-                  model: selectedTarget.model,
-                  region: selectedTarget.region,
-                }
-              : null;
-            const selectedRuntimeConfig = selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : null;
-            const selectedThinkingMode = selectedTarget?.thinkingMode ?? agent.llmThinkingMode;
-            const enableThinking = resolveThinkingMode({ ...agent, llmThinkingMode: selectedThinkingMode }, message);
-            writeEvent({ type: "meta", thinking: enableThinking });
-            const llmHealth = await probeAgentLlm(selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : agent);
-            retrievalSources = contextBundle.sources;
-            const currentUserName = senderUser?.displayName || senderUser?.name || null;
-            const runtimeTruthfulExecutionClaims = buildTruthfulExecutionClaimSnapshot({
-              documentIntelligence: contextBundle.documentIntelligence,
-              agentControl: contextBundle.agentControl,
-              progressiveAssembly: contextBundle.progressiveAssembly,
-              asyncAgentWork: contextBundle.asyncAgentWork,
-              debugTrace: contextBundle.debugTrace,
-            });
-            truthfulExecutionClaims = runtimeTruthfulExecutionClaims;
-            await upsertTruthfulExecutionRegistryCandidates({
+            logOptionalRuntimeFailures({
+              route: "api/chat/conversations/[id]/messages.POST:stream",
               conversationId: conversation.id,
-              snapshot: runtimeTruthfulExecutionClaims,
-            }).catch((error) => {
-              console.warn(
-                "[chat/messages][truthful-execution-registry]",
-                JSON.stringify({
-                  conversationId: conversation.id,
-                  agentId: agent.id,
-                  error: error instanceof Error ? error.message : String(error),
+              agentId: agent.id,
+              sessionUserId: session.user.id,
+              sessionUserEmail: session.user.email ?? null,
+              results: [orgContextResult, contextBundleResult, senderUserResult],
+            });
+            const orgContext = orgContextResult.value ?? "";
+            const contextBundle = contextBundleResult.value;
+            retrievalSources = contextBundle?.sources ?? [];
+            const currentUserName = senderUserResult.value?.displayName || senderUserResult.value?.name || null;
+            const runtimeTruthfulExecutionClaims = contextBundle
+              ? buildTruthfulExecutionClaimSnapshot({
+                  documentIntelligence: contextBundle.documentIntelligence,
+                  agentControl: contextBundle.agentControl,
+                  progressiveAssembly: contextBundle.progressiveAssembly,
+                  asyncAgentWork: contextBundle.asyncAgentWork,
+                  debugTrace: contextBundle.debugTrace,
                 })
-              );
-            });
-            const truthfulExecutionContext = renderTruthfulExecutionClaimContext(runtimeTruthfulExecutionClaims);
-            const bufferExecutionSensitiveResponse = shouldUseBufferedTruthfulExecutionResponse({
-              userPrompt: message,
-              snapshot: runtimeTruthfulExecutionClaims,
-              contextText: contextBundle.text,
-            });
+              : null;
+            truthfulExecutionClaims = runtimeTruthfulExecutionClaims;
+            if (runtimeTruthfulExecutionClaims) {
+              await upsertTruthfulExecutionRegistryCandidates({
+                conversationId: conversation.id,
+                snapshot: runtimeTruthfulExecutionClaims,
+              }).catch((error) => {
+                const registryError = describeUnknownRuntimeError(error);
+                console.warn(
+                  "[chat/messages][truthful-execution-registry]",
+                  JSON.stringify({
+                    conversationId: conversation.id,
+                    agentId: agent.id,
+                    errorName: registryError.name,
+                    errorMessage: registryError.message,
+                  })
+                );
+              });
+            }
+            const truthfulExecutionContext = runtimeTruthfulExecutionClaims
+              ? renderTruthfulExecutionClaimContext(runtimeTruthfulExecutionClaims)
+              : "";
+            const bufferExecutionSensitiveResponse = runtimeTruthfulExecutionClaims
+              ? shouldUseBufferedTruthfulExecutionResponse({
+                  userPrompt: message,
+                  snapshot: runtimeTruthfulExecutionClaims,
+                  contextText: contextBundle?.text ?? "",
+                })
+              : false;
+            failureStage = "thread_state_persistence";
             await prisma.conversation.update({
               where: { id: conversation.id },
               data: {
@@ -746,6 +890,7 @@ export async function POST(
                 updatedAt: new Date(),
               },
             });
+            failureStage = "agent_status_persistence";
             await prisma.aIAgent.update({
               where: { id: agent.id },
               data: {
@@ -756,11 +901,8 @@ export async function POST(
               },
             });
 
-            if (llmHealth.llmStatus !== "online") {
-              throw new Error(llmHealth.llmLastError || "LLM brain is offline");
-            }
-            if (contextBundle.sources.length > 0) {
-              writeEvent({ type: "retrieval", sources: contextBundle.sources });
+            if (retrievalSources.length > 0) {
+              writeEvent({ type: "retrieval", sources: retrievalSources });
             }
 
             let finalThinking = "";
@@ -790,14 +932,20 @@ export async function POST(
               return [{ role: (entry.senderAgentId ? "assistant" : "user") as "assistant" | "user", content: entry.body }];
             });
 
-            const runtimeOrgContext = [orgContext, contextBundle.text, truthfulExecutionContext].filter(Boolean).join("\n\n");
+            const runtimeContextWarning = renderRuntimeContextWarning(contextBundleResult.error);
+            const runtimeOrgContext = [
+              orgContext,
+              contextBundle?.text,
+              truthfulExecutionContext,
+              runtimeContextWarning,
+            ].filter(Boolean).join("\n\n");
             const runtimeConfig = {
               ...agent,
               ...(selectedRuntimeConfig ?? {}),
               llmThinkingMode: selectedThinkingMode,
               orgContext: runtimeOrgContext,
-              contextSources: contextBundle.summarySources,
-              resolvedSources: contextBundle.sources,
+              contextSources: contextBundle?.summarySources ?? [],
+              resolvedSources: contextBundle?.sources ?? [],
               currentUserName,
             };
             const runtimePreview = buildAgentRuntimePreview({
@@ -811,23 +959,26 @@ export async function POST(
                   : []
               ),
             });
-            runtimeSnapshot = buildRuntimeSnapshot({
-              runtimePreview,
-              sourceSelection: contextBundle.sourceSelection,
-              sourceDecisions: contextBundle.sourceDecisions,
-              resolvedSources: contextBundle.sources,
-              documentChunking: contextBundle.documentChunking,
-              documentIntelligence: contextBundle.documentIntelligence,
-              agentControl: contextBundle.agentControl,
-              asyncAgentWork: contextBundle.asyncAgentWork,
-              debugTrace: contextBundle.debugTrace,
-              truthfulExecutionClaims: runtimeTruthfulExecutionClaims,
-              currentUserName,
-              history,
-              orgContext: runtimeOrgContext,
-              resolvedContextText: contextBundle.text,
-            });
+            runtimeSnapshot = contextBundle && runtimeTruthfulExecutionClaims
+              ? buildRuntimeSnapshot({
+                  runtimePreview,
+                  sourceSelection: contextBundle.sourceSelection,
+                  sourceDecisions: contextBundle.sourceDecisions,
+                  resolvedSources: contextBundle.sources,
+                  documentChunking: contextBundle.documentChunking,
+                  documentIntelligence: contextBundle.documentIntelligence,
+                  agentControl: contextBundle.agentControl,
+                  asyncAgentWork: contextBundle.asyncAgentWork,
+                  debugTrace: contextBundle.debugTrace,
+                  truthfulExecutionClaims: runtimeTruthfulExecutionClaims,
+                  currentUserName,
+                  history,
+                  orgContext: runtimeOrgContext,
+                  resolvedContextText: contextBundle.text,
+                })
+              : null;
 
+            failureStage = "llm_stream";
             for await (const event of streamAgentReply({
               ...runtimeConfig,
               enableThinking,
@@ -863,6 +1014,7 @@ export async function POST(
             if (!trimmedContent) {
               throw new Error("The LLM returned an empty response");
             }
+            failureStage = "truthfulness_guard";
             const guarded = truthfulExecutionClaims
               ? enforceTruthfulExecutionClaims(trimmedContent, truthfulExecutionClaims)
               : { answer: trimmedContent, validation: { ok: true, violations: [] } };
@@ -883,6 +1035,7 @@ export async function POST(
               writeEvent({ type: "done", model: resolvedModel ?? agent.llmModel ?? "unknown" });
             }
 
+            failureStage = "agent_message_persistence";
             const agentMessage = await prisma.chatMessage.create({
               data: {
                 conversationId: conversation.id,
@@ -909,6 +1062,7 @@ export async function POST(
               },
             });
 
+            failureStage = "agent_status_persistence";
             await prisma.aIAgent.update({
               where: { id: agent.id },
               data: {
@@ -920,6 +1074,7 @@ export async function POST(
             });
 
             const resolvedThreadState = applyResolvedThreadModel(threadLlmPlan.state, resolvedModel);
+            failureStage = "thread_state_persistence";
             await prisma.conversation.update({
               where: { id: conversation.id },
               data: {
@@ -941,7 +1096,9 @@ export async function POST(
             }
             try { controller.close(); } catch { /* already closed */ }
           } catch (error) {
-            const details = error instanceof Error ? error.message : "Unable to reach the configured LLM endpoint";
+            const runtimeError = describeUnknownRuntimeError(error);
+            const details = runtimeError.message;
+            const isLlmFailure = isLlmRuntimeFailureStage(failureStage);
             console.error(
               "[chat/messages][stream] Agent reply error:",
               JSON.stringify({
@@ -949,7 +1106,9 @@ export async function POST(
                 agentId: agent.id,
                 agentName: agent.name,
                 selectedTarget: selectedTargetSummary,
-                error: details,
+                failureStage,
+                errorName: runtimeError.name,
+                errorMessage: details,
               })
             );
 
@@ -957,26 +1116,31 @@ export async function POST(
             // cannot prevent the subsequent steps from running. The goal is
             // to always emit a final_messages event and close the stream so
             // the client receives a clean response instead of "Something went wrong."
-            try {
-              await prisma.aIAgent.update({
-                where: { id: agent.id },
-                data: {
-                  llmStatus: "offline",
-                  llmLastCheckedAt: new Date(),
-                  llmLastError: details,
-                },
-              });
-            } catch (dbErr) {
-              console.error("[chat/messages][stream] Failed to update agent status:", dbErr);
+            if (isLlmFailure) {
+              try {
+                await prisma.aIAgent.update({
+                  where: { id: agent.id },
+                  data: {
+                    llmStatus: "offline",
+                    llmLastCheckedAt: new Date(),
+                    llmLastError: details,
+                  },
+                });
+              } catch (dbErr) {
+                console.error("[chat/messages][stream] Failed to update agent status:", dbErr);
+              }
             }
 
             let fallbackMessage: CreatedChatMessage | null = null;
+            const fallbackBody = isLlmFailure
+              ? `I couldn't reach my configured LLM brain just now. Please check my endpoint settings and try again.\n\nDetails: ${details}`
+              : `I couldn't finish this chat turn because the ${formatRuntimeFailureStage(failureStage)} step failed. Please try again.\n\nDetails: ${details}`;
             try {
               fallbackMessage = await prisma.chatMessage.create({
                 data: {
                   conversationId: conversation.id,
                   senderAgentId: agent.id,
-                  body: `I couldn't reach my configured LLM brain just now. Please check my endpoint settings and try again.\n\nDetails: ${details}`,
+                  body: fallbackBody,
                 },
                 include: {
                   senderUser: {
@@ -1016,6 +1180,7 @@ export async function POST(
                   ? [serializeCreatedMessage(userMessage), serializeCreatedMessage(fallbackMessage)]
                   : [serializeCreatedMessage(userMessage)],
                 error: details,
+                errorStage: failureStage,
                 retrievalSources,
                 runtimeSnapshot,
               });
@@ -1080,10 +1245,19 @@ export async function POST(
             region: selectedTarget.region,
           }
         : null;
+      let failureStage = "llm_health";
       try {
-        const [orgContext, contextBundle, senderUser] = await Promise.all([
-          buildOrgContext(),
-          resolveConversationContextBundle({
+        const selectedRuntimeConfig = selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : null;
+        const selectedThinkingMode = selectedTarget?.thinkingMode ?? agent.llmThinkingMode;
+        const llmHealth = await probeAgentLlm(selectedRuntimeConfig ?? agent);
+        if (llmHealth.llmStatus !== "online") {
+          throw new Error(llmHealth.llmLastError || "LLM brain is offline");
+        }
+
+        failureStage = "runtime_context";
+        const [orgContextResult, contextBundleResult, senderUserResult] = await Promise.all([
+          resolveOptionalRuntimeValue("org_context", () => buildOrgContext()),
+          resolveOptionalRuntimeValue("conversation_context", () => resolveConversationContextBundle({
             conversationId: conversation.id,
             authority: {
               requestingUserId: session.user.id,
@@ -1102,50 +1276,71 @@ export async function POST(
                   },
                 }
               : null,
-          }),
-          prisma.user.findUnique({
+          })),
+          resolveOptionalRuntimeValue("sender_user", () => prisma.user.findUnique({
             where: { id: session.user.id },
             select: { displayName: true, name: true },
-          }),
+          })),
         ]);
-        const selectedRuntimeConfig = selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : null;
-        const selectedThinkingMode = selectedTarget?.thinkingMode ?? agent.llmThinkingMode;
-        const llmHealth = await probeAgentLlm(selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : agent);
-        const currentUserName = senderUser?.displayName || senderUser?.name || null;
-        const truthfulExecutionClaims = buildTruthfulExecutionClaimSnapshot({
-          documentIntelligence: contextBundle.documentIntelligence,
-          agentControl: contextBundle.agentControl,
-          progressiveAssembly: contextBundle.progressiveAssembly,
-          asyncAgentWork: contextBundle.asyncAgentWork,
-          debugTrace: contextBundle.debugTrace,
-        });
-        await upsertTruthfulExecutionRegistryCandidates({
+        logOptionalRuntimeFailures({
+          route: "api/chat/conversations/[id]/messages.POST",
           conversationId: conversation.id,
-          snapshot: truthfulExecutionClaims,
-        }).catch((error) => {
-          console.warn(
-            "[chat/messages][truthful-execution-registry]",
-            JSON.stringify({
-              conversationId: conversation.id,
-              agentId: agent.id,
-              error: error instanceof Error ? error.message : String(error),
-            })
-          );
+          agentId: agent.id,
+          sessionUserId: session.user.id,
+          sessionUserEmail: session.user.email ?? null,
+          results: [orgContextResult, contextBundleResult, senderUserResult],
         });
-        const truthfulExecutionContext = renderTruthfulExecutionClaimContext(truthfulExecutionClaims);
-        retrievalSources = contextBundle.sources;
+        const orgContext = orgContextResult.value ?? "";
+        const contextBundle = contextBundleResult.value;
+        const currentUserName = senderUserResult.value?.displayName || senderUserResult.value?.name || null;
+        const truthfulExecutionClaims = contextBundle
+          ? buildTruthfulExecutionClaimSnapshot({
+              documentIntelligence: contextBundle.documentIntelligence,
+              agentControl: contextBundle.agentControl,
+              progressiveAssembly: contextBundle.progressiveAssembly,
+              asyncAgentWork: contextBundle.asyncAgentWork,
+              debugTrace: contextBundle.debugTrace,
+            })
+          : null;
+        if (truthfulExecutionClaims) {
+          await upsertTruthfulExecutionRegistryCandidates({
+            conversationId: conversation.id,
+            snapshot: truthfulExecutionClaims,
+          }).catch((error) => {
+            const registryError = describeUnknownRuntimeError(error);
+            console.warn(
+              "[chat/messages][truthful-execution-registry]",
+              JSON.stringify({
+                conversationId: conversation.id,
+                agentId: agent.id,
+                errorName: registryError.name,
+                errorMessage: registryError.message,
+              })
+            );
+          });
+        }
+        const truthfulExecutionContext = truthfulExecutionClaims
+          ? renderTruthfulExecutionClaimContext(truthfulExecutionClaims)
+          : "";
+        retrievalSources = contextBundle?.sources ?? [];
         const history: Array<{ role: "user" | "assistant"; content: string }> = recentMessages.reverse().map((entry) => ({
           role: (entry.senderAgentId ? "assistant" : "user") as "assistant" | "user",
           content: entry.body,
         }));
-        const runtimeOrgContext = [orgContext, contextBundle.text, truthfulExecutionContext].filter(Boolean).join("\n\n");
+        const runtimeContextWarning = renderRuntimeContextWarning(contextBundleResult.error);
+        const runtimeOrgContext = [
+          orgContext,
+          contextBundle?.text,
+          truthfulExecutionContext,
+          runtimeContextWarning,
+        ].filter(Boolean).join("\n\n");
         const runtimeConfig = {
           ...agent,
           ...(selectedRuntimeConfig ?? {}),
           llmThinkingMode: selectedThinkingMode,
           orgContext: runtimeOrgContext,
-          contextSources: contextBundle.summarySources,
-          resolvedSources: contextBundle.sources,
+          contextSources: contextBundle?.summarySources ?? [],
+          resolvedSources: contextBundle?.sources ?? [],
           currentUserName,
         };
         const runtimePreview = buildAgentRuntimePreview({
@@ -1155,22 +1350,25 @@ export async function POST(
             content: entry.content ?? "",
           })),
         });
-        runtimeSnapshot = buildRuntimeSnapshot({
-          runtimePreview,
-          sourceSelection: contextBundle.sourceSelection,
-          sourceDecisions: contextBundle.sourceDecisions,
-          resolvedSources: contextBundle.sources,
-          documentChunking: contextBundle.documentChunking,
-          documentIntelligence: contextBundle.documentIntelligence,
-          agentControl: contextBundle.agentControl,
-          asyncAgentWork: contextBundle.asyncAgentWork,
-          debugTrace: contextBundle.debugTrace,
-          truthfulExecutionClaims,
-          currentUserName,
-          history,
-          orgContext: runtimeOrgContext,
-          resolvedContextText: contextBundle.text,
-        });
+        runtimeSnapshot = contextBundle && truthfulExecutionClaims
+          ? buildRuntimeSnapshot({
+              runtimePreview,
+              sourceSelection: contextBundle.sourceSelection,
+              sourceDecisions: contextBundle.sourceDecisions,
+              resolvedSources: contextBundle.sources,
+              documentChunking: contextBundle.documentChunking,
+              documentIntelligence: contextBundle.documentIntelligence,
+              agentControl: contextBundle.agentControl,
+              asyncAgentWork: contextBundle.asyncAgentWork,
+              debugTrace: contextBundle.debugTrace,
+              truthfulExecutionClaims,
+              currentUserName,
+              history,
+              orgContext: runtimeOrgContext,
+              resolvedContextText: contextBundle.text,
+            })
+          : null;
+        failureStage = "thread_state_persistence";
         await prisma.conversation.update({
           where: { id: conversation.id },
           data: {
@@ -1178,6 +1376,7 @@ export async function POST(
             updatedAt: new Date(),
           },
         });
+        failureStage = "agent_status_persistence";
         await prisma.aIAgent.update({
           where: { id: agent.id },
           data: {
@@ -1188,17 +1387,17 @@ export async function POST(
           },
         });
 
-        if (llmHealth.llmStatus !== "online") {
-          throw new Error(llmHealth.llmLastError || "LLM brain is offline");
-        }
-
+        failureStage = "llm_generate";
         const response = await generateAgentReply({
           ...runtimeConfig,
           enableThinking: resolveThinkingMode({ ...agent, llmThinkingMode: selectedThinkingMode }, message),
           history,
         });
 
-        const guarded = enforceTruthfulExecutionClaims(response.content, truthfulExecutionClaims);
+        failureStage = "truthfulness_guard";
+        const guarded = truthfulExecutionClaims
+          ? enforceTruthfulExecutionClaims(response.content, truthfulExecutionClaims)
+          : { answer: response.content, validation: { ok: true, violations: [] } };
         if (!guarded.validation.ok) {
           console.warn(
             "[chat/messages][truthful-execution-guard]",
@@ -1211,6 +1410,7 @@ export async function POST(
         }
         agentReply = guarded.answer;
 
+        failureStage = "agent_status_persistence";
         await prisma.aIAgent.update({
           where: { id: agent.id },
           data: {
@@ -1220,6 +1420,7 @@ export async function POST(
             llmLastError: null,
           },
         });
+        failureStage = "thread_state_persistence";
         await prisma.conversation.update({
           where: { id: conversation.id },
           data: {
@@ -1230,7 +1431,9 @@ export async function POST(
           },
         });
       } catch (error) {
-        const details = error instanceof Error ? error.message : "Unable to reach the configured LLM endpoint";
+        const runtimeError = describeUnknownRuntimeError(error);
+        const details = runtimeError.message;
+        const isLlmFailure = isLlmRuntimeFailureStage(failureStage);
         console.error(
           "[chat/messages] Agent reply error:",
           JSON.stringify({
@@ -1238,20 +1441,26 @@ export async function POST(
             agentId: agent.id,
             agentName: agent.name,
             selectedTarget: selectedTargetSummary,
-            error: details,
+            failureStage,
+            errorName: runtimeError.name,
+            errorMessage: details,
           })
         );
 
-        await prisma.aIAgent.update({
-          where: { id: agent.id },
-          data: {
-            llmStatus: "offline",
-            llmLastCheckedAt: new Date(),
-            llmLastError: details,
-          },
-        });
+        if (isLlmFailure) {
+          await prisma.aIAgent.update({
+            where: { id: agent.id },
+            data: {
+              llmStatus: "offline",
+              llmLastCheckedAt: new Date(),
+              llmLastError: details,
+            },
+          });
+        }
 
-        agentReply = `I couldn't reach my configured LLM brain just now. Please check my endpoint settings and try again.\n\nDetails: ${details}`;
+        agentReply = isLlmFailure
+          ? `I couldn't reach my configured LLM brain just now. Please check my endpoint settings and try again.\n\nDetails: ${details}`
+          : `I couldn't finish this chat turn because the ${formatRuntimeFailureStage(failureStage)} step failed. Please try again.\n\nDetails: ${details}`;
       }
 
       agentMessage = await prisma.chatMessage.create({

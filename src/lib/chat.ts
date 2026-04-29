@@ -281,6 +281,16 @@ export type MessagesRouteReadableConversationSelection<
   notFoundReason: string | null;
 };
 
+export type MessagesRouteAccessGateStatus = "readable" | "not_found" | "lookup_mismatch";
+
+export type MessagesRouteAccessGate<TConversation extends ReadableConversationAccessSnapshot> = {
+  status: MessagesRouteAccessGateStatus;
+  conversation: TConversation | null;
+  directConversationReadable: boolean;
+  httpStatus: 200 | 404 | 500;
+  notFoundReason: string | null;
+};
+
 function isArchivedInScope(archivedAt: Date | null, scope: ConversationArchiveScope = "exclude") {
   if (scope === "include") {
     return true;
@@ -535,6 +545,47 @@ export function selectMessagesRouteReadableConversation<
     conversation: params.fallbackConversation,
     lookupSource: "readable_snapshot_fallback",
     fallbackReadable: true,
+    notFoundReason: null,
+  };
+}
+
+export function resolveMessagesRouteAccessGate<
+  TConversation extends ReadableConversationAccessSnapshot,
+>(params: {
+  accessSnapshot: TeamChatConversationAccessSnapshot;
+  directConversation: TConversation | null | undefined;
+  sessionUserId: string;
+}): MessagesRouteAccessGate<TConversation> {
+  if (!params.accessSnapshot.readable || params.accessSnapshot.status !== 200) {
+    return {
+      status: "not_found",
+      conversation: null,
+      directConversationReadable: false,
+      httpStatus: 404,
+      notFoundReason: params.accessSnapshot.notFoundReason,
+    };
+  }
+
+  const directConversationReadable = isConversationReadableByUser(
+    params.directConversation,
+    params.sessionUserId
+  );
+
+  if (!directConversationReadable) {
+    return {
+      status: "lookup_mismatch",
+      conversation: null,
+      directConversationReadable: false,
+      httpStatus: 500,
+      notFoundReason: "readable_route_lookup_mismatch",
+    };
+  }
+
+  return {
+    status: "readable",
+    conversation: params.directConversation ?? null,
+    directConversationReadable,
+    httpStatus: 200,
     notFoundReason: null,
   };
 }
