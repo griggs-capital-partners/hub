@@ -415,6 +415,50 @@ export function summarizeSourceObservationLimitations(limitations: string[]) {
   );
 }
 
+export function isCompletedSourceObservation(
+  observation: SourceObservation | null | undefined
+): boolean {
+  return (
+    observation?.producer?.executionState === "executed" ||
+    observation?.producer?.executionState === "deterministically_derived"
+  );
+}
+
+export function summarizeObservationEvidence(observation: SourceObservation | null | undefined) {
+  if (!observation) return null;
+  const producer = observation.producer;
+  return {
+    observationId: observation.id,
+    observationType: observation.type,
+    sourceDocumentId: observation.sourceDocumentId ?? observation.conversationDocumentId ?? null,
+    sourceKind: observation.sourceKind,
+    producerId: producer?.producerId ?? null,
+    producerKind: producer?.producerKind ?? null,
+    capabilityId: producer?.capabilityId ?? null,
+    executionState: producer?.executionState ?? null,
+    hasExecutionEvidence: Boolean(producer?.executionEvidence),
+    extractionMethod: observation.extractionMethod,
+    locator: {
+      pageNumberStart: observation.sourceLocator.pageNumberStart ?? observation.sourceLocator.page ?? null,
+      pageNumberEnd: observation.sourceLocator.pageNumberEnd ?? observation.sourceLocator.page ?? null,
+      tableId: observation.sourceLocator.tableId ?? null,
+      sheetName: observation.sourceLocator.sheetName ?? null,
+      chunkId: observation.sourceLocator.chunkId ?? null,
+      attributionAmbiguous: observation.sourceLocator.attributionAmbiguous ?? false,
+    },
+    noUnavailableToolExecutionClaimed: true as const,
+  };
+}
+
+export function assertCompletedObservationHasEvidence(observation: SourceObservation): void {
+  if (!isCompletedSourceObservation(observation)) {
+    throw new Error(`SourceObservation ${observation.id} is not completed with execution-backed evidence.`);
+  }
+  if (!observation.producer.executionEvidence && !normalizeWhitespace(observation.extractionMethod)) {
+    throw new Error(`SourceObservation ${observation.id} is missing trace-safe execution evidence.`);
+  }
+}
+
 export function buildSourceObservationsFromSelectedDocumentChunks(params: {
   document: SourceObservationDocumentRef;
   contextKind: string;
@@ -790,13 +834,7 @@ export function mapSourceObservationToPromotionInput(
   const sourceDocumentId = observation.sourceDocumentId ?? observation.conversationDocumentId ?? observation.sourceId ?? null;
   if (!sourceDocumentId) return null;
   if (!normalizeWhitespace(observation.content)) return null;
-  if (
-    observation.producer.executionState === "future" ||
-    observation.producer.executionState === "planned" ||
-    observation.producer.executionState === "unavailable"
-  ) {
-    return null;
-  }
+  if (!isCompletedSourceObservation(observation)) return null;
 
   return {
     id: observation.id,
@@ -821,11 +859,7 @@ export function selectSourceObservationsForTransport(params: {
   const maxObservationsPerDocument = Math.max(1, params.maxObservationsPerDocument ?? 8);
   const excludedObservations: SourceObservationTransportSelection["excludedObservations"] = [];
   const eligible = params.observations.filter((observation) => {
-    if (
-      observation.producer.executionState === "future" ||
-      observation.producer.executionState === "planned" ||
-      observation.producer.executionState === "unavailable"
-    ) {
+    if (!isCompletedSourceObservation(observation)) {
       excludedObservations.push({
         observationId: observation.id,
         reason: "unavailable_or_future",
@@ -958,10 +992,7 @@ export function buildSourceObservationDebugSummary(params: {
   observationDerivedGapDebtCandidateCount?: number | null;
   missingObservationNeeds?: SourceObservationNeed[];
 }): SourceObservationDebugSummary {
-  const completed = params.observations.filter((observation) =>
-    observation.producer.executionState === "executed" ||
-    observation.producer.executionState === "deterministically_derived"
-  );
+  const completed = params.observations.filter(isCompletedSourceObservation);
   const countsByObservationType: Record<string, number> = {};
   const countsBySourceDocument: Record<string, number> = {};
   const countsByProducerKind: Record<string, number> = {};

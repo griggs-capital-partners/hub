@@ -13,7 +13,10 @@ const {
   buildProducerRequestsFromAgentWorkPlan,
   buildProducerRequestsFromSourceObservationNeeds,
   buildProducerRequestsFromTableSignals,
+  buildSourceObservationProducerAvailabilitySnapshot,
   buildSourceObservationProducerDebugSummary,
+  canProducerResultCreateObservation,
+  resolveSourceObservationProducerAvailability,
   runDeterministicSourceObservationProducer,
   runDeterministicSourceObservationProducers,
 } = jiti(path.join(__dirname, "..", "src", "lib", "source-observation-producers.ts"));
@@ -180,6 +183,23 @@ runTest("supports explicit producer result states and gates observations to comp
   assert.ok(unresolved.unresolvedNeeds.some((need) => need.payloadType === "structured_table"));
   assert.ok(unresolved.unresolvedNeeds.some((need) => need.payloadType === "ocr_text"));
   assert.ok(unresolved.unresolvedNeeds.some((need) => need.payloadType === "vision_observation"));
+
+  const plannedStructured = makeObservation({
+    ...structured,
+    id: "obs-planned-structured-table",
+    producer: {
+      ...structured.producer,
+      executionState: "planned",
+      executionEvidence: null,
+    },
+  });
+  const plannedResult = runDeterministicSourceObservationProducer({
+    request,
+    observations: [signal, plannedStructured],
+  });
+  assert.notEqual(plannedResult.state, "completed_with_evidence");
+  assert.equal(plannedResult.observations.length, 0);
+  assert.equal(canProducerResultCreateObservation(plannedResult), false);
 });
 
 runTest("keeps unavailable native/OCR/vision/rendered/Python/connector needs unresolved", () => {
@@ -225,7 +245,8 @@ runTest("reuses canonical catalog identifiers in manifests and debug summary", (
   assert.ok(manifestIds.includes("source_observation"));
   assert.ok(!manifestIds.includes("table_body_payload"));
 
-  const requests = buildProducerRequestsFromSourceObservationNeeds({
+  const requests = [
+    ...buildProducerRequestsFromSourceObservationNeeds({
     needs: [
       {
         id: "need-native",
@@ -248,16 +269,180 @@ runTest("reuses canonical catalog identifiers in manifests and debug summary", (
         noExecutionClaimed: true,
       },
     ],
-  });
+    }),
+    ...buildProducerRequestsFromTableSignals({ observations: [makeObservation()] }),
+  ];
   const results = runDeterministicSourceObservationProducers({ requests, observations: [] });
   const summary = buildSourceObservationProducerDebugSummary({ requests, results });
 
   assert.equal(summary.nativeFileLane.plannedCount, 1);
   assert.equal(summary.nativeFileLane.catalogOnlyCount, 1);
-  assert.equal(summary.tableBodyRecovery.requestedCount, 1);
+  assert.equal(summary.tableBodyRecovery.requestedCount, 2);
   assert.ok(summary.reusedCatalogIdentifiers.includes("native_file_reference"));
   assert.ok(summary.reusedCatalogIdentifiers.includes("structured_table"));
+  assert.ok(summary.reusedCatalogIdentifiers.includes("existing_parser_text_extraction"));
   assert.equal(summary.newlyIntroducedIdentifierCount, 0);
+});
+
+runTest("availability context distinguishes catalog, model, transport, runtime, approval, and evidence signals", () => {
+  const requests = buildProducerRequestsFromSourceObservationNeeds({
+    needs: [
+      {
+        id: "need-native-runtime",
+        observationType: "connector_file_snapshot",
+        sourceId: null,
+        capability: "source_connector_read",
+        payloadType: "native_file_reference",
+        state: "unavailable",
+        reason: "Need native file payload without runtime attachment.",
+        noExecutionClaimed: true,
+      },
+      {
+        id: "need-approval",
+        observationType: "ocr_text",
+        sourceId: "doc-approval",
+        conversationDocumentId: "doc-approval",
+        capability: "ocr",
+        payloadType: "ocr_text",
+        state: "approval_required",
+        reason: "OCR would require explicit approval.",
+        noExecutionClaimed: true,
+      },
+    ],
+  });
+  const context = buildSourceObservationProducerAvailabilitySnapshot({
+    requests,
+    transport: {
+      planId: "transport-wp3c",
+      agentWorkPlanId: "plan-wp3c",
+      agentWorkPlanTraceId: "trace-wp3c",
+      missingPayloadCapabilities: [
+        {
+          id: "missing-native",
+          payloadType: "native_file_reference",
+          sourceId: null,
+          neededCapability: "source_connector_read",
+          reason: "Native file runtime attachment is absent.",
+          candidateToolIds: ["sharepoint_file_connector"],
+          existingCapabilityGapKeys: [],
+          requiresApproval: false,
+          asyncRecommended: true,
+          noUnavailableToolExecutionClaimed: true,
+        },
+      ],
+      missingContextLaneProposals: [
+        {
+          id: "lane-native",
+          missingPayloadType: "native_file_reference",
+          candidateContextLanes: ["native_file_reference_lane"],
+          boundary: "future_tool_boundary",
+          reason: "Native file lane is cataloged but not executable.",
+          associatedCapabilities: ["source_connector_read"],
+          status: "proposed",
+          noUnavailableToolExecutionClaimed: true,
+        },
+      ],
+      modelCapabilityManifestUsed: {
+        manifestId: "manifest-native-conceptual",
+        supportedPayloadLanes: ["native_file_reference_lane"],
+        unavailableLanes: [],
+        nativePayloadSupport: [
+          {
+            payloadType: "native_file_reference",
+            supported: false,
+            reason: "Current runtime does not attach native files.",
+          },
+        ],
+        capabilityFlags: {
+          source_connector_read: {
+            status: "catalog_only",
+            reason: "Connector read is cataloged only.",
+            noExecutionClaimed: true,
+          },
+        },
+      },
+    },
+    observations: [
+      makeObservation({
+        id: "obs-current-text",
+        type: "parser_text_excerpt",
+        payloadKind: "text",
+        payload: { chunkIndex: 1 },
+        producer: {
+          producerId: "parser_text_extraction",
+          producerKind: "parser",
+          capabilityId: "text_extraction",
+          executionState: "executed",
+          executionEvidence: { chunkIndex: 1 },
+          noUnavailableToolExecutionClaimed: true,
+        },
+        relatedGapHints: [],
+      }),
+    ],
+    traceId: "trace-wp3c",
+    planId: "plan-wp3c",
+  });
+
+  const nativeRequest = requests.find((request) => request.requestedPayloadType === "native_file_reference");
+  const approvalRequest = requests.find((request) => request.requestedPayloadType === "ocr_text");
+  const nativeResolution = resolveSourceObservationProducerAvailability({
+    request: nativeRequest,
+    availabilityContext: context,
+  });
+  assert.equal(nativeResolution.state, "catalog_only");
+  assert.equal(nativeResolution.executableNow, false);
+  assert.ok(nativeResolution.availabilitySources.includes("catalog"));
+  assert.ok(nativeResolution.availabilitySources.includes("model_manifest"));
+  assert.ok(nativeResolution.availabilitySources.includes("transport"));
+  assert.ok(nativeResolution.availabilityDetails.some((entry) => entry.source === "model_manifest" && entry.modelSupported === false));
+  assert.equal(nativeResolution.missingRequirements.includes("source_connector_read"), true);
+
+  const approvalResolution = resolveSourceObservationProducerAvailability({
+    request: approvalRequest,
+    availabilityContext: context,
+  });
+  assert.equal(approvalResolution.state, "approval_required");
+  assert.equal(approvalResolution.requiresApproval, true);
+
+  const approvalResultWithEvidence = runDeterministicSourceObservationProducer({
+    request: approvalRequest,
+    observations: [
+      makeObservation({
+        id: "obs-ocr-existing",
+        type: "ocr_text",
+        sourceId: "doc-approval",
+        conversationDocumentId: "doc-approval",
+        sourceDocumentId: "doc-approval",
+        payloadKind: "text",
+        payload: { textLineCount: 1 },
+        producer: {
+          producerId: "ocr_extractor",
+          producerKind: "tool",
+          capabilityId: "ocr",
+          executionState: "executed",
+          executionEvidence: { fixture: true },
+          noUnavailableToolExecutionClaimed: true,
+        },
+        relatedGapHints: [],
+      }),
+    ],
+    availabilityContext: context,
+  });
+  assert.equal(approvalResultWithEvidence.state, "approval_required");
+  assert.equal(approvalResultWithEvidence.observations.length, 0);
+
+  const results = runDeterministicSourceObservationProducers({
+    requests,
+    observations: [],
+    availabilityContext: context,
+  });
+  assert.ok(results.every((result) => result.state !== "completed_with_evidence"));
+  assert.ok(results.every((result) => result.observations.length === 0));
+
+  const summary = buildSourceObservationProducerDebugSummary({ requests, results });
+  assert.ok(summary.availability.sourcesConsulted.includes("model_manifest"));
+  assert.ok(summary.availability.runtimeUnsupportedCount > 0);
+  assert.ok(summary.availability.modelLaneSupportedButRuntimeMissingCount > 0);
 });
 
 for (const { name, fn } of tests) {

@@ -3,6 +3,10 @@ import type {
   ContextTransportResult,
   MissingPayloadCapability,
 } from "./adaptive-context-transport";
+import {
+  isCompletedSourceObservation,
+  summarizeObservationEvidence,
+} from "./source-observations";
 import type {
   SourceObservation,
   SourceObservationGapHint,
@@ -62,6 +66,74 @@ export type SourceObservationProducerAvailability =
   | "approval_required"
   | "blocked_by_policy"
   | "deferred";
+
+export type SourceObservationProducerAvailabilitySource =
+  | "producer_manifest"
+  | "catalog"
+  | "broker"
+  | "model_manifest"
+  | "runtime"
+  | "transport"
+  | "policy"
+  | "approval"
+  | "source_evidence"
+  | "deterministic_producer"
+  | "async";
+
+export type SourceObservationProducerAvailabilitySignalStatus =
+  | "available"
+  | "catalog_only"
+  | "unavailable"
+  | "missing"
+  | "approval_required"
+  | "blocked_by_policy"
+  | "deferred"
+  | "unknown";
+
+export type SourceObservationProducerAvailabilitySignal = {
+  id: string;
+  source: SourceObservationProducerAvailabilitySource;
+  status: SourceObservationProducerAvailabilitySignalStatus;
+  producerId?: string | null;
+  capabilityId?: string | null;
+  brokerCapabilityId?: string | null;
+  payloadType?: string | null;
+  payloadTypes?: string[];
+  laneId?: string | null;
+  laneIds?: string[];
+  observationType?: string | null;
+  observationTypes?: string[];
+  sourceId?: string | null;
+  conversationDocumentId?: string | null;
+  runtimeExecutable?: boolean | null;
+  modelSupported?: boolean | null;
+  transportSupported?: boolean | null;
+  evidenceAvailable?: boolean | null;
+  deterministicEvidenceAvailable?: boolean | null;
+  reason: string;
+  evidenceSummary?: string | null;
+  missingRequirements?: string[];
+  approvalPath?: string | null;
+  asyncRecommended?: boolean | null;
+  noExecutionClaimed: true;
+};
+
+export type SourceObservationProducerAvailabilityContext = {
+  traceId?: string | null;
+  planId?: string | null;
+  catalogCapabilities?: SourceObservationProducerAvailabilitySignal[];
+  catalogLanes?: SourceObservationProducerAvailabilitySignal[];
+  brokerCapabilities?: SourceObservationProducerAvailabilitySignal[];
+  modelCapabilities?: SourceObservationProducerAvailabilitySignal[];
+  runtimeSupport?: SourceObservationProducerAvailabilitySignal[];
+  transportSupport?: SourceObservationProducerAvailabilitySignal[];
+  policyConstraints?: SourceObservationProducerAvailabilitySignal[];
+  approvalStates?: SourceObservationProducerAvailabilitySignal[];
+  sourceEvidence?: SourceObservationProducerAvailabilitySignal[];
+  deterministicEvidence?: SourceObservationProducerAvailabilitySignal[];
+  asyncSuitability?: SourceObservationProducerAvailabilitySignal[];
+  noExecutionClaimed: true;
+};
 
 export type SourceObservationProducerCapability = {
   capabilityId: string;
@@ -150,14 +222,27 @@ export type SourceObservationProducerResolution = {
   capabilityId: string;
   payloadType?: string | null;
   governedBy: string[];
+  availabilitySources: SourceObservationProducerAvailabilitySource[];
+  primaryAvailabilitySource: SourceObservationProducerAvailabilitySource;
+  availabilityDetails: SourceObservationProducerAvailabilitySignal[];
   catalogPayloadType?: string | null;
   catalogLaneId?: string | null;
   brokerCapabilityId?: string | null;
   executableNow: boolean;
   reason: string;
+  evidenceSummary?: string | null;
+  missingRequirements: string[];
+  approvalPath?: string | null;
+  sourceLocator?: SourceObservationLocator | null;
+  traceId?: string | null;
+  planId?: string | null;
   requiresApproval: boolean;
   blockedByPolicy: boolean;
   asyncRecommended: boolean;
+  asyncSuitability?: {
+    recommended: boolean;
+    reason?: string | null;
+  } | null;
   noExecutionClaimed: true;
 };
 
@@ -194,6 +279,16 @@ export type SourceObservationProducerDebugSummary = {
   countsByProducerId: Record<string, number>;
   countsByCapabilityId: Record<string, number>;
   countsByRequestedObservationType: Record<string, number>;
+  availability: {
+    sourcesConsulted: SourceObservationProducerAvailabilitySource[];
+    countsByAvailabilitySource: Record<string, number>;
+    runtimeExecutableCount: number;
+    runtimeUnsupportedCount: number;
+    modelLaneSupportedButRuntimeMissingCount: number;
+    sourceEvidenceAvailableCount: number;
+    deterministicEvidenceAvailableCount: number;
+    noExecutionWarningCount: number;
+  };
   nativeFileLane: {
     plannedCount: number;
     supportedCount: number;
@@ -332,6 +427,7 @@ const CANONICAL_IDENTIFIER_SET = new Set([
   ...Object.values(PAYLOAD_TO_PRODUCER),
   ...Object.values(PAYLOAD_TO_LANE),
   "pdf_table_body_recovery",
+  "existing_parser_text_extraction",
 ]);
 
 export const DEFAULT_SOURCE_OBSERVATION_PRODUCER_MANIFESTS: SourceObservationProducerManifest[] = [
@@ -817,6 +913,572 @@ export function buildProducerRequestsFromTransportNeeds(params: {
   return uniqueById([...fromMissing, ...fromLaneProposals]);
 }
 
+function availabilityStatusFromProducerAvailability(
+  availability: SourceObservationProducerAvailability | null | undefined
+): SourceObservationProducerAvailabilitySignalStatus {
+  if (availability === "available_read_only") return "available";
+  return availability ?? "unknown";
+}
+
+function observationTypeToPayloadType(type: string | null | undefined) {
+  switch (type) {
+    case "structured_table_observation":
+      return "structured_table";
+    case "rendered_page_image":
+      return "rendered_page_image";
+    case "page_crop_image":
+      return "page_crop_image";
+    case "ocr_text":
+      return "ocr_text";
+    case "vision_observation":
+      return "vision_observation";
+    case "document_ai_result":
+      return "document_ai_result";
+    case "spreadsheet_range":
+      return "spreadsheet_range";
+    case "spreadsheet_formula_map":
+      return "spreadsheet_formula_map";
+    case "connector_file_snapshot":
+      return "native_file_reference";
+    case "chunk_excerpt":
+    case "document_text":
+    case "parser_text_excerpt":
+    case "extracted_text_chunk":
+      return "text_excerpt";
+    default:
+      return "source_observation";
+  }
+}
+
+function availabilitySignal(params: {
+  id?: string | null;
+  source: SourceObservationProducerAvailabilitySource;
+  status: SourceObservationProducerAvailabilitySignalStatus;
+  producerId?: string | null;
+  capabilityId?: string | null;
+  brokerCapabilityId?: string | null;
+  payloadType?: string | null;
+  payloadTypes?: string[];
+  laneId?: string | null;
+  laneIds?: string[];
+  observationType?: string | null;
+  observationTypes?: string[];
+  sourceId?: string | null;
+  conversationDocumentId?: string | null;
+  runtimeExecutable?: boolean | null;
+  modelSupported?: boolean | null;
+  transportSupported?: boolean | null;
+  evidenceAvailable?: boolean | null;
+  deterministicEvidenceAvailable?: boolean | null;
+  reason: string;
+  evidenceSummary?: string | null;
+  missingRequirements?: string[];
+  approvalPath?: string | null;
+  asyncRecommended?: boolean | null;
+}): SourceObservationProducerAvailabilitySignal {
+  return {
+    id: params.id ?? [
+      "availability",
+      params.source,
+      stableSegment(params.producerId ?? params.capabilityId ?? params.payloadType ?? params.laneId),
+      stableSegment(params.sourceId ?? params.conversationDocumentId),
+      stableSegment(params.status),
+    ].join(":"),
+    source: params.source,
+    status: params.status,
+    producerId: params.producerId ?? null,
+    capabilityId: params.capabilityId ?? null,
+    brokerCapabilityId: params.brokerCapabilityId ?? null,
+    payloadType: normalizePayloadType(params.payloadType),
+    payloadTypes: uniqueStrings((params.payloadTypes ?? []).map(normalizePayloadType)),
+    laneId: params.laneId ?? null,
+    laneIds: uniqueStrings(params.laneIds ?? []),
+    observationType: params.observationType ?? null,
+    observationTypes: uniqueStrings(params.observationTypes ?? []),
+    sourceId: params.sourceId ?? null,
+    conversationDocumentId: params.conversationDocumentId ?? null,
+    runtimeExecutable: params.runtimeExecutable ?? null,
+    modelSupported: params.modelSupported ?? null,
+    transportSupported: params.transportSupported ?? null,
+    evidenceAvailable: params.evidenceAvailable ?? null,
+    deterministicEvidenceAvailable: params.deterministicEvidenceAvailable ?? null,
+    reason: params.reason,
+    evidenceSummary: params.evidenceSummary ?? null,
+    missingRequirements: uniqueStrings(params.missingRequirements ?? []),
+    approvalPath: params.approvalPath ?? null,
+    asyncRecommended: params.asyncRecommended ?? null,
+    noExecutionClaimed: true,
+  };
+}
+
+function transportMissingSignalStatus(missing: MissingPayloadCapability): SourceObservationProducerAvailabilitySignalStatus {
+  if (missing.requiresApproval) return "approval_required";
+  if (missing.asyncRecommended) return "deferred";
+  return "unavailable";
+}
+
+function laneProposalSignalStatus(status: string): SourceObservationProducerAvailabilitySignalStatus {
+  if (status === "unsupported" || status === "known_missing") return "unavailable";
+  return "catalog_only";
+}
+
+export function buildSourceObservationProducerAvailabilitySnapshot(params: {
+  requests?: SourceObservationProducerRequest[] | null;
+  observations?: SourceObservation[] | null;
+  transport?: ContextTransportResult | ContextTransportDebugSnapshot | null;
+  manifests?: SourceObservationProducerManifest[] | null;
+  traceId?: string | null;
+  planId?: string | null;
+}): SourceObservationProducerAvailabilityContext {
+  const transport = transportSnapshot(params.transport);
+  const manifests = params.manifests ?? DEFAULT_SOURCE_OBSERVATION_PRODUCER_MANIFESTS;
+  const catalogCapabilities = manifests.map((manifest) =>
+    availabilitySignal({
+      id: `producer-manifest:${manifest.producerId}:catalog-capability`,
+      source: "catalog",
+      status: "available",
+      producerId: manifest.producerId,
+      capabilityId: manifest.capabilityId,
+      payloadTypes: manifest.canonicalCatalogIds.payloadTypes,
+      laneIds: manifest.canonicalCatalogIds.laneIds,
+      reason: "Producer capability is declared in the SourceObservation producer manifest.",
+      asyncRecommended: manifest.latencyEstimate === "long_running",
+    })
+  );
+  const catalogLanes = manifests.flatMap((manifest) =>
+    manifest.canonicalCatalogIds.laneIds.map((laneId) =>
+      availabilitySignal({
+        id: `producer-manifest:${manifest.producerId}:catalog-lane:${laneId}`,
+        source: "catalog",
+        status: "available",
+        producerId: manifest.producerId,
+        capabilityId: manifest.capabilityId,
+        laneId,
+        payloadTypes: manifest.canonicalCatalogIds.payloadTypes,
+        reason: "Catalog lane is declared for producer planning; this does not imply runtime execution.",
+      })
+    )
+  );
+  const brokerCapabilities = manifests.flatMap((manifest) =>
+    manifest.toolRequirements.map((toolId) =>
+      availabilitySignal({
+        id: `producer-manifest:${manifest.producerId}:broker:${toolId}`,
+        source: "broker",
+        status: availabilityStatusFromProducerAvailability(manifest.currentAvailability),
+        producerId: manifest.producerId,
+        capabilityId: manifest.capabilityId,
+        brokerCapabilityId: toolId,
+        payloadTypes: manifest.producedPayloadTypes,
+        runtimeExecutable:
+          manifest.currentAvailability === "available_read_only" &&
+          CURRENT_EVIDENCE_PRODUCER_IDS.has(manifest.producerId),
+        reason: manifest.reasonUnavailable ?? manifest.executionEvidenceRequirement,
+      })
+    )
+  );
+  const runtimeSupport = manifests.map((manifest) =>
+    availabilitySignal({
+      id: `producer-manifest:${manifest.producerId}:runtime`,
+      source: "runtime",
+      status: availabilityStatusFromProducerAvailability(manifest.currentAvailability),
+      producerId: manifest.producerId,
+      capabilityId: manifest.capabilityId,
+      payloadTypes: manifest.producedPayloadTypes,
+      laneIds: manifest.laneRequirements,
+      runtimeExecutable:
+        manifest.currentAvailability === "available_read_only" &&
+        CURRENT_EVIDENCE_PRODUCER_IDS.has(manifest.producerId),
+      reason:
+        manifest.currentAvailability === "available_read_only"
+          ? manifest.executionEvidenceRequirement
+          : manifest.reasonUnavailable ?? "Producer is not executable in the current runtime.",
+      asyncRecommended: manifest.latencyEstimate === "long_running",
+    })
+  );
+
+  const transportSupport: SourceObservationProducerAvailabilitySignal[] = [];
+  if (transport) {
+    for (const missing of transport.missingPayloadCapabilities) {
+      transportSupport.push(availabilitySignal({
+        id: `transport:${transport.planId}:missing:${missing.id}`,
+        source: "transport",
+        status: transportMissingSignalStatus(missing),
+        capabilityId: missing.neededCapability,
+        payloadType: missing.payloadType,
+        sourceId: missing.sourceId,
+        transportSupported: false,
+        runtimeExecutable: false,
+        reason: missing.reason,
+        missingRequirements: [missing.neededCapability, ...missing.candidateToolIds],
+        approvalPath: missing.requiresApproval ? `transport_payload:${missing.payloadType}` : null,
+        asyncRecommended: missing.asyncRecommended,
+      }));
+    }
+    for (const proposal of transport.missingContextLaneProposals) {
+      transportSupport.push(availabilitySignal({
+        id: `transport:${transport.planId}:lane:${proposal.id}`,
+        source: "transport",
+        status: laneProposalSignalStatus(proposal.status),
+        capabilityId: proposal.associatedCapabilities[0] ?? null,
+        payloadType: proposal.missingPayloadType,
+        laneIds: proposal.candidateContextLanes,
+        transportSupported: false,
+        runtimeExecutable: false,
+        reason: proposal.reason,
+        missingRequirements: proposal.associatedCapabilities,
+        asyncRecommended: proposal.boundary === "future_tool_boundary",
+      }));
+    }
+  }
+
+  const modelCapabilities: SourceObservationProducerAvailabilitySignal[] = [];
+  const modelManifest = transport?.modelCapabilityManifestUsed ?? null;
+  if (modelManifest) {
+    for (const laneId of modelManifest.supportedPayloadLanes ?? []) {
+      modelCapabilities.push(availabilitySignal({
+        id: `model:${modelManifest.manifestId}:lane:${laneId}`,
+        source: "model_manifest",
+        status: "available",
+        laneId,
+        modelSupported: true,
+        reason: `Model manifest ${modelManifest.manifestId} declares payload lane support.`,
+      }));
+    }
+    for (const lane of modelManifest.unavailableLanes ?? []) {
+      modelCapabilities.push(availabilitySignal({
+        id: `model:${modelManifest.manifestId}:unavailable-lane:${lane.laneId}`,
+        source: "model_manifest",
+        status: "unavailable",
+        laneId: lane.laneId,
+        payloadTypes: lane.payloadTypes,
+        modelSupported: false,
+        reason: lane.reason,
+        missingRequirements: [`model_payload_lane:${lane.laneId}`],
+      }));
+    }
+    for (const nativePayload of modelManifest.nativePayloadSupport ?? []) {
+      modelCapabilities.push(availabilitySignal({
+        id: `model:${modelManifest.manifestId}:native:${nativePayload.payloadType}`,
+        source: "model_manifest",
+        status: nativePayload.supported ? "available" : "unavailable",
+        payloadType: nativePayload.payloadType,
+        modelSupported: nativePayload.supported,
+        reason: nativePayload.reason,
+        missingRequirements: nativePayload.supported ? [] : [`model_native_payload:${nativePayload.payloadType}`],
+      }));
+    }
+    for (const [capabilityId, flag] of Object.entries(modelManifest.capabilityFlags ?? {})) {
+      modelCapabilities.push(availabilitySignal({
+        id: `model:${modelManifest.manifestId}:capability:${capabilityId}`,
+        source: "model_manifest",
+        status:
+          flag.status === "supported"
+            ? "available"
+            : flag.status === "unsupported"
+              ? "unavailable"
+              : flag.status,
+        capabilityId,
+        modelSupported: flag.status === "supported",
+        reason: flag.reason,
+      }));
+    }
+  }
+
+  const sourceEvidence: SourceObservationProducerAvailabilitySignal[] = [];
+  const deterministicEvidence: SourceObservationProducerAvailabilitySignal[] = [];
+  for (const observation of params.observations ?? []) {
+    const completed = isCompletedSourceObservation(observation);
+    const evidence = summarizeObservationEvidence(observation);
+    const payloadType = observationTypeToPayloadType(observation.type);
+    const producer = observation.producer;
+    const signal = availabilitySignal({
+      id: `source-evidence:${observation.id}`,
+      source: "source_evidence",
+      status: completed ? "available" : "unavailable",
+      producerId: producer?.producerId ?? null,
+      capabilityId: producer?.capabilityId ?? null,
+      payloadType,
+      observationType: observation.type,
+      sourceId: observation.sourceId ?? observation.sourceDocumentId ?? observation.conversationDocumentId ?? null,
+      conversationDocumentId: observation.conversationDocumentId ?? null,
+      evidenceAvailable: completed,
+      deterministicEvidenceAvailable: producer?.executionState === "deterministically_derived",
+      evidenceSummary: evidence ? JSON.stringify(evidence) : null,
+      reason: completed
+        ? "Completed SourceObservation evidence is already loaded in the current resolver pass."
+        : "SourceObservation exists but is not completed execution-backed evidence.",
+    });
+    sourceEvidence.push(signal);
+    if (completed) {
+      deterministicEvidence.push({
+        ...signal,
+        id: `deterministic-evidence:${observation.id}`,
+        source: "deterministic_producer",
+        deterministicEvidenceAvailable: true,
+        reason: "Current deterministic resolver evidence can satisfy matching producer requests.",
+      });
+    }
+  }
+
+  return {
+    traceId: params.traceId ?? transport?.agentWorkPlanTraceId ?? null,
+    planId: params.planId ?? transport?.agentWorkPlanId ?? null,
+    catalogCapabilities,
+    catalogLanes,
+    brokerCapabilities,
+    modelCapabilities,
+    runtimeSupport,
+    transportSupport,
+    policyConstraints: [],
+    approvalStates: [],
+    sourceEvidence,
+    deterministicEvidence,
+    asyncSuitability: [],
+    noExecutionClaimed: true,
+  };
+}
+
+const AVAILABILITY_CONTEXT_KEYS = [
+  "catalogCapabilities",
+  "catalogLanes",
+  "brokerCapabilities",
+  "modelCapabilities",
+  "runtimeSupport",
+  "transportSupport",
+  "policyConstraints",
+  "approvalStates",
+  "sourceEvidence",
+  "deterministicEvidence",
+  "asyncSuitability",
+] as const;
+
+function availabilityContextSignals(context: SourceObservationProducerAvailabilityContext | null | undefined) {
+  if (!context) return [];
+  return AVAILABILITY_CONTEXT_KEYS.flatMap((key) => context[key] ?? []);
+}
+
+function sourceMatchesRequest(
+  signal: SourceObservationProducerAvailabilitySignal,
+  request: SourceObservationProducerRequest
+) {
+  const requestSourceId = request.sourceId ?? request.conversationDocumentId ?? null;
+  const signalSourceId = signal.sourceId ?? signal.conversationDocumentId ?? null;
+  return !requestSourceId || !signalSourceId || requestSourceId === signalSourceId;
+}
+
+function signalAppliesToRequest(params: {
+  signal: SourceObservationProducerAvailabilitySignal;
+  request: SourceObservationProducerRequest;
+  manifest: SourceObservationProducerManifest | null;
+  producerId: string;
+  capabilityId: string;
+  payloadType: string | null;
+  laneId: string | null;
+}) {
+  const { signal, request, manifest, producerId, capabilityId, payloadType, laneId } = params;
+  if (!sourceMatchesRequest(signal, request)) return false;
+  const selectors = [
+    signal.producerId ? signal.producerId === producerId : null,
+    signal.capabilityId ? signal.capabilityId === capabilityId : null,
+    signal.brokerCapabilityId ? signal.brokerCapabilityId === capabilityId : null,
+    signal.payloadType && payloadType ? signal.payloadType === payloadType : null,
+    signal.payloadTypes?.length && payloadType ? signal.payloadTypes.includes(payloadType) : null,
+    signal.laneId && laneId ? signal.laneId === laneId : null,
+    signal.laneIds?.length && laneId ? signal.laneIds.includes(laneId) : null,
+    signal.observationType ? signal.observationType === request.requestedObservationType : null,
+    signal.observationTypes?.length ? signal.observationTypes.includes(request.requestedObservationType) : null,
+    manifest ? Boolean(signal.payloadTypes?.some((value) => manifest.producedPayloadTypes.includes(value))) : null,
+  ].filter((value): value is boolean => value !== null && value !== undefined);
+  return selectors.length === 0 ? true : selectors.some(Boolean);
+}
+
+function staticAvailabilitySignalsForRequest(params: {
+  request: SourceObservationProducerRequest;
+  manifest: SourceObservationProducerManifest | null;
+  producerId: string;
+  capabilityId: string;
+  payloadType: string | null;
+  laneId: string | null;
+}) {
+  const signals: SourceObservationProducerAvailabilitySignal[] = [];
+  const { request, manifest, producerId, capabilityId, payloadType, laneId } = params;
+  if (manifest) {
+    signals.push(availabilitySignal({
+      id: `request:${request.id}:producer-manifest:${manifest.producerId}`,
+      source: "producer_manifest",
+      status: availabilityStatusFromProducerAvailability(manifest.currentAvailability),
+      producerId: manifest.producerId,
+      capabilityId: manifest.capabilityId,
+      payloadTypes: manifest.producedPayloadTypes,
+      laneIds: manifest.laneRequirements,
+      runtimeExecutable:
+        manifest.currentAvailability === "available_read_only" &&
+        CURRENT_EVIDENCE_PRODUCER_IDS.has(manifest.producerId),
+      reason: manifest.reasonUnavailable ?? manifest.executionEvidenceRequirement,
+      missingRequirements:
+        manifest.currentAvailability === "available_read_only" ? [] : [manifest.capabilityId],
+      asyncRecommended: manifest.latencyEstimate === "long_running",
+    }));
+  } else {
+    signals.push(availabilitySignal({
+      id: `request:${request.id}:producer-manifest:missing`,
+      source: "producer_manifest",
+      status: "missing",
+      producerId,
+      capabilityId,
+      payloadType,
+      laneId,
+      reason: "No SourceObservation producer manifest matched this request.",
+      missingRequirements: [producerId, capabilityId],
+      asyncRecommended: true,
+    }));
+  }
+  if (payloadType) {
+    signals.push(availabilitySignal({
+      id: `request:${request.id}:catalog-payload:${payloadType}`,
+      source: "catalog",
+      status: CATALOG_ONLY_PAYLOAD_TYPES.has(payloadType) ? "catalog_only" : "available",
+      producerId,
+      capabilityId,
+      payloadType,
+      laneId,
+      reason: CATALOG_ONLY_PAYLOAD_TYPES.has(payloadType)
+        ? `${payloadType} is cataloged for planning but not runtime-executable in this package.`
+        : `${payloadType} is represented by the existing SourceObservation payload mapping.`,
+      asyncRecommended: CATALOG_ONLY_PAYLOAD_TYPES.has(payloadType),
+    }));
+  }
+  if (payloadType && UNAVAILABLE_PAYLOAD_TYPES.has(payloadType)) {
+    signals.push(availabilitySignal({
+      id: `request:${request.id}:runtime-unavailable:${payloadType}`,
+      source: "runtime",
+      status: "unavailable",
+      producerId,
+      capabilityId,
+      payloadType,
+      laneId,
+      runtimeExecutable: false,
+      reason: `${payloadType} has a cataloged future producer/lane but no executable runtime in WP3C.`,
+      missingRequirements: [capabilityId],
+      asyncRecommended: true,
+    }));
+  }
+  return signals;
+}
+
+type SourceObservationProducerAvailabilityAnalysis = {
+  details: SourceObservationProducerAvailabilitySignal[];
+  sources: SourceObservationProducerAvailabilitySource[];
+  primarySource: SourceObservationProducerAvailabilitySource;
+  evidenceSummary: string | null;
+  missingRequirements: string[];
+  approvalPath: string | null;
+  asyncRecommended: boolean;
+  asyncReason: string | null;
+  requiresApproval: boolean;
+  blockedByPolicy: boolean;
+  runtimeUnavailable: boolean;
+  catalogOnly: boolean;
+  sourceLocator: SourceObservationLocator | null;
+  traceId: string | null;
+  planId: string | null;
+};
+
+function buildProducerAvailabilityAnalysis(params: {
+  request: SourceObservationProducerRequest;
+  manifest: SourceObservationProducerManifest | null;
+  producerId: string;
+  capabilityId: string;
+  payloadType: string | null;
+  laneId: string | null;
+  context?: SourceObservationProducerAvailabilityContext | null;
+}): SourceObservationProducerAvailabilityAnalysis {
+  const staticSignals = staticAvailabilitySignalsForRequest(params);
+  const contextSignals = availabilityContextSignals(params.context).filter((signal) =>
+    signalAppliesToRequest({
+      signal,
+      request: params.request,
+      manifest: params.manifest,
+      producerId: params.producerId,
+      capabilityId: params.capabilityId,
+      payloadType: params.payloadType,
+      laneId: params.laneId,
+    })
+  );
+  const details = uniqueById([...staticSignals, ...contextSignals]).slice(0, 40);
+  const sources = uniqueStrings(details.map((signal) => signal.source)) as SourceObservationProducerAvailabilitySource[];
+  const blocking = details.find((signal) => signal.status === "blocked_by_policy") ?? null;
+  const approval = details.find((signal) => signal.status === "approval_required" || signal.approvalPath) ?? null;
+  const catalogOnly = details.some((signal) => signal.status === "catalog_only");
+  const runtimeUnavailable = details.some((signal) =>
+    (signal.source === "runtime" || signal.source === "transport") &&
+    (signal.status === "unavailable" || signal.status === "missing") &&
+    signal.runtimeExecutable === false
+  );
+  const asyncSignal = details.find((signal) => signal.asyncRecommended || signal.status === "deferred") ?? null;
+  const evidenceSignal =
+    details.find((signal) => signal.source === "deterministic_producer" && signal.status === "available") ??
+    details.find((signal) => signal.source === "source_evidence" && signal.status === "available") ??
+    null;
+  const missingRequirements = uniqueStrings(details.flatMap((signal) =>
+    signal.status === "available" ? [] : signal.missingRequirements ?? []
+  ));
+  return {
+    details,
+    sources: sources.length > 0 ? sources : ["producer_manifest"],
+    primarySource: blocking?.source ?? approval?.source ?? evidenceSignal?.source ?? details[0]?.source ?? "producer_manifest",
+    evidenceSummary: evidenceSignal?.evidenceSummary ?? null,
+    missingRequirements,
+    approvalPath: params.request.approvalPath ?? approval?.approvalPath ?? null,
+    asyncRecommended: Boolean(asyncSignal),
+    asyncReason: asyncSignal?.reason ?? null,
+    requiresApproval: Boolean(params.request.approvalPath || approval),
+    blockedByPolicy: Boolean(blocking),
+    runtimeUnavailable,
+    catalogOnly,
+    sourceLocator: params.request.sourceLocator ?? null,
+    traceId: params.request.traceId ?? params.context?.traceId ?? null,
+    planId: params.request.planId ?? params.context?.planId ?? null,
+  };
+}
+
+type SourceObservationProducerResolutionBase = Omit<
+  SourceObservationProducerResolution,
+  | "availabilitySources"
+  | "primaryAvailabilitySource"
+  | "availabilityDetails"
+  | "evidenceSummary"
+  | "missingRequirements"
+  | "approvalPath"
+  | "sourceLocator"
+  | "traceId"
+  | "planId"
+  | "asyncSuitability"
+>;
+
+function withAvailabilityAnalysis(
+  base: SourceObservationProducerResolutionBase,
+  analysis: SourceObservationProducerAvailabilityAnalysis
+): SourceObservationProducerResolution {
+  return {
+    ...base,
+    availabilitySources: analysis.sources,
+    primaryAvailabilitySource: analysis.primarySource,
+    availabilityDetails: analysis.details,
+    evidenceSummary: analysis.evidenceSummary,
+    missingRequirements: analysis.missingRequirements,
+    approvalPath: analysis.approvalPath,
+    sourceLocator: analysis.sourceLocator,
+    traceId: analysis.traceId,
+    planId: analysis.planId,
+    asyncRecommended: base.asyncRecommended || analysis.asyncRecommended,
+    asyncSuitability: {
+      recommended: base.asyncRecommended || analysis.asyncRecommended,
+      reason: analysis.asyncReason,
+    },
+  };
+}
+
 function manifestForRequest(
   request: SourceObservationProducerRequest,
   manifests: SourceObservationProducerManifest[]
@@ -830,6 +1492,7 @@ function manifestForRequest(
 export function resolveSourceObservationProducerRequest(params: {
   request: SourceObservationProducerRequest;
   manifests?: SourceObservationProducerManifest[] | null;
+  availabilityContext?: SourceObservationProducerAvailabilityContext | null;
 }): SourceObservationProducerResolution {
   const request = params.request;
   const payloadType = normalizePayloadType(request.requestedPayloadType);
@@ -837,6 +1500,15 @@ export function resolveSourceObservationProducerRequest(params: {
   const producerId = manifest?.producerId ?? request.producerId ?? payloadTypeToProducer(payloadType);
   const laneId = payloadTypeToLane(payloadType);
   const capabilityId = request.requestedCapabilityId || manifest?.capabilityId || payloadTypeToCapability(payloadType);
+  const analysis = buildProducerAvailabilityAnalysis({
+    request,
+    manifest,
+    producerId,
+    capabilityId,
+    payloadType,
+    laneId,
+    context: params.availabilityContext,
+  });
   const governedBy = uniqueStrings([
     "context-catalog-bootstrap",
     "inspection-tool-broker",
@@ -844,86 +1516,9 @@ export function resolveSourceObservationProducerRequest(params: {
     manifest ? `producer-manifest:${manifest.producerId}` : null,
     laneId ? `catalog-lane:${laneId}` : null,
     payloadType ? `catalog-payload:${payloadType}` : null,
+    ...analysis.sources.map((source) => `availability:${source}`),
   ]);
-
-  if (request.approvalPath) {
-    return {
-      state: "approval_required",
-      producerId,
-      capabilityId,
-      payloadType,
-      governedBy,
-      catalogPayloadType: payloadType,
-      catalogLaneId: laneId,
-      brokerCapabilityId: capabilityId,
-      executableNow: false,
-      reason: `Producer request requires approval path ${request.approvalPath}.`,
-      requiresApproval: true,
-      blockedByPolicy: false,
-      asyncRecommended: false,
-      noExecutionClaimed: true,
-    };
-  }
-
-  if (payloadType && CATALOG_ONLY_PAYLOAD_TYPES.has(payloadType)) {
-    return {
-      state: "catalog_only",
-      producerId,
-      capabilityId,
-      payloadType,
-      governedBy,
-      catalogPayloadType: payloadType,
-      catalogLaneId: laneId,
-      brokerCapabilityId: capabilityId,
-      executableNow: false,
-      reason: `${payloadType} is cataloged for transport planning, but WP3B does not add runtime attachment, connector reads, or spreadsheet execution.`,
-      requiresApproval: false,
-      blockedByPolicy: false,
-      asyncRecommended: true,
-      noExecutionClaimed: true,
-    };
-  }
-
-  if (payloadType && UNAVAILABLE_PAYLOAD_TYPES.has(payloadType)) {
-    return {
-      state: "unavailable",
-      producerId,
-      capabilityId,
-      payloadType,
-      governedBy,
-      catalogPayloadType: payloadType,
-      catalogLaneId: laneId,
-      brokerCapabilityId: capabilityId,
-      executableNow: false,
-      reason: `${payloadType} requires a governed producer that is cataloged but not executable in WP3B.`,
-      requiresApproval: false,
-      blockedByPolicy: false,
-      asyncRecommended: true,
-      noExecutionClaimed: true,
-    };
-  }
-
-  if (manifest?.currentAvailability === "available_read_only" && CURRENT_EVIDENCE_PRODUCER_IDS.has(producerId)) {
-    return {
-      state: "deferred",
-      producerId,
-      capabilityId,
-      payloadType,
-      governedBy,
-      catalogPayloadType: payloadType,
-      catalogLaneId: laneId,
-      brokerCapabilityId: capabilityId,
-      executableNow: true,
-      reason: "Producer is governed and may complete only if matching current resolver evidence already exists.",
-      requiresApproval: false,
-      blockedByPolicy: false,
-      asyncRecommended: false,
-      noExecutionClaimed: true,
-    };
-  }
-
-  return {
-    state: "missing",
+  const common = {
     producerId,
     capabilityId,
     payloadType,
@@ -931,20 +1526,120 @@ export function resolveSourceObservationProducerRequest(params: {
     catalogPayloadType: payloadType,
     catalogLaneId: laneId,
     brokerCapabilityId: capabilityId,
+    noExecutionClaimed: true as const,
+  };
+
+  if (analysis.blockedByPolicy) {
+    return withAvailabilityAnalysis({
+      ...common,
+      state: "blocked_by_policy",
+      executableNow: false,
+      reason:
+        analysis.details.find((signal) => signal.status === "blocked_by_policy")?.reason ??
+        "Producer request is blocked by policy.",
+      requiresApproval: false,
+      blockedByPolicy: true,
+      asyncRecommended: false,
+    }, analysis);
+  }
+
+  if (analysis.requiresApproval) {
+    return withAvailabilityAnalysis({
+      ...common,
+      state: "approval_required",
+      executableNow: false,
+      reason:
+        request.approvalPath
+          ? `Producer request requires approval path ${request.approvalPath}.`
+          : analysis.details.find((signal) => signal.status === "approval_required")?.reason ??
+            "Producer request requires approval before execution.",
+      requiresApproval: true,
+      blockedByPolicy: false,
+      asyncRecommended: false,
+    }, analysis);
+  }
+
+  if (payloadType && CATALOG_ONLY_PAYLOAD_TYPES.has(payloadType)) {
+    return withAvailabilityAnalysis({
+      ...common,
+      state: "catalog_only",
+      executableNow: false,
+      reason: `${payloadType} is cataloged for transport planning, but WP3C does not add runtime attachment, connector reads, or spreadsheet execution.`,
+      requiresApproval: false,
+      blockedByPolicy: false,
+      asyncRecommended: true,
+    }, analysis);
+  }
+
+  if (payloadType && UNAVAILABLE_PAYLOAD_TYPES.has(payloadType)) {
+    return withAvailabilityAnalysis({
+      ...common,
+      state: "unavailable",
+      executableNow: false,
+      reason: `${payloadType} requires a governed producer that is cataloged but not executable in WP3C.`,
+      requiresApproval: false,
+      blockedByPolicy: false,
+      asyncRecommended: true,
+    }, analysis);
+  }
+
+  if (analysis.catalogOnly && !manifest) {
+    return withAvailabilityAnalysis({
+      ...common,
+      state: "catalog_only",
+      executableNow: false,
+      reason: "Availability context found catalog support, but no runtime producer manifest can execute this request.",
+      requiresApproval: false,
+      blockedByPolicy: false,
+      asyncRecommended: analysis.asyncRecommended,
+    }, analysis);
+  }
+
+  if (analysis.runtimeUnavailable && !CURRENT_EVIDENCE_PRODUCER_IDS.has(producerId)) {
+    return withAvailabilityAnalysis({
+      ...common,
+      state: "unavailable",
+      executableNow: false,
+      reason: "Availability context indicates the needed runtime or transport lane is not executable now.",
+      requiresApproval: false,
+      blockedByPolicy: false,
+      asyncRecommended: analysis.asyncRecommended,
+    }, analysis);
+  }
+
+  if (manifest?.currentAvailability === "available_read_only" && CURRENT_EVIDENCE_PRODUCER_IDS.has(producerId)) {
+    return withAvailabilityAnalysis({
+      ...common,
+      state: "deferred",
+      executableNow: true,
+      reason: "Producer is governed and may complete only if matching current resolver evidence already exists.",
+      requiresApproval: false,
+      blockedByPolicy: false,
+      asyncRecommended: false,
+    }, analysis);
+  }
+
+  return withAvailabilityAnalysis({
+    ...common,
+    state: "missing",
     executableNow: false,
     reason: "No governed current-evidence producer is available for this request.",
     requiresApproval: false,
     blockedByPolicy: false,
     asyncRecommended: true,
-    noExecutionClaimed: true,
-  };
+  }, analysis);
+}
+
+export function resolveSourceObservationProducerAvailability(params: {
+  request: SourceObservationProducerRequest;
+  manifests?: SourceObservationProducerManifest[] | null;
+  availabilityContext?: SourceObservationProducerAvailabilityContext | null;
+}): SourceObservationProducerResolution {
+  return resolveSourceObservationProducerRequest(params);
 }
 
 function observationHasCompletedEvidence(observation: SourceObservation) {
-  return (
-    observation.producer.executionState === "executed" ||
-    observation.producer.executionState === "deterministically_derived"
-  );
+  return isCompletedSourceObservation(observation);
 }
 
 function locatorsOverlap(requestLocator: SourceObservationLocator | null | undefined, observationLocator: SourceObservationLocator) {
@@ -1019,13 +1714,20 @@ function unresolvedNeedsForRequest(
         payloadType: missingPayload,
         state: "unavailable",
         reason:
-          "Table body recovery could not complete from current deterministic parser/chunk/PDF evidence; richer governed extraction remains unavailable in WP3B.",
+          "Table body recovery could not complete from current deterministic parser/chunk/PDF evidence; richer governed extraction remains unavailable in the current package.",
         noExecutionClaimed: true,
       } satisfies SourceObservationNeed)),
     ];
   }
 
   return [baseNeed];
+}
+
+export function canProducerResultCreateObservation(
+  resultOrState: SourceObservationProducerResult | SourceObservationProducerResultState | null | undefined
+) {
+  const state = typeof resultOrState === "string" ? resultOrState : resultOrState?.state;
+  return state === "completed_with_evidence";
 }
 
 function resultForRequest(params: {
@@ -1036,7 +1738,7 @@ function resultForRequest(params: {
   reason?: string | null;
   recommendedResolution?: string | null;
 }): SourceObservationProducerResult {
-  const completedObservations = params.state === "completed_with_evidence"
+  const completedObservations = canProducerResultCreateObservation(params.state)
     ? (params.observations ?? []).filter(observationHasCompletedEvidence)
     : [];
   const output = completedObservations.length > 0
@@ -1066,6 +1768,14 @@ function resultForRequest(params: {
     state: params.state,
     executableNow: params.state === "completed_with_evidence" ? true : params.resolution.executableNow,
     reason: params.reason ?? params.resolution.reason,
+    evidenceSummary:
+      params.state === "completed_with_evidence"
+        ? output?.evidenceSummary ?? params.resolution.evidenceSummary ?? null
+        : params.resolution.evidenceSummary ?? null,
+    missingRequirements:
+      params.state === "completed_with_evidence"
+        ? []
+        : params.resolution.missingRequirements,
   } satisfies SourceObservationProducerResolution;
   return {
     requestId: params.request.id,
@@ -1095,15 +1805,22 @@ export function runDeterministicSourceObservationProducer(params: {
   request: SourceObservationProducerRequest;
   observations?: SourceObservation[] | null;
   manifests?: SourceObservationProducerManifest[] | null;
+  availabilityContext?: SourceObservationProducerAvailabilityContext | null;
 }): SourceObservationProducerResult {
   const resolution = resolveSourceObservationProducerRequest({
     request: params.request,
     manifests: params.manifests,
+    availabilityContext: params.availabilityContext,
   });
   const matched = (params.observations ?? []).filter((observation) =>
     requestMatchesObservation(params.request, observation)
   );
-  if (matched.length > 0) {
+  if (
+    matched.length > 0 &&
+    resolution.executableNow &&
+    !resolution.requiresApproval &&
+    !resolution.blockedByPolicy
+  ) {
     return resultForRequest({
       request: params.request,
       resolution,
@@ -1141,12 +1858,14 @@ export function runDeterministicSourceObservationProducers(params: {
   requests?: SourceObservationProducerRequest[] | null;
   observations?: SourceObservation[] | null;
   manifests?: SourceObservationProducerManifest[] | null;
+  availabilityContext?: SourceObservationProducerAvailabilityContext | null;
 }): SourceObservationProducerResult[] {
   return uniqueById(params.requests ?? []).map((request) =>
     runDeterministicSourceObservationProducer({
       request,
       observations: params.observations,
       manifests: params.manifests,
+      availabilityContext: params.availabilityContext,
     })
   );
 }
@@ -1163,8 +1882,16 @@ export function buildSourceObservationProducerDebugSummary(params: {
   const countsByProducerId: Record<string, number> = {};
   const countsByCapabilityId: Record<string, number> = {};
   const countsByRequestedObservationType: Record<string, number> = {};
+  const countsByAvailabilitySource: Record<string, number> = {};
+  const availabilitySources = new Set<SourceObservationProducerAvailabilitySource>();
   const reusedIdentifiers = new Set<string>();
   const newIdentifiers = new Set<string>();
+  let runtimeExecutableCount = 0;
+  let runtimeUnsupportedCount = 0;
+  let modelLaneSupportedButRuntimeMissingCount = 0;
+  let sourceEvidenceAvailableCount = 0;
+  let deterministicEvidenceAvailableCount = 0;
+  let noExecutionWarningCount = 0;
   let nativePlanned = 0;
   let nativeSupported = 0;
   let nativeUnavailable = 0;
@@ -1211,6 +1938,33 @@ export function buildSourceObservationProducerDebugSummary(params: {
     increment(countsByState, result.state);
     increment(countsByProducerId, result.producerId);
     increment(countsByCapabilityId, result.capabilityId);
+    for (const source of result.resolution.availabilitySources ?? []) {
+      availabilitySources.add(source);
+      increment(countsByAvailabilitySource, source);
+    }
+    for (const signal of result.resolution.availabilityDetails ?? []) {
+      availabilitySources.add(signal.source);
+      increment(countsByAvailabilitySource, signal.source);
+      if (signal.runtimeExecutable) runtimeExecutableCount += 1;
+      if (signal.runtimeExecutable === false || signal.status === "unavailable") runtimeUnsupportedCount += 1;
+      if (signal.source === "source_evidence" && signal.status === "available") sourceEvidenceAvailableCount += 1;
+      if (signal.source === "deterministic_producer" && signal.status === "available") {
+        deterministicEvidenceAvailableCount += 1;
+      }
+      if (signal.noExecutionClaimed) noExecutionWarningCount += 1;
+    }
+    const modelSupportsLane = (result.resolution.availabilityDetails ?? []).some((signal) =>
+      signal.source === "model_manifest" &&
+      signal.status === "available" &&
+      (signal.laneId || signal.laneIds?.length)
+    );
+    const runtimeMissing = (result.resolution.availabilityDetails ?? []).some((signal) =>
+      (signal.source === "runtime" || signal.source === "transport") &&
+      (signal.runtimeExecutable === false || signal.status === "unavailable" || signal.status === "missing")
+    );
+    if (modelSupportsLane && runtimeMissing) {
+      modelLaneSupportedButRuntimeMissingCount += 1;
+    }
     if (result.request.requestedPayloadType === "native_file_reference") {
       if (result.state === "completed_with_evidence") nativeSupported += 1;
       if (result.state === "catalog_only") nativeCatalogOnly += 1;
@@ -1246,6 +2000,16 @@ export function buildSourceObservationProducerDebugSummary(params: {
     countsByProducerId,
     countsByCapabilityId,
     countsByRequestedObservationType,
+    availability: {
+      sourcesConsulted: [...availabilitySources].sort(),
+      countsByAvailabilitySource,
+      runtimeExecutableCount,
+      runtimeUnsupportedCount,
+      modelLaneSupportedButRuntimeMissingCount,
+      sourceEvidenceAvailableCount,
+      deterministicEvidenceAvailableCount,
+      noExecutionWarningCount,
+    },
     nativeFileLane: {
       plannedCount: nativePlanned,
       supportedCount: nativeSupported,

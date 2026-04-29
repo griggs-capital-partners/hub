@@ -91,6 +91,7 @@ import {
   buildProducerRequestsFromAgentWorkPlan,
   buildProducerRequestsFromTableSignals,
   buildProducerRequestsFromTransportNeeds,
+  buildSourceObservationProducerAvailabilitySnapshot,
   buildSourceObservationProducerDebugSummary,
   runDeterministicSourceObservationProducers,
   type SourceObservationProducerDebugSummary,
@@ -4840,10 +4841,16 @@ export async function resolveConversationContextBundle(params: {
     });
     if (tableProducerRequests.length > 0) {
       sourceObservationProducerRequests.push(...tableProducerRequests);
+      const tableProducerAvailability = buildSourceObservationProducerAvailabilitySnapshot({
+        requests: tableProducerRequests,
+        observations: currentSourceObservations,
+        traceId: params.conversationId ? `${params.conversationId}:source-observation-producers` : null,
+      });
       sourceObservationProducerResults.push(
         ...runDeterministicSourceObservationProducers({
           requests: tableProducerRequests,
           observations: currentSourceObservations,
+          availabilityContext: tableProducerAvailability,
         })
       );
     }
@@ -5011,10 +5018,18 @@ export async function resolveConversationContextBundle(params: {
   });
   if (newProducerRequests.length > 0) {
     sourceObservationProducerRequests.push(...newProducerRequests);
+    const producerAvailability = buildSourceObservationProducerAvailabilitySnapshot({
+      requests: newProducerRequests,
+      observations: completedSourceObservations,
+      transport: progressiveAssembly.contextTransport,
+      traceId: agentWorkPlan.traceId,
+      planId: agentWorkPlan.planId,
+    });
     sourceObservationProducerResults.push(
       ...runDeterministicSourceObservationProducers({
         requests: newProducerRequests,
         observations: completedSourceObservations,
+        availabilityContext: producerAvailability,
       })
     );
   }

@@ -27,7 +27,7 @@ import type {
   ArtifactPromotionCandidate,
   ArtifactPromotionDecision,
 } from "./source-learning-artifact-promotion";
-import type { SourceObservation } from "./source-observations";
+import { isCompletedSourceObservation, type SourceObservation } from "./source-observations";
 import type {
   InspectionCapability,
   ToolCostClass,
@@ -1072,7 +1072,7 @@ export function buildContextPayloadsFromPackingCandidates(
 export function buildContextPayloadsFromSourceObservations(
   observations: SourceObservation[]
 ): ContextPayload[] {
-  return observations.flatMap((observation) => {
+  return observations.filter(isCompletedSourceObservation).flatMap((observation) => {
     const sourceDocumentId =
       observation.sourceDocumentId ?? observation.conversationDocumentId ?? observation.sourceId ?? null;
     const sourceType = observation.sourceKind ?? "thread_document";

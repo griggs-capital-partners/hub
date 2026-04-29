@@ -108,7 +108,11 @@ function makeSourceObservation(overrides = {}) {
   return {
     id: overrides.id ?? "obs-page-15-title",
     type: overrides.type ?? "parser_text_excerpt",
+    conversationId: overrides.conversationId ?? "conv-a04h",
+    conversationDocumentId: overrides.conversationDocumentId ?? "doc-t5",
+    sourceId: overrides.sourceId ?? "doc-t5",
     sourceDocumentId: overrides.sourceDocumentId ?? "doc-t5",
+    sourceKind: overrides.sourceKind ?? "pdf_page",
     sourceVersion: overrides.sourceVersion ?? null,
     sourceLocator: overrides.sourceLocator ?? {
       pageNumberStart: 15,
@@ -124,12 +128,22 @@ function makeSourceObservation(overrides = {}) {
       charEnd: 28,
     },
     content: overrides.content ?? "Smackover Water Chemistry",
+    payloadKind: overrides.payloadKind ?? "text",
     payload: overrides.payload ?? { chunkIndex: 15, parserSignal: true },
+    producer: overrides.producer ?? {
+      producerId: "pdf_parser",
+      producerKind: "parser",
+      capabilityId: "pdf_text_extraction",
+      executionState: "executed",
+      executionEvidence: { chunkIndex: 15, extractionStatus: "extracted" },
+      noUnavailableToolExecutionClaimed: true,
+    },
     extractionMethod: overrides.extractionMethod ?? "parser_pdf_text_extraction",
     confidence: overrides.confidence ?? 0.68,
     limitations:
       overrides.limitations ??
       ["Parser text observation may not contain structured table rows, columns, or cells."],
+    relatedGapHints: overrides.relatedGapHints ?? [],
   };
 }
 
@@ -615,6 +629,24 @@ runTest("Existing source memory structures adapt into context payloads", () => {
     promotionPayloads.map((payload) => payload.type).sort(),
     ["artifact_promotion_candidate", "artifact_promotion_result"]
   );
+});
+
+runTest("SourceObservation transport excludes malformed and non-completed observations", () => {
+  const malformed = makeSourceObservation({ id: "obs-no-producer", producer: undefined });
+  delete malformed.producer;
+  const future = makeSourceObservation({
+    id: "obs-future",
+    producer: {
+      producerId: "ocr_extractor",
+      producerKind: "tool",
+      capabilityId: "ocr",
+      executionState: "future",
+      executionEvidence: null,
+      noUnavailableToolExecutionClaimed: true,
+    },
+  });
+  const payloads = buildContextPayloadsFromSourceObservations([malformed, future]);
+  assert.deepEqual(payloads, []);
 });
 
 runTest("Model and tool manifests govern payload negotiation", () => {

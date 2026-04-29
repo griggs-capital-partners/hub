@@ -888,11 +888,28 @@ runTest("routes unresolved SourceObservation producer results into existing dura
           catalogPayloadType: "structured_table",
           catalogLaneId: "document_ai_table_lane",
           brokerCapabilityId: "pdf_table_body_recovery",
+          availabilitySources: ["producer_manifest", "source_evidence"],
+          primaryAvailabilitySource: "producer_manifest",
+          availabilityDetails: [],
           executableNow: true,
           reason: "No completed structured table observation exists in current deterministic evidence.",
+          evidenceSummary: null,
+          missingRequirements: ["document_ai_table_recovery"],
+          approvalPath: null,
+          sourceLocator: {
+            pageNumberStart: 15,
+            pageLabelStart: "15",
+            tableId: "table-1",
+          },
+          traceId: "trace-producer",
+          planId: "plan-producer",
           requiresApproval: false,
           blockedByPolicy: false,
           asyncRecommended: false,
+          asyncSuitability: {
+            recommended: false,
+            reason: null,
+          },
           noExecutionClaimed: true,
         },
         observations: [],
@@ -936,6 +953,14 @@ runTest("routes unresolved SourceObservation producer results into existing dura
   assert.ok(batch.capabilityGapRecords.some((gap) => gap.missingToolId === "ocr"));
   assert.ok(batch.capabilityGapRecords.every((gap) => gap.evidence.noUnavailableToolExecutionClaimed));
   assert.ok(batch.contextDebtRecords.every((debt) => debt.evidence.noUnavailableToolExecutionClaimed));
+  assert.ok(batch.contextDebtRecords.some((debt) =>
+    Array.isArray(debt.sourceLocator.availabilitySources) &&
+    debt.sourceLocator.availabilitySources.includes("producer_manifest")
+  ));
+  assert.ok(batch.capabilityGapRecords.some((gap) =>
+    Array.isArray(gap.evidence.missingRequirements) &&
+    gap.evidence.missingRequirements.includes("document_ai_table_recovery")
+  ));
 });
 
 runTest("empty registry selection remains safe for resolver defaults", () => {

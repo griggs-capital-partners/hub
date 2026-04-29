@@ -441,7 +441,9 @@ export type SourceCoverageTarget = {
     | "progressive_assembly"
     | "adaptive_transport"
     | "async_work"
-    | "truthful_guard";
+    | "truthful_guard"
+    | "source_observation_producer"
+    | "visual_inspection_pack";
 };
 
 export type SourceCoverageRecord = {
@@ -2678,6 +2680,12 @@ function producerResultDebtFromGap(params: {
     payloadType: request.requestedPayloadType ?? null,
     observationType: request.requestedObservationType,
     resultState: params.result.state,
+    availabilitySources: params.result.resolution.availabilitySources ?? [],
+    primaryAvailabilitySource: params.result.resolution.primaryAvailabilitySource ?? null,
+    missingRequirements: params.result.resolution.missingRequirements ?? [],
+    approvalPath: params.result.resolution.approvalPath ?? null,
+    asyncSuitability: params.result.resolution.asyncSuitability ?? null,
+    evidenceSummary: params.result.resolution.evidenceSummary ?? null,
     locationLabel:
       request.sourceLocator?.sourceLocationLabel ??
       params.result.reason,
@@ -2693,6 +2701,7 @@ function producerResultDebtFromGap(params: {
     sourceLocator: locator,
     sourceCoverageTarget: {
       target: request.requestedPayloadType ?? request.requestedObservationType,
+      detail: params.result.reason,
       requestedBy: "source_observation_producer",
       producerRequestId: request.id,
       resultState: params.result.state,
@@ -2706,6 +2715,12 @@ function producerResultDebtFromGap(params: {
         state: params.result.state,
         reason: params.result.reason,
         unresolvedNeedCount: params.result.unresolvedNeeds.length,
+        availabilitySources: params.result.resolution.availabilitySources ?? [],
+        primaryAvailabilitySource: params.result.resolution.primaryAvailabilitySource ?? null,
+        missingRequirements: params.result.resolution.missingRequirements ?? [],
+        approvalPath: params.result.resolution.approvalPath ?? null,
+        asyncSuitability: params.result.resolution.asyncSuitability ?? null,
+        evidenceSummary: params.result.resolution.evidenceSummary ?? null,
       },
       executed: false,
       executionClaimed: false,
@@ -2760,6 +2775,11 @@ export function buildRegistryUpsertsFromSourceObservationProducerResults(params:
         capabilityId: result.capabilityId,
         payloadType: request.requestedPayloadType ?? null,
         resultState: result.state,
+        availabilitySources: result.resolution.availabilitySources ?? [],
+        primaryAvailabilitySource: result.resolution.primaryAvailabilitySource ?? null,
+        missingRequirements: result.resolution.missingRequirements ?? [],
+        approvalPath: result.resolution.approvalPath ?? null,
+        asyncSuitability: result.resolution.asyncSuitability ?? null,
         recommendedResolution: result.recommendedResolution ?? null,
         noUnavailableToolExecutionClaimed: true,
       },
@@ -2825,6 +2845,12 @@ export function buildRegistryUpsertsFromSourceObservationProducerResults(params:
               producerId: result.producerId,
               capabilityId: result.capabilityId,
               payloadType: request.requestedPayloadType ?? null,
+              availabilitySources: result.resolution.availabilitySources ?? [],
+              primaryAvailabilitySource: result.resolution.primaryAvailabilitySource ?? null,
+              missingRequirements: result.resolution.missingRequirements ?? [],
+              approvalPath: result.resolution.approvalPath ?? null,
+              asyncSuitability: result.resolution.asyncSuitability ?? null,
+              evidenceSummary: result.resolution.evidenceSummary ?? null,
               executed: false,
               executionClaimed: false,
               noUnavailableToolExecutionClaimed: true,
