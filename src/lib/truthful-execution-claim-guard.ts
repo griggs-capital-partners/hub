@@ -452,6 +452,20 @@ function collectExecutedToolTraces(
     });
   }
 
+  for (const summary of getRecordArray(asRecord(debugTrace), "uploadedDocumentDigestionLocal")) {
+    for (const producer of getRecordArray(summary, "executedLocalProducers")) {
+      const producerId = stringValue(producer.producerId);
+      if (!producerId) continue;
+      const evidenceIds = stringArray(producer.evidenceObservationIds);
+      if (evidenceIds.length === 0) continue;
+      executed.push({
+        toolId: producerId,
+        capability: stringValue(producer.capabilityId),
+        source: "source_observation_producer",
+      });
+    }
+  }
+
   for (const summary of getRecordArray(asRecord(debugTrace), "uploadedDocumentDigestionExternal")) {
     for (const status of getRecordArray(summary, "providerStatuses")) {
       if (stringValue(status.availabilityState) !== "completed_with_evidence") continue;

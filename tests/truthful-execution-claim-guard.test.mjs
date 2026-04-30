@@ -262,6 +262,32 @@ runTest("visual inspection debug permits only actually produced rendered and vis
   assertViolation("OCR extracted the page 15 cells.", snapshot, /OCR/);
 });
 
+runTest("uploaded-document local debug permits rendered claims only with completed local evidence", () => {
+  const snapshot = buildTruthfulExecutionClaimSnapshot({
+    debugTrace: {
+      uploadedDocumentDigestionLocal: [
+        {
+          executedLocalProducers: [
+            {
+              producerId: "rendered_page_renderer",
+              capabilityId: "rendered_page_inspection",
+              evidenceObservationIds: ["doc-wp4a3:rendered-page:1"],
+            },
+          ],
+          localToolEnablement: {
+            renderedPageImageInputStatus: "completed_with_evidence",
+            ocrStatus: "not_needed",
+          },
+        },
+      ],
+    },
+  });
+
+  assert.equal(snapshot.executedTools.some((entry) => entry.toolId === "rendered_page_renderer"), true);
+  assert.equal(validateAnswerExecutionClaims("Rendered-page inspection ran for the selected page.", snapshot).ok, true);
+  assertViolation("OCR extracted the selected page text.", snapshot, /OCR/);
+});
+
 runTest("planned visual payload support is not treated as rendered or vision execution", () => {
   const snapshot = buildTruthfulExecutionClaimSnapshot({
     progressiveAssembly: {

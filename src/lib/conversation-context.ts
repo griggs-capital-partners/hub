@@ -124,6 +124,7 @@ import {
   withUploadedDocumentDigestionLocalDurableGapCount,
   type UploadedDocumentDigestionLocalDebugSummary,
 } from "./upload-document-digestion-local";
+import { runUploadedDocumentLocalToolEnablementProducers } from "./document-ingestion-local-producers";
 import {
   EMPTY_CONTEXT_REGISTRY_SELECTION,
   buildAgentControlSourceSignalsFromRegistry,
@@ -4463,11 +4464,13 @@ export async function resolveConversationContextBundle(params: {
     let pdfExtractionMetadata: PdfContextExtractionResult["metadata"] | null = null;
     let extractionDetail: string | null = null;
     let sourceMetadata: Record<string, unknown> | null = null;
+    let loadedFileBuffer: Buffer | null = null;
 
     if (contextKind === "pdf" || contextKind === "docx" || contextKind === "pptx" || contextKind === "spreadsheet") {
       let fileBuffer: Buffer;
       try {
         fileBuffer = await readBinaryFile(document.storagePath);
+        loadedFileBuffer = fileBuffer;
       } catch (error) {
         failedCount += 1;
         const detail = `Attached to this thread, but ${resolveStorageReadFailureReason(error)}.`;
@@ -4836,6 +4839,20 @@ export async function resolveConversationContextBundle(params: {
       continue;
     }
 
+    const localToolEnablement = await runUploadedDocumentLocalToolEnablementProducers({
+      document,
+      contextKind,
+      fileBuffer: loadedFileBuffer,
+      selectedChunks: selection.selectedChunks,
+      pdfExtractionMetadata,
+      taskPrompt: params.currentUserPrompt ?? null,
+      observationOptions: {
+        conversationId: params.conversationId,
+        traceId: params.conversationId ? `${params.conversationId}:wp4a3-local` : null,
+        planId: params.conversationId ? `${params.conversationId}:wp4a3-local-plan` : null,
+        maxTextPreviewChars: 900,
+      },
+    });
     const localDigestion = buildUploadedDocumentDigestionLocalBaseline({
       document,
       contextKind,
@@ -4845,9 +4862,14 @@ export async function resolveConversationContextBundle(params: {
       selectedArtifacts: artifactSelection.selectedArtifacts,
       observationOptions: {
         conversationId: params.conversationId,
+        traceId: params.conversationId ? `${params.conversationId}:wp4a3-local` : null,
+        planId: params.conversationId ? `${params.conversationId}:wp4a3-local-plan` : null,
         maxObservationsPerDocument: 12,
         maxTextPreviewChars: 900,
       },
+      enrichmentObservations: localToolEnablement.observations,
+      enrichmentProducerRequests: localToolEnablement.producerRequests,
+      enrichmentProducerResults: localToolEnablement.producerResults,
       transportMaxObservations: 16,
       transportMaxObservationsPerDocument: 8,
     });
@@ -4891,7 +4913,7 @@ export async function resolveConversationContextBundle(params: {
       localObservations: currentSourceObservations,
       localProducerResults: currentLocalProducerResults,
       selectedPages: pdfExtractionMetadata?.lowTextPageNumbers ?? [],
-      imageInputs: [],
+      imageInputs: localToolEnablement.imageInputs,
     });
 
     const fullyIncluded =

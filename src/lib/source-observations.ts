@@ -11,6 +11,7 @@ import type {
 
 export type SourceObservationType =
   | "document_text"
+  | "document_outline"
   | "document_metadata"
   | "chunk_excerpt"
   | "table_signal"
@@ -32,12 +33,16 @@ export type SourceObservationType =
   | "visual_region_assessment"
   | "document_ai_result"
   | "document_elements"
+  | "deck_outline"
+  | "slide_summary"
   | "layout_map"
   | "table_extraction"
   | "form_fields"
   | "key_value_extraction"
   | "pdf_structure"
   | "structured_table_observation"
+  | "workbook_metadata"
+  | "sheet_inventory"
   | "spreadsheet_range"
   | "spreadsheet_formula_map"
   | "connector_file_snapshot"
@@ -109,6 +114,7 @@ export type SourceObservationLocator = Partial<DocumentIntelligenceLocation> & {
   charStart?: number | null;
   charEnd?: number | null;
   section?: string | null;
+  slideNumber?: number | null;
   tableId?: string | null;
   sheetName?: string | null;
   rowRange?: { start: number; end: number } | null;
@@ -407,6 +413,7 @@ export function normalizeSourceObservationLocator(
     charStart: locator?.charStart ?? null,
     charEnd: locator?.charEnd ?? null,
     section: locator?.section ?? null,
+    slideNumber: locator?.slideNumber ?? null,
     sheetName: locator?.sheetName ?? null,
     rowRange: locator?.rowRange ?? null,
     columnRange: locator?.columnRange ?? null,
@@ -454,6 +461,7 @@ export function summarizeObservationEvidence(observation: SourceObservation | nu
       pageNumberEnd: observation.sourceLocator.pageNumberEnd ?? observation.sourceLocator.page ?? null,
       tableId: observation.sourceLocator.tableId ?? null,
       sheetName: observation.sourceLocator.sheetName ?? null,
+      slideNumber: observation.sourceLocator.slideNumber ?? null,
       chunkId: observation.sourceLocator.chunkId ?? null,
       attributionAmbiguous: observation.sourceLocator.attributionAmbiguous ?? false,
     },

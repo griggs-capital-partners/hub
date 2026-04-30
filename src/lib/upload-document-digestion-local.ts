@@ -36,10 +36,14 @@ export type UploadedDocumentLocalContextKind =
 
 export type UploadedDocumentLocalAvailabilityState =
   | "available_executable"
+  | "newly_enabled_dependency"
   | "available_but_not_needed"
   | "cataloged_not_installed"
   | "unavailable_missing_dependency"
   | "unavailable_no_safe_sandbox"
+  | "unavailable_no_safe_wrapper"
+  | "unavailable_requires_worker_runtime"
+  | "unavailable_runtime_install_forbidden"
   | "unavailable_not_supported"
   | "blocked_by_policy"
   | "deferred"
@@ -73,6 +77,7 @@ export type UploadedDocumentLocalCandidateSummary = {
     | "failed";
   reason: string;
   deferredPackage?: "WP4A2" | "WP4C" | "WP6" | "WP7" | null;
+  newlyEnabledInWp4A3?: boolean;
   noExecutionClaimed: true;
 };
 
@@ -119,9 +124,31 @@ export type UploadedDocumentDigestionLocalDebugSummary = {
   contextKind: UploadedDocumentLocalContextKind;
   dependencyInventory: UploadedDocumentLocalDependencyInventory;
   inventoryInspectedBeforeProducerSelection: true;
-  executionBackedLocalProducerLimit: 3;
+  executionBackedLocalProducerLimit: number;
   executedLocalProducerCount: number;
   executedLocalProducers: UploadedDocumentDigestionLocalExecutedProducerSummary[];
+  localToolEnablement: {
+    renderedPageImageInputStatus:
+      | "not_needed"
+      | "completed_with_evidence"
+      | "missing_input"
+      | "unavailable"
+      | "failed";
+    renderedPageImageInputCount: number;
+    ocrStatus:
+      | "not_needed"
+      | "completed_with_evidence"
+      | "unavailable_requires_worker_runtime"
+      | "unavailable_runtime_install_forbidden"
+      | "failed";
+    officeStructureStatus: "not_needed" | "completed_with_evidence" | "failed";
+    spreadsheetStructureStatus: "not_needed" | "completed_with_evidence" | "failed";
+    tableExtractionStatus: "not_needed" | "completed_with_evidence" | "unresolved_need";
+    newlyEnabledDependencies: string[];
+    noRuntimeInstallAttempted: true;
+    noRawImageBytesInObservations: true;
+    noSemanticVisionClaimedByRendering: true;
+  };
   availableButNotNeededLocalProducers: UploadedDocumentLocalCandidateSummary[];
   unavailableCatalogOnlyLocalProducers: UploadedDocumentLocalCandidateSummary[];
   externalCandidateProducers: UploadedDocumentExternalCandidateSummary[];
@@ -168,6 +195,9 @@ type LocalCandidateDefinition = {
   implemented: boolean;
   requiresSafeSandbox?: boolean;
   requiresOptionalBinary?: boolean;
+  requiresWorkerRuntime?: boolean;
+  requiresPinnedRuntimeAssets?: boolean;
+  newlyEnabledInWp4A3?: boolean;
   deferredPackage?: "WP4A2" | "WP4C" | "WP6" | "WP7" | null;
   reasonUnavailable: string;
 };
@@ -177,6 +207,8 @@ const DEFAULT_DEPENDENCY_VERSIONS: Record<string, string | null> = {
   mammoth: "^1.12.0",
   officeparser: "^6.1.0",
   xlsx: "^0.18.5",
+  "pdfjs-dist": null,
+  "tesseract.js": null,
 };
 
 const LOCAL_CANDIDATE_DEFINITIONS: LocalCandidateDefinition[] = [
@@ -201,15 +233,47 @@ const LOCAL_CANDIDATE_DEFINITIONS: LocalCandidateDefinition[] = [
     reasonUnavailable: "PDF parser metadata is only available when pdf-parse succeeds for an uploaded PDF.",
   },
   {
+    toolId: "pdf-parse-page-renderer",
+    producerId: "rendered_page_renderer",
+    capabilityId: "rendered_page_inspection",
+    payloadTypes: ["rendered_page_image", "image_reference", "source_observation"],
+    dependencyNames: ["pdf-parse"],
+    relevantContextKinds: ["pdf"],
+    implemented: true,
+    newlyEnabledInWp4A3: true,
+    reasonUnavailable:
+      "PDF page rendering is available only when WP4A3 rendered-page evidence exists for selected uploaded PDF pages.",
+  },
+  {
     toolId: "xlsx",
     producerId: "spreadsheet_range_reader",
     capabilityId: "spreadsheet_inventory",
-    payloadTypes: ["source_observation", "spreadsheet_range"],
+    payloadTypes: [
+      "source_observation",
+      "spreadsheet_range",
+      "workbook_metadata",
+      "sheet_inventory",
+      "spreadsheet_formula_map",
+      "table_extraction",
+    ],
     dependencyNames: ["xlsx"],
     relevantContextKinds: ["spreadsheet"],
     implemented: true,
+    newlyEnabledInWp4A3: true,
     reasonUnavailable:
       "Spreadsheet inventory uses existing xlsx representative rows only; computation and formulas remain deferred.",
+  },
+  {
+    toolId: "office-structure-parser",
+    producerId: "office_document_structure_extractor",
+    capabilityId: "document_structure_extraction",
+    payloadTypes: ["document_outline", "deck_outline", "slide_summary", "source_observation"],
+    dependencyNames: ["mammoth", "officeparser"],
+    relevantContextKinds: ["docx", "pptx"],
+    implemented: true,
+    newlyEnabledInWp4A3: true,
+    reasonUnavailable:
+      "Office structure extraction is available only when WP4A3 selected DOCX/PPTX parser chunks produce bounded structural observations.",
   },
   {
     toolId: "mammoth",
@@ -240,8 +304,9 @@ const LOCAL_CANDIDATE_DEFINITIONS: LocalCandidateDefinition[] = [
     relevantContextKinds: ["pdf", "docx", "pptx", "spreadsheet"],
     implemented: false,
     requiresOptionalBinary: true,
-    deferredPackage: "WP4A2",
-    reasonUnavailable: "MarkItDown is cataloged as a candidate but is not installed or approved for execution.",
+    requiresWorkerRuntime: true,
+    deferredPackage: "WP4C",
+    reasonUnavailable: "MarkItDown conversion remains deferred to the WP4C worker runtime.",
   },
   {
     toolId: "pandoc",
@@ -252,8 +317,9 @@ const LOCAL_CANDIDATE_DEFINITIONS: LocalCandidateDefinition[] = [
     relevantContextKinds: ["docx", "pptx"],
     implemented: false,
     requiresOptionalBinary: true,
-    deferredPackage: "WP4A2",
-    reasonUnavailable: "Pandoc is cataloged as a candidate but no safe local binary wrapper exists.",
+    requiresWorkerRuntime: true,
+    deferredPackage: "WP4C",
+    reasonUnavailable: "Pandoc conversion remains deferred to the WP4C worker runtime; no app-level binary wrapper is allowed.",
   },
   {
     toolId: "tesseract",
@@ -264,8 +330,22 @@ const LOCAL_CANDIDATE_DEFINITIONS: LocalCandidateDefinition[] = [
     relevantContextKinds: ["pdf", "image"],
     implemented: false,
     requiresOptionalBinary: true,
-    deferredPackage: "WP4A2",
-    reasonUnavailable: "OCR is cataloged but no approved local OCR execution path exists in WP4A1.",
+    requiresWorkerRuntime: true,
+    deferredPackage: "WP4C",
+    reasonUnavailable: "System Tesseract/OCRmyPDF/PaddleOCR-style OCR remains deferred to the WP4C worker runtime.",
+  },
+  {
+    toolId: "tesseract.js",
+    producerId: "ocr_extractor",
+    capabilityId: "ocr",
+    payloadTypes: ["ocr_text"],
+    dependencyNames: ["tesseract.js"],
+    relevantContextKinds: ["pdf", "image"],
+    implemented: false,
+    requiresPinnedRuntimeAssets: true,
+    deferredPackage: "WP4C",
+    reasonUnavailable:
+      "tesseract.js is not enabled as a local OCR producer because traineddata assets are not pinned as app-level assets and runtime downloads are forbidden.",
   },
   {
     toolId: "python-dataframe-sandbox",
@@ -288,8 +368,33 @@ const LOCAL_CANDIDATE_DEFINITIONS: LocalCandidateDefinition[] = [
     relevantContextKinds: ["docx", "pptx", "spreadsheet"],
     implemented: false,
     requiresOptionalBinary: true,
-    deferredPackage: "WP4A2",
-    reasonUnavailable: "LibreOffice headless conversion is cataloged but not installed or safely wrapped.",
+    requiresWorkerRuntime: true,
+    deferredPackage: "WP4C",
+    reasonUnavailable: "LibreOffice headless conversion and recalculation remain deferred to the WP4C worker runtime.",
+  },
+  {
+    toolId: "poppler-or-pymupdf",
+    producerId: "rendered_page_renderer",
+    capabilityId: "rendered_page_inspection",
+    payloadTypes: ["rendered_page_image"],
+    dependencyNames: ["poppler", "pymupdf"],
+    relevantContextKinds: ["pdf"],
+    implemented: false,
+    requiresWorkerRuntime: true,
+    deferredPackage: "WP4C",
+    reasonUnavailable: "Poppler/PyMuPDF rendering belongs in WP4C worker runtime, not WP4A3 app-level execution.",
+  },
+  {
+    toolId: "pdfplumber-or-docling",
+    producerId: "document_ai_table_extractor",
+    capabilityId: "document_ai_table_recovery",
+    payloadTypes: ["structured_table", "table_extraction"],
+    dependencyNames: ["pdfplumber", "docling"],
+    relevantContextKinds: ["pdf"],
+    implemented: false,
+    requiresWorkerRuntime: true,
+    deferredPackage: "WP4C",
+    reasonUnavailable: "pdfplumber/Docling table recovery remains deferred to WP4C worker runtime.",
   },
 ];
 
@@ -379,7 +484,13 @@ export const UPLOADED_DOCUMENT_LOCAL_PRODUCER_MANIFESTS: SourceObservationProduc
     producerKind: "parser",
     acceptedSourceKinds: ["uploaded_document", "spreadsheet_source_metadata", "parsed_document"],
     requiredInputLanes: ["a03_text_packing_lane"],
-    producedObservationTypes: ["spreadsheet_range"],
+    producedObservationTypes: [
+      "spreadsheet_range",
+      "workbook_metadata",
+      "sheet_inventory",
+      "spreadsheet_formula_map",
+      "table_extraction",
+    ],
     producedPayloadKinds: ["table", "structured"],
     producedPayloadTypes: ["source_observation", "spreadsheet_range"],
     modelRequirements: [],
@@ -401,6 +512,62 @@ export const UPLOADED_DOCUMENT_LOCAL_PRODUCER_MANIFESTS: SourceObservationProduc
     },
     noUnavailableToolExecutionClaimed: true,
   },
+  {
+    producerId: "rendered_page_renderer",
+    capabilityId: "rendered_page_inspection",
+    producerKind: "tool",
+    acceptedSourceKinds: ["uploaded_document", "pdf_page"],
+    requiredInputLanes: ["a03_text_packing_lane"],
+    producedObservationTypes: ["rendered_page_image"],
+    producedPayloadKinds: ["image_reference", "structured"],
+    producedPayloadTypes: ["rendered_page_image", "source_observation"],
+    modelRequirements: [],
+    toolRequirements: ["pdf-parse", "PDFParse.getScreenshot"],
+    laneRequirements: ["a03_text_packing_lane"],
+    approvalRequired: false,
+    policyDataClass: "tenant_source",
+    sideEffects: "read_current_evidence",
+    costEstimate: "none",
+    latencyEstimate: "short",
+    currentAvailability: "available_read_only",
+    executionEvidenceRequirement:
+      "A scoped uploaded PDF buffer must be rendered by the WP4A3 app-level local producer and produce capped image-reference observations.",
+    canonicalCatalogIds: {
+      payloadTypes: ["rendered_page_image", "source_observation"],
+      laneIds: ["a03_text_packing_lane"],
+      toolIds: ["pdf-parse-page-renderer", "rendered_page_renderer"],
+      capabilityIds: ["rendered_page_inspection"],
+    },
+    noUnavailableToolExecutionClaimed: true,
+  },
+  {
+    producerId: "office_document_structure_extractor",
+    capabilityId: "document_structure_extraction",
+    producerKind: "parser",
+    acceptedSourceKinds: ["uploaded_document", "parsed_document"],
+    requiredInputLanes: ["a03_text_packing_lane"],
+    producedObservationTypes: ["document_outline", "deck_outline", "slide_summary"],
+    producedPayloadKinds: ["structured"],
+    producedPayloadTypes: ["source_observation"],
+    modelRequirements: [],
+    toolRequirements: ["mammoth", "officeparser", "office_document_structure_extractor"],
+    laneRequirements: ["a03_text_packing_lane"],
+    approvalRequired: false,
+    policyDataClass: "tenant_source",
+    sideEffects: "read_current_evidence",
+    costEstimate: "none",
+    latencyEstimate: "in_memory",
+    currentAvailability: "available_read_only",
+    executionEvidenceRequirement:
+      "DOCX/PPTX parser chunks must exist and be normalized into bounded structure observations.",
+    canonicalCatalogIds: {
+      payloadTypes: ["source_observation"],
+      laneIds: ["a03_text_packing_lane"],
+      toolIds: ["mammoth", "officeparser", "office_document_structure_extractor"],
+      capabilityIds: ["document_structure_extraction"],
+    },
+    noUnavailableToolExecutionClaimed: true,
+  },
 ];
 
 function normalizeStateForResult(
@@ -408,6 +575,7 @@ function normalizeStateForResult(
 ): UploadedDocumentLocalCandidateSummary["resultState"] {
   switch (state) {
     case "available_executable":
+    case "newly_enabled_dependency":
       return "completed_with_evidence";
     case "available_but_not_needed":
       return "skipped";
@@ -464,20 +632,34 @@ function localCandidateState(params: {
     return "unavailable_no_safe_sandbox" satisfies UploadedDocumentLocalAvailabilityState;
   }
 
+  if (!relevant) {
+    return "available_but_not_needed" satisfies UploadedDocumentLocalAvailabilityState;
+  }
+
+  if (candidate.requiresWorkerRuntime && !candidate.requiresOptionalBinary) {
+    return "unavailable_requires_worker_runtime" satisfies UploadedDocumentLocalAvailabilityState;
+  }
+
   if (!dependenciesAvailable) {
     return candidate.requiresOptionalBinary
       ? ("cataloged_not_installed" satisfies UploadedDocumentLocalAvailabilityState)
       : ("unavailable_missing_dependency" satisfies UploadedDocumentLocalAvailabilityState);
   }
 
-  if (!candidate.implemented) {
-    return relevant
-      ? ("deferred" satisfies UploadedDocumentLocalAvailabilityState)
-      : ("available_but_not_needed" satisfies UploadedDocumentLocalAvailabilityState);
+  if (candidate.requiresWorkerRuntime) {
+    return "unavailable_requires_worker_runtime" satisfies UploadedDocumentLocalAvailabilityState;
   }
 
-  if (!relevant) {
-    return "available_but_not_needed" satisfies UploadedDocumentLocalAvailabilityState;
+  if (candidate.requiresPinnedRuntimeAssets) {
+    return "unavailable_runtime_install_forbidden" satisfies UploadedDocumentLocalAvailabilityState;
+  }
+
+  if (!candidate.implemented) {
+    return "deferred" satisfies UploadedDocumentLocalAvailabilityState;
+  }
+
+  if (candidate.newlyEnabledInWp4A3 && params.producerEvidenceAvailable) {
+    return "newly_enabled_dependency" satisfies UploadedDocumentLocalAvailabilityState;
   }
 
   return params.producerEvidenceAvailable
@@ -522,10 +704,11 @@ export function buildUploadedDocumentLocalDependencyInventory(params?: {
       availabilityState,
       resultState: normalizeStateForResult(availabilityState),
       reason:
-        availabilityState === "available_executable"
+        availabilityState === "available_executable" || availabilityState === "newly_enabled_dependency"
           ? "Current uploaded-document resolver evidence is available for this local producer."
           : candidate.reasonUnavailable,
       deferredPackage: candidate.deferredPackage ?? null,
+      newlyEnabledInWp4A3: candidate.newlyEnabledInWp4A3,
       noExecutionClaimed: true,
     } satisfies UploadedDocumentLocalCandidateSummary;
   });
@@ -808,11 +991,12 @@ function buildNoExecutionWarnings(
   externalCandidates: UploadedDocumentExternalCandidateSummary[]
 ) {
   const warnings = [
-    "WP4A1 local baseline does not install packages, deploy tools, call external services, read connectors, or create browser snapshots.",
+    "WP4A3 local tool enablement does not install packages at runtime, deploy tools, call external services, read connectors, or create browser snapshots.",
   ];
   for (const candidate of localCandidates) {
     if (
       candidate.availabilityState !== "available_executable" &&
+      candidate.availabilityState !== "newly_enabled_dependency" &&
       candidate.availabilityState !== "available_but_not_needed"
     ) {
       warnings.push(`${candidate.toolId}: ${candidate.reason}`);
@@ -822,6 +1006,78 @@ function buildNoExecutionWarnings(
     warnings.push(`${candidate.toolId}: ${candidate.reason}`);
   }
   return warnings.slice(0, 18);
+}
+
+function buildLocalToolEnablementDebug(params: {
+  observations: SourceObservation[];
+  producerResults: SourceObservationProducerResult[];
+  localCandidates: UploadedDocumentLocalCandidateSummary[];
+}) {
+  const resultState = (producerId: string) =>
+    params.producerResults.find((result) => result.producerId === producerId)?.state ?? null;
+  const renderedCount = params.observations.filter((observation) => observation.type === "rendered_page_image").length;
+  const ocrCompleted = params.observations.some(
+    (observation) => observation.type === "ocr_text" || observation.type === "ocr_page_text"
+  );
+  const officeCompleted = params.observations.some(
+    (observation) =>
+      observation.type === "document_outline" ||
+      observation.type === "deck_outline" ||
+      observation.type === "slide_summary"
+  );
+  const spreadsheetCompleted = params.observations.some(
+    (observation) =>
+      observation.type === "workbook_metadata" ||
+      observation.type === "sheet_inventory" ||
+      observation.type === "spreadsheet_formula_map"
+  );
+  const tableCompleted = params.observations.some((observation) => observation.type === "table_extraction");
+  const tableUnresolved = params.producerResults.some((result) =>
+    result.unresolvedNeeds.some(
+      (need) => need.payloadType === "structured_table" || need.observationType === "table_extraction"
+    )
+  );
+  const newlyEnabledDependencies = uniqueStrings(
+    params.localCandidates
+      .filter((candidate) => candidate.availabilityState === "newly_enabled_dependency")
+      .flatMap((candidate) => candidate.dependencyNames)
+  );
+
+  return {
+    renderedPageImageInputStatus:
+      renderedCount > 0
+        ? "completed_with_evidence"
+        : resultState("rendered_page_renderer") === "failed"
+          ? "failed"
+          : resultState("rendered_page_renderer") === "missing"
+            ? "missing_input"
+            : resultState("rendered_page_renderer") === "unavailable"
+              ? "unavailable"
+              : "not_needed",
+    renderedPageImageInputCount: renderedCount,
+    ocrStatus: ocrCompleted
+      ? "completed_with_evidence"
+      : resultState("ocr_extractor") === "failed"
+        ? "failed"
+        : resultState("ocr_extractor") === "unavailable"
+          ? "unavailable_runtime_install_forbidden"
+          : "not_needed",
+    officeStructureStatus: officeCompleted
+      ? "completed_with_evidence"
+      : resultState("office_document_structure_extractor") === "failed"
+        ? "failed"
+        : "not_needed",
+    spreadsheetStructureStatus: spreadsheetCompleted
+      ? "completed_with_evidence"
+      : resultState("spreadsheet_range_reader") === "failed"
+        ? "failed"
+        : "not_needed",
+    tableExtractionStatus: tableCompleted ? "completed_with_evidence" : tableUnresolved ? "unresolved_need" : "not_needed",
+    newlyEnabledDependencies,
+    noRuntimeInstallAttempted: true,
+    noRawImageBytesInObservations: true,
+    noSemanticVisionClaimedByRendering: true,
+  } satisfies UploadedDocumentDigestionLocalDebugSummary["localToolEnablement"];
 }
 
 function buildDebugSummary(params: {
@@ -855,6 +1111,11 @@ function buildDebugSummary(params: {
     executionBackedLocalProducerLimit: 3,
     executedLocalProducerCount: executedLocalProducers.length,
     executedLocalProducers,
+    localToolEnablement: buildLocalToolEnablementDebug({
+      observations: params.observations,
+      producerResults: params.producerResults,
+      localCandidates,
+    }),
     availableButNotNeededLocalProducers: localCandidates.filter(
       (candidate) => candidate.availabilityState === "available_but_not_needed"
     ),
@@ -862,6 +1123,9 @@ function buildDebugSummary(params: {
       candidate.availabilityState === "cataloged_not_installed" ||
       candidate.availabilityState === "unavailable_missing_dependency" ||
       candidate.availabilityState === "unavailable_no_safe_sandbox" ||
+      candidate.availabilityState === "unavailable_no_safe_wrapper" ||
+      candidate.availabilityState === "unavailable_requires_worker_runtime" ||
+      candidate.availabilityState === "unavailable_runtime_install_forbidden" ||
       candidate.availabilityState === "unavailable_not_supported"
     ),
     externalCandidateProducers: params.inventory.externalCandidates,
@@ -903,6 +1167,9 @@ export function buildUploadedDocumentDigestionLocalBaseline(params: {
   spreadsheetMaxObservationsPerDocument?: number | null;
   transportMaxObservations?: number | null;
   transportMaxObservationsPerDocument?: number | null;
+  enrichmentObservations?: SourceObservation[] | null;
+  enrichmentProducerRequests?: SourceObservationProducerRequest[] | null;
+  enrichmentProducerResults?: SourceObservationProducerResult[] | null;
   packageDependencies?: Record<string, string | null> | null;
   packageDevDependencies?: Record<string, string | null> | null;
   env?: Record<string, string | undefined> | null;
@@ -968,12 +1235,21 @@ export function buildUploadedDocumentDigestionLocalBaseline(params: {
     ...pdfObservations,
     ...spreadsheetObservations,
     ...artifactObservations,
+    ...(params.enrichmentObservations ?? []),
   ];
-  const evidenceAvailableByProducerId = {
+  const evidenceAvailableByProducerId = observations.reduce<Record<string, boolean>>((acc, observation) => {
+    if (
+      observation.producer.executionState === "executed" ||
+      observation.producer.executionState === "deterministically_derived"
+    ) {
+      acc[observation.producer.producerId] = true;
+    }
+    return acc;
+  }, {
     parser_text_extraction: parserObservations.length > 0,
     pdf_context_extraction: pdfObservations.length > 0,
     spreadsheet_range_reader: spreadsheetObservations.length > 0,
-  };
+  });
   const inventory = buildUploadedDocumentLocalDependencyInventory({
     packageDependencies: params.packageDependencies,
     packageDevDependencies: params.packageDevDependencies,
@@ -982,15 +1258,18 @@ export function buildUploadedDocumentDigestionLocalBaseline(params: {
     evidenceAvailableByProducerId,
     safeSandboxAvailable: params.safeSandboxAvailable ?? false,
   });
-  const producerRequests = buildLocalProducerRequests({
-    document: params.document,
-    contextKind: params.contextKind,
-    observations,
-    traceId: params.observationOptions?.traceId,
-    planId: params.observationOptions?.planId,
-    conversationId: params.observationOptions?.conversationId,
-    messageId: params.observationOptions?.messageId,
-  });
+  const producerRequests = [
+    ...buildLocalProducerRequests({
+      document: params.document,
+      contextKind: params.contextKind,
+      observations,
+      traceId: params.observationOptions?.traceId,
+      planId: params.observationOptions?.planId,
+      conversationId: params.observationOptions?.conversationId,
+      messageId: params.observationOptions?.messageId,
+    }),
+    ...(params.enrichmentProducerRequests ?? []),
+  ];
   const producerAvailability = buildSourceObservationProducerAvailabilitySnapshot({
     requests: producerRequests,
     observations,
@@ -998,12 +1277,19 @@ export function buildUploadedDocumentDigestionLocalBaseline(params: {
     traceId: params.observationOptions?.traceId,
     planId: params.observationOptions?.planId,
   });
-  const producerResults = runDeterministicSourceObservationProducers({
-    requests: producerRequests,
-    observations,
-    manifests: UPLOADED_DOCUMENT_LOCAL_PRODUCER_MANIFESTS,
-    availabilityContext: producerAvailability,
-  });
+  const deterministicProducerRequests = producerRequests.filter(
+    (request) =>
+      !(params.enrichmentProducerRequests ?? []).some((enrichmentRequest) => enrichmentRequest.id === request.id)
+  );
+  const producerResults = [
+    ...runDeterministicSourceObservationProducers({
+      requests: deterministicProducerRequests,
+      observations,
+      manifests: UPLOADED_DOCUMENT_LOCAL_PRODUCER_MANIFESTS,
+      availabilityContext: producerAvailability,
+    }),
+    ...(params.enrichmentProducerResults ?? []),
+  ];
   const transportSelection = selectSourceObservationsForTransport({
     observations,
     maxObservations: params.transportMaxObservations ?? 16,

@@ -327,6 +327,38 @@ runTest("vision task without rendered/image input emits missing_image_input with
   assert.equal(counter.count, 0);
 });
 
+runTest("rendered page image input unblocks existing OpenAI vision path", async () => {
+  const counter = { count: 0 };
+  const result = await runUploadedDocumentExternalEscalationProducers({
+    document: makeDocument(),
+    contextKind: "pdf",
+    taskPrompt: "What does the diagram on page 2 show visually?",
+    localObservations: [],
+    localProducerResults: [],
+    imageInputs: [
+      {
+        id: "rendered-page:doc-wp4a2:2",
+        mimeType: "image/png",
+        dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+        pageNumber: 2,
+        sourceLocator: { pageNumberStart: 2, pageNumberEnd: 2, sourceLocationLabel: "source.pdf page 2" },
+        sourceObservationId: "doc-wp4a2:rendered-page:2",
+        producerId: "rendered_page_renderer",
+        renderedPageImage: true,
+      },
+    ],
+    env: { OPENAI_API_KEY: "test-key", OPENAI_VISION_MODEL: "vision-fixture-model" },
+    policy: { allowExternalProcessing: true, dataClassAllowsExternalProcessing: true, approvalGranted: true },
+    fetchImpl: fakeFetchReturningVision(counter),
+  });
+
+  assert.equal(counter.count, 1);
+  assert.equal(result.producerResults[0].state, "completed_with_evidence");
+  assert.equal(result.observations[0].type, "model_vision_result");
+  assert.equal(result.observations[0].sourceLocator.pageNumberStart, 2);
+  assert.equal(result.debugSummary.providerStatuses.find((status) => status.providerId === "openai_vision").availabilityState, "completed_with_evidence");
+});
+
 runTest("OpenAI vision with real image input and fake fetch returns completed semantic observation", async () => {
   const counter = { count: 0 };
   const result = await runUploadedDocumentExternalEscalationProducers({

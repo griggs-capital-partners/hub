@@ -119,6 +119,9 @@ export type UploadedDocumentExternalImageInput = {
   pageNumber?: number | null;
   cropId?: string | null;
   sourceLocationLabel?: string | null;
+  sourceObservationId?: string | null;
+  producerId?: string | null;
+  renderedPageImage?: boolean | null;
 };
 
 export type UploadedDocumentExternalDocumentRef = {
