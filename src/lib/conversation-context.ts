@@ -42,6 +42,7 @@ import { joinMarkdownSections } from "./context-formatting";
 import {
   buildPdfContextExtractionResult,
   formatPdfVisualClassificationLabel,
+  type PdfContextExtractionMetadata,
   type PdfContextExtractionResult,
 } from "./context-pdf";
 import {
@@ -112,6 +113,12 @@ import {
   buildContextPayloadsFromSourceObservations,
   type ContextPayload,
 } from "./adaptive-context-transport";
+import {
+  runUploadedDocumentExternalEscalationProducers,
+  withUploadedDocumentExternalDurableGapCount,
+  type UploadedDocumentDigestionExternalDebugSummary,
+  type UploadedDocumentExternalImageInput,
+} from "./document-ingestion-external-producers";
 import {
   buildUploadedDocumentDigestionLocalBaseline,
   withUploadedDocumentDigestionLocalDurableGapCount,
@@ -312,6 +319,7 @@ export type ConversationContextBundle = {
   sourceObservations: SourceObservationDebugSummary | null;
   sourceObservationProducers: SourceObservationProducerDebugSummary | null;
   uploadedDocumentDigestionLocal: UploadedDocumentDigestionLocalDebugSummary[] | null;
+  uploadedDocumentDigestionExternal: UploadedDocumentDigestionExternalDebugSummary[] | null;
   debugTrace?: ContextDebugTrace | null;
 };
 
@@ -1007,6 +1015,17 @@ type ConversationContextResolverDependencies = {
     request?: string | null;
   }) => Promise<ContextRegistrySelection>;
   upsertContextRegistryRecords?: (batch: ContextRegistryUpsertBatch) => Promise<ContextRegistrySelection>;
+};
+
+type UploadedDocumentExternalEscalationInput = {
+  document: ConversationContextDocumentRecord;
+  contextKind: string;
+  sourceMetadata: Record<string, unknown> | null;
+  pdfExtractionMetadata: PdfContextExtractionMetadata | null;
+  localObservations: SourceObservation[];
+  localProducerResults: SourceObservationProducerResult[];
+  selectedPages: number[];
+  imageInputs: UploadedDocumentExternalImageInput[];
 };
 
 export const MAX_THREAD_DOCUMENT_CONTEXT_CHARS = CHAT_THREAD_DOCUMENT_CONTEXT_CHARS;
@@ -4286,6 +4305,8 @@ export async function resolveConversationContextBundle(params: {
   const sourceObservationProducerRequests: SourceObservationProducerRequest[] = [];
   const sourceObservationProducerResults: SourceObservationProducerResult[] = [];
   const uploadedDocumentDigestionLocalSummaries: UploadedDocumentDigestionLocalDebugSummary[] = [];
+  const uploadedDocumentExternalEscalationInputs: UploadedDocumentExternalEscalationInput[] = [];
+  const uploadedDocumentDigestionExternalSummaries: UploadedDocumentDigestionExternalDebugSummary[] = [];
   const artifactPromotionTraces: ArtifactPromotionDebugSnapshot["traces"] = [];
   let artifactPromotionCandidateCount = 0;
   let artifactPromotionAcceptedCount = 0;
@@ -4360,6 +4381,34 @@ export async function resolveConversationContextBundle(params: {
       unavailableCount += 1;
       threadDocumentExcludedCategories.add("availability");
       const detail = buildImageRuntimeUnavailableDetail();
+      try {
+        const imageBuffer = await readBinaryFile(document.storagePath);
+        uploadedDocumentExternalEscalationInputs.push({
+          document,
+          contextKind,
+          sourceMetadata: {
+            localImageRuntimeStatus: "unavailable",
+            detail,
+          },
+          pdfExtractionMetadata: null,
+          localObservations: [],
+          localProducerResults: [],
+          selectedPages: [],
+          imageInputs: [
+            {
+              id: `uploaded-image:${document.id}`,
+              mimeType: document.mimeType ?? "application/octet-stream",
+              dataBase64: imageBuffer.toString("base64"),
+              sourceLocator: {
+                sourceLocationLabel: document.filename,
+              },
+              sourceLocationLabel: document.filename,
+            },
+          ],
+        });
+      } catch {
+        // The normal image unavailable path below remains authoritative.
+      }
       availabilityNotes.push(`- ${document.filename}: ${detail}`);
       sources.push(buildContextSource("unavailable", document.filename, detail));
       documentChunkingDocuments.push(
@@ -4803,6 +4852,7 @@ export async function resolveConversationContextBundle(params: {
       transportMaxObservationsPerDocument: 8,
     });
     const currentSourceObservations = localDigestion.observations;
+    const currentLocalProducerResults = [...localDigestion.producerResults];
     const transportSelection = localDigestion.transportSelection;
     completedSourceObservations.push(...currentSourceObservations);
     sourceObservationTransportSelections.push(transportSelection);
@@ -4824,14 +4874,25 @@ export async function resolveConversationContextBundle(params: {
         observations: currentSourceObservations,
         traceId: params.conversationId ? `${params.conversationId}:source-observation-producers` : null,
       });
-      sourceObservationProducerResults.push(
-        ...runDeterministicSourceObservationProducers({
-          requests: tableProducerRequests,
-          observations: currentSourceObservations,
-          availabilityContext: tableProducerAvailability,
-        })
-      );
+      const tableProducerResults = runDeterministicSourceObservationProducers({
+        requests: tableProducerRequests,
+        observations: currentSourceObservations,
+        availabilityContext: tableProducerAvailability,
+      });
+      currentLocalProducerResults.push(...tableProducerResults);
+      sourceObservationProducerResults.push(...tableProducerResults);
     }
+
+    uploadedDocumentExternalEscalationInputs.push({
+      document,
+      contextKind,
+      sourceMetadata: sourceMetadataWithArtifacts,
+      pdfExtractionMetadata,
+      localObservations: currentSourceObservations,
+      localProducerResults: currentLocalProducerResults,
+      selectedPages: pdfExtractionMetadata?.lowTextPageNumbers ?? [],
+      imageInputs: [],
+    });
 
     const fullyIncluded =
       selection.selectedChunks.length === chunkCandidates.length &&
@@ -4958,6 +5019,57 @@ export async function resolveConversationContextBundle(params: {
       rejectedCount: artifactPromotionRejectedCount,
     },
   });
+
+  const externalApprovalRequired =
+    agentControl.approvalRequiredReasons.includes("external_tool_required") ||
+    agentControl.approvalRequiredReasons.includes("external_data_egress");
+  const externalPolicyBlocked =
+    agentControl.externalEscalation.level === "blocked_by_policy" ||
+    agentControl.blockedByPolicyReasons.some((reason) => /external|restricted data/i.test(reason));
+  const externalApprovalSatisfied =
+    agentControl.externalEscalation.level === "recommended" && !externalApprovalRequired;
+
+  for (const externalInput of uploadedDocumentExternalEscalationInputs) {
+    const externalDigestion = await runUploadedDocumentExternalEscalationProducers({
+      document: externalInput.document,
+      contextKind: externalInput.contextKind,
+      taskPrompt: params.currentUserPrompt ?? null,
+      localObservations: externalInput.localObservations,
+      localProducerResults: externalInput.localProducerResults,
+      pdfExtractionMetadata: externalInput.pdfExtractionMetadata,
+      sourceMetadata: externalInput.sourceMetadata,
+      selectedPages: externalInput.selectedPages,
+      imageInputs: externalInput.imageInputs,
+      env: process.env,
+      policy: {
+        allowExternalProcessing: !externalPolicyBlocked,
+        dataClassAllowsExternalProcessing: !externalPolicyBlocked,
+        approvalGranted: externalApprovalSatisfied,
+        maxExternalObservations: 6,
+        maxExternalObservationsPerDocument: 4,
+      },
+      traceId: agentWorkPlan.traceId,
+      planId: agentWorkPlan.planId,
+      conversationId: params.conversationId,
+      messageId: agentWorkPlan.messageId ?? null,
+    });
+    if (
+      externalDigestion.producerRequests.length === 0 &&
+      externalDigestion.producerResults.length === 0 &&
+      externalDigestion.observations.length === 0
+    ) {
+      uploadedDocumentDigestionExternalSummaries.push(externalDigestion.debugSummary);
+      continue;
+    }
+    completedSourceObservations.push(...externalDigestion.observations);
+    sourceObservationTransportSelections.push(externalDigestion.transportSelection);
+    sourceObservationProducerRequests.push(...externalDigestion.producerRequests);
+    sourceObservationProducerResults.push(...externalDigestion.producerResults);
+    uploadedDocumentDigestionExternalSummaries.push(externalDigestion.debugSummary);
+    progressiveTransportPayloads.push(
+      ...buildContextPayloadsFromSourceObservations(externalDigestion.transportSelection.selectedObservations)
+    );
+  }
 
   const progressiveAssembly = assembleProgressiveContext({
     request: params.currentUserPrompt ?? null,
@@ -5190,6 +5302,25 @@ export async function resolveConversationContextBundle(params: {
           )
         )
       : null;
+  const externalDurableGapDebtCandidateCount = sourceObservationProducerResults
+    .filter((result) => result.producerId?.includes("_vision") ||
+      result.producerId?.includes("mistral") ||
+      result.producerId?.includes("llamaparse") ||
+      result.producerId?.includes("document_ai") ||
+      result.producerId?.includes("textract") ||
+      result.producerId?.includes("pdf_extract") ||
+      result.producerId?.includes("sandbox") ||
+      result.producerId?.includes("unstructured"))
+    .reduce((sum, result) => sum + result.unresolvedNeeds.length, 0);
+  const uploadedDocumentDigestionExternal =
+    uploadedDocumentDigestionExternalSummaries.length > 0
+      ? uploadedDocumentDigestionExternalSummaries.map((summary) =>
+          withUploadedDocumentExternalDurableGapCount(
+            summary,
+            externalDurableGapDebtCandidateCount
+          )
+        )
+      : null;
   const sourceObservationProducerSummary = buildSourceObservationProducerDebugSummary({
     requests: sourceObservationProducerRequests,
     results: sourceObservationProducerResults,
@@ -5240,6 +5371,7 @@ export async function resolveConversationContextBundle(params: {
     sourceObservations: sourceObservationSummary,
     sourceObservationProducers: sourceObservationProducerSummary,
     uploadedDocumentDigestionLocal,
+    uploadedDocumentDigestionExternal,
   };
 
   return {

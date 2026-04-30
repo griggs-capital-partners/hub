@@ -51,7 +51,7 @@ export type CapabilityAvailabilityAuditEntry = {
 export type ExecutedCapabilitySummaryEntry = {
   toolId: string;
   capability: string | null;
-  source: "inspection_task" | "async_work" | "visual_inspection";
+  source: "inspection_task" | "async_work" | "visual_inspection" | "source_observation_producer";
 };
 
 export type TruthfulExecutionClaimSnapshot = {
@@ -155,8 +155,8 @@ const AUDITED_CAPABILITY_DEFINITIONS: Array<{
     relatedCapabilityIds: ["ocr"],
     availability: "recommended_deferred",
     evidence: [
-      "The ocr capability card exists, but the default registry has no approved OCR tool.",
-      "tesseract.js appears only as an officeparser transitive dependency and is not wired as an approved OCR execution path.",
+      "The ocr capability card exists. WP4A2 may catalog external OCR candidates, but claims require completed_with_evidence producer traces.",
+      "No local OCR tool is wired as an approved local execution path.",
     ],
   },
   {
@@ -166,7 +166,7 @@ const AUDITED_CAPABILITY_DEFINITIONS: Array<{
     relatedCapabilityIds: ["vision_page_understanding"],
     availability: "recommended_deferred",
     evidence: [
-      "The vision_page_understanding capability card exists, but the default registry has no approved vision tool.",
+      "The vision_page_understanding capability card exists. WP4A2 can only support configured, approved, image-backed external vision producer traces.",
     ],
   },
   {
@@ -186,7 +186,7 @@ const AUDITED_CAPABILITY_DEFINITIONS: Array<{
     relatedCapabilityIds: ["document_ai_table_recovery"],
     availability: "recommended_deferred",
     evidence: [
-      "The document_ai_table_recovery capability card exists, but no approved external document AI tool is registered.",
+      "The document_ai_table_recovery capability card exists. WP4A2 catalog entries and mock contracts are not execution evidence without completed producer results.",
     ],
   },
   {
@@ -241,7 +241,7 @@ const AUDITED_CAPABILITY_DEFINITIONS: Array<{
     relatedCapabilityIds: ["document_ai_table_recovery"],
     availability: "recommended_deferred",
     evidence: [
-      "No Google Document AI, Azure Document Intelligence, AWS Textract, Adobe PDF Extract, Mistral OCR, LlamaParse, or Docling runtime tool is registered.",
+      "Approved external document-AI/parser candidates may be cataloged, but provider-specific claims require completed_with_evidence SourceObservation producer results.",
     ],
   },
   {
@@ -450,6 +450,29 @@ function collectExecutedToolTraces(
       capability: "vision_page_understanding",
       source: "visual_inspection",
     });
+  }
+
+  for (const summary of getRecordArray(asRecord(debugTrace), "uploadedDocumentDigestionExternal")) {
+    for (const status of getRecordArray(summary, "providerStatuses")) {
+      if (stringValue(status.availabilityState) !== "completed_with_evidence") continue;
+      const providerId = stringValue(status.providerId);
+      const producerId = stringValue(status.producerId);
+      const capability = stringValue(status.capabilityId);
+      if (producerId) {
+        executed.push({
+          toolId: producerId,
+          capability,
+          source: "source_observation_producer",
+        });
+      }
+      if (providerId) {
+        executed.push({
+          toolId: providerId,
+          capability,
+          source: "source_observation_producer",
+        });
+      }
+    }
   }
 
   const seen = new Set<string>();
@@ -828,16 +851,26 @@ export function validateAnswerExecutionClaims(
     }
   }
 
-  if (/engine\s*=\s*ocr\+vision/i.test(normalized) && !hasAnyExecutedTool(snapshot, ["ocr", "vision_page_understanding"])) {
+  if (
+    /engine\s*=\s*ocr\+vision/i.test(normalized) &&
+    ((!hasExecutedCapability(snapshot, "ocr") && !hasExecutedTool(snapshot, "ocr")) ||
+      (!hasExecutedCapability(snapshot, "vision_page_understanding") &&
+        !hasAnyExecutedTool(snapshot, ["vision_page_understanding", "model_vision_inspector"])))
+  ) {
     violations.push("OCR/vision engine execution is claimed without OCR or vision execution trace.");
   }
 
-  if (hasPositiveExecutionPhrase(normalized, /\b(?:ocr|ocr\/vision)\b/i) && !hasExecutedTool(snapshot, "ocr")) {
+  if (
+    hasPositiveExecutionPhrase(normalized, /\b(?:ocr|ocr\/vision)\b/i) &&
+    !hasExecutedCapability(snapshot, "ocr") &&
+    !hasExecutedTool(snapshot, "ocr")
+  ) {
     violations.push("OCR execution is claimed without an OCR execution trace.");
   }
 
   if (
     hasPositiveExecutionPhrase(normalized, /\bvision(?:[-_\s]page[-_\s]understanding)?\b/i) &&
+    !hasExecutedCapability(snapshot, "vision_page_understanding") &&
     !hasAnyExecutedTool(snapshot, ["vision_page_understanding", "model_vision_inspector"])
   ) {
     violations.push("Vision execution is claimed without a vision execution trace.");
@@ -850,8 +883,84 @@ export function validateAnswerExecutionClaims(
     violations.push("Rendered-page inspection is claimed without rendered-page execution trace.");
   }
 
-  if (hasPositiveExecutionPhrase(normalized, /\bdocument[-_\s]?ai\b/i) && !hasExecutedTool(snapshot, "document_ai_table_recovery")) {
+  if (
+    hasPositiveExecutionPhrase(normalized, /\bdocument[-_\s]?ai\b/i) &&
+    !hasExecutedCapability(snapshot, "document_ai_table_recovery") &&
+    !hasExecutedTool(snapshot, "document_ai_table_recovery")
+  ) {
     violations.push("Document-AI execution is claimed without document-AI execution trace.");
+  }
+
+  const providerClaimRules: Array<{
+    label: string;
+    pattern: RegExp;
+    toolIds: string[];
+  }> = [
+    {
+      label: "Mistral OCR",
+      pattern: /\bmistral\s+ocr\b/i,
+      toolIds: ["mistral_ocr", "mistral_ocr_extractor"],
+    },
+    {
+      label: "LlamaParse/Agentic Parse",
+      pattern: /\b(?:llamaparse|llama\s*parse|agentic\s+parse)\b/i,
+      toolIds: ["llamaparse_agentic_parse", "llamaparse_document_parser"],
+    },
+    {
+      label: "Google Document AI",
+      pattern: /\bgoogle\s+document\s+ai\b/i,
+      toolIds: ["google_document_ai", "google_document_ai_parser"],
+    },
+    {
+      label: "Azure Document Intelligence",
+      pattern: /\bazure\s+document\s+intelligence\b/i,
+      toolIds: ["azure_document_intelligence", "azure_document_intelligence_parser"],
+    },
+    {
+      label: "AWS Textract",
+      pattern: /\b(?:aws\s+)?textract\b/i,
+      toolIds: ["aws_textract", "aws_textract_parser"],
+    },
+    {
+      label: "Adobe PDF Extract",
+      pattern: /\badobe\s+pdf\s+extract\b/i,
+      toolIds: ["adobe_pdf_extract", "adobe_pdf_extract_parser"],
+    },
+    {
+      label: "OpenAI vision",
+      pattern: /\bopenai\s+vision\b/i,
+      toolIds: ["openai_vision", "openai_vision_inspector"],
+    },
+    {
+      label: "Anthropic vision",
+      pattern: /\banthropic\s+vision\b/i,
+      toolIds: ["anthropic_vision", "anthropic_vision_inspector"],
+    },
+    {
+      label: "Gemini vision",
+      pattern: /\bgemini\s+vision\b/i,
+      toolIds: ["gemini_vision", "gemini_vision_inspector"],
+    },
+    {
+      label: "E2B",
+      pattern: /\be2b\b/i,
+      toolIds: ["e2b_sandbox", "e2b_uploaded_document_sandbox"],
+    },
+    {
+      label: "Daytona",
+      pattern: /\bdaytona\b/i,
+      toolIds: ["daytona_sandbox", "daytona_uploaded_document_sandbox"],
+    },
+    {
+      label: "Unstructured",
+      pattern: /\bunstructured\b/i,
+      toolIds: ["unstructured_external", "unstructured_external_parser"],
+    },
+  ];
+  for (const rule of providerClaimRules) {
+    if (hasPositiveExecutionPhrase(normalized, rule.pattern) && !hasAnyExecutedTool(snapshot, rule.toolIds)) {
+      violations.push(`${rule.label} execution is claimed without completed external producer evidence.`);
+    }
   }
 
   if (/\b(?:processing complete|extraction complete)\b/i.test(normalized) && snapshot.executedTools.length === 0 && !snapshot.asyncWorkStatus?.startsWith("completed")) {

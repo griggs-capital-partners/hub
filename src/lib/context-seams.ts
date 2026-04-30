@@ -12,6 +12,7 @@ import type { ContextRegistryDebugSnapshot } from "./capability-gap-context-debt
 import type { ArtifactPromotionDebugSnapshot } from "./source-learning-artifact-promotion";
 import type { SourceObservationProducerDebugSummary } from "./source-observation-producers";
 import type { SourceObservationDebugSummary } from "./source-observations";
+import type { UploadedDocumentDigestionExternalDebugSummary } from "./document-ingestion-external-producers";
 import type { UploadedDocumentDigestionLocalDebugSummary } from "./upload-document-digestion-local";
 import type { ProgressiveContextAssemblyResult } from "./progressive-context-assembly";
 import type { VisualInspectionDebugSnapshot } from "./visual-inspection-pack";
@@ -677,6 +678,7 @@ export interface ContextDebugTrace {
   sourceObservations?: SourceObservationDebugSummary | null;
   sourceObservationProducers?: SourceObservationProducerDebugSummary | null;
   uploadedDocumentDigestionLocal?: UploadedDocumentDigestionLocalDebugSummary[] | null;
+  uploadedDocumentDigestionExternal?: UploadedDocumentDigestionExternalDebugSummary[] | null;
   sourceEligibility: ContextSourceEligibility[];
   documents: ContextDebugDocument[];
   chunks: ContextDebugChunk[];
