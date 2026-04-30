@@ -445,6 +445,151 @@ runTest("availability context distinguishes catalog, model, transport, runtime, 
   assert.ok(summary.availability.modelLaneSupportedButRuntimeMissingCount > 0);
 });
 
+runTest("approval availability clears only the approval gate and never creates observations by itself", () => {
+  const request = {
+    id: "request-approval-consumed",
+    traceId: "trace-approval",
+    planId: "plan-approval",
+    conversationId: "conv-approval",
+    messageId: null,
+    conversationDocumentId: "doc-approval",
+    sourceId: "doc-approval",
+    sourceKind: "uploaded_document",
+    sourceLocator: null,
+    requestedObservationType: "ocr_text",
+    requestedCapabilityId: "ocr",
+    requestedPayloadType: "ocr_text",
+    reason: "OCR requires approval.",
+    priority: "high",
+    severity: "medium",
+    approvalPath: "uploaded_document_external_escalation",
+    producerId: "ocr_extractor",
+    noExecutionClaimed: true,
+  };
+  const approvalState = {
+    id: "approval-signal-1",
+    source: "approval",
+    status: "available",
+    producerId: "ocr_extractor",
+    capabilityId: "ocr",
+    payloadType: "ocr_text",
+    sourceId: "doc-approval",
+    conversationDocumentId: "doc-approval",
+    reason: "Durable approval satisfies the approval path only.",
+    approvalPath: "uploaded_document_external_escalation",
+    approvalSatisfied: true,
+    approvalDecisionId: "approval-1",
+    noExecutionClaimed: true,
+  };
+  const context = buildSourceObservationProducerAvailabilitySnapshot({
+    requests: [request],
+    observations: [],
+    approvalStates: [approvalState],
+  });
+  const resolution = resolveSourceObservationProducerAvailability({
+    request,
+    availabilityContext: context,
+  });
+  assert.notEqual(resolution.state, "approval_required");
+  assert.equal(resolution.requiresApproval, false);
+  assert.equal(resolution.availabilityDetails.some((detail) => detail.source === "approval" && detail.approvalSatisfied), true);
+
+  const result = runDeterministicSourceObservationProducer({
+    request,
+    observations: [
+      makeObservation({
+        id: "obs-ocr-approved-only",
+        type: "ocr_text",
+        sourceId: "doc-approval",
+        conversationDocumentId: "doc-approval",
+        sourceDocumentId: "doc-approval",
+        payloadKind: "text",
+        relatedGapHints: [],
+      }),
+    ],
+    availabilityContext: context,
+  });
+  assert.notEqual(result.state, "completed_with_evidence");
+  assert.equal(result.observations.length, 0);
+  assert.equal(canProducerResultCreateObservation(result), false);
+});
+
+runTest("policy blocks remain higher priority than approval availability", () => {
+  const request = {
+    id: "request-policy-with-approval",
+    conversationId: "conv-approval",
+    conversationDocumentId: "doc-approval",
+    sourceId: "doc-approval",
+    sourceKind: "uploaded_document",
+    requestedObservationType: "ocr_text",
+    requestedCapabilityId: "ocr",
+    requestedPayloadType: "ocr_text",
+    reason: "OCR requires approval.",
+    priority: "high",
+    approvalPath: "uploaded_document_external_escalation",
+    producerId: "ocr_extractor",
+    noExecutionClaimed: true,
+  };
+  const manifests = [
+    {
+      producerId: "ocr_extractor",
+      capabilityId: "ocr",
+      producerKind: "document_intelligence",
+      acceptedSourceKinds: ["uploaded_document"],
+      requiredInputLanes: ["ocr_text"],
+      producedObservationTypes: ["ocr_text"],
+      producedPayloadKinds: ["text"],
+      producedPayloadTypes: ["ocr_text"],
+      modelRequirements: [],
+      toolRequirements: ["ocr_extractor"],
+      laneRequirements: ["ocr_text"],
+      approvalRequired: true,
+      policyDataClass: "external_execution",
+      sideEffects: "external_read",
+      costEstimate: "medium",
+      latencyEstimate: "long_running",
+      currentAvailability: "blocked_by_policy",
+      reasonUnavailable: "External OCR is blocked by policy.",
+      executionEvidenceRequirement: "Must complete with evidence.",
+      canonicalCatalogIds: {
+        payloadTypes: ["ocr_text"],
+        laneIds: ["ocr_text"],
+        toolIds: ["ocr_extractor"],
+        capabilityIds: ["ocr"],
+      },
+      noUnavailableToolExecutionClaimed: true,
+    },
+  ];
+  const context = buildSourceObservationProducerAvailabilitySnapshot({
+    requests: [request],
+    observations: [],
+    approvalStates: [
+      {
+        id: "approval-signal-2",
+        source: "approval",
+        status: "available",
+        producerId: "ocr_extractor",
+        capabilityId: "ocr",
+        payloadType: "ocr_text",
+        sourceId: "doc-approval",
+        reason: "Durable approval exists.",
+        approvalPath: "uploaded_document_external_escalation",
+        approvalSatisfied: true,
+        noExecutionClaimed: true,
+      },
+    ],
+    manifests,
+  });
+  const resolution = resolveSourceObservationProducerAvailability({
+    request,
+    manifests,
+    availabilityContext: context,
+  });
+  assert.equal(resolution.state, "blocked_by_policy");
+  assert.equal(resolution.blockedByPolicy, true);
+  assert.equal(resolution.requiresApproval, false);
+});
+
 for (const { name, fn } of tests) {
   try {
     await fn();

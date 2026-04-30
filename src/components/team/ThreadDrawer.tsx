@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { motion } from "framer-motion";
-import { Eye, Pencil, Plus, Trash2, UserPlus, X } from "lucide-react";
+import { AlertTriangle, Eye, Pencil, Plus, ShieldCheck, Trash2, UserPlus, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { ThreadDocumentsPanel, type ThreadDocumentUploadState } from "@/components/team/ThreadDocumentsPanel";
@@ -28,6 +28,11 @@ import {
   getPreviewText,
 } from "@/components/team/team-chat-shared";
 import { cn } from "@/lib/utils";
+import type {
+  CapabilityApprovalScope,
+  CapabilityGapApprovalCenterSummary,
+  CapabilityGapApprovalSummaryRow,
+} from "@/lib/capability-gap-approval-types";
 
 function ThreadDetailsPanel({
   conversation,
@@ -133,6 +138,12 @@ function ThreadDetailsPanel({
   const [renamingThread, setRenamingThread] = useState(false);
   const projectChanged = selectedProjectId !== currentProjectId;
   const threadNameChanged = threadName.trim() !== currentThreadName;
+  const [capabilitySummary, setCapabilitySummary] = useState<CapabilityGapApprovalCenterSummary | null>(
+    agentInspector?.context.capabilityGapApprovals ?? null
+  );
+  const [capabilitySummaryLoading, setCapabilitySummaryLoading] = useState(false);
+  const [capabilitySummaryError, setCapabilitySummaryError] = useState<string | null>(null);
+  const [approvingCapabilityId, setApprovingCapabilityId] = useState<string | null>(null);
 
   useEffect(() => {
     setSelectedProjectId(currentProjectId);
@@ -142,6 +153,74 @@ function ThreadDetailsPanel({
     setThreadName(currentThreadName);
     setThreadRenameError(null);
   }, [conversation.id, currentProjectId, currentThreadName]);
+
+  const refreshCapabilitySummary = useCallback(async () => {
+    if (!hasAgentParticipants) {
+      setCapabilitySummary(null);
+      return;
+    }
+    setCapabilitySummaryLoading(true);
+    setCapabilitySummaryError(null);
+    try {
+      const response = await fetch(`/api/capabilities/gaps?conversationId=${encodeURIComponent(conversation.id)}`, {
+        cache: "no-store",
+      });
+      const payload = await response.json().catch(() => null) as { summary?: CapabilityGapApprovalCenterSummary; error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Unable to load capability gaps.");
+      }
+      setCapabilitySummary(payload?.summary ?? null);
+    } catch (error) {
+      setCapabilitySummaryError(error instanceof Error ? error.message : "Unable to load capability gaps.");
+      setCapabilitySummary(agentInspector?.context.capabilityGapApprovals ?? null);
+    } finally {
+      setCapabilitySummaryLoading(false);
+    }
+  }, [agentInspector?.context.capabilityGapApprovals, conversation.id, hasAgentParticipants]);
+
+  async function approveCapability(row: CapabilityGapApprovalSummaryRow) {
+    const preferredScope: CapabilityApprovalScope =
+      row.approvalScopesAvailable.includes("document") && row.affectedDocumentIds.length === 1
+        ? "document"
+        : "conversation";
+    const scopeId = preferredScope === "document" ? row.affectedDocumentIds[0] : conversation.id;
+    setApprovingCapabilityId(row.summaryId);
+    setCapabilitySummaryError(null);
+    try {
+      const response = await fetch("/api/capabilities/approvals", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          capabilityId: row.capabilityId,
+          providerId: row.providerId,
+          approved: true,
+          scope: preferredScope,
+          scopeId,
+          conversationId: conversation.id,
+          documentId: preferredScope === "document" ? scopeId : undefined,
+          relatedGapRecordId: row.relatedGapRecordIds[0],
+          reason: "Approved from the thread capability backlog.",
+        }),
+      });
+      const payload = await response.json().catch(() => null) as { error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Unable to approve this capability.");
+      }
+      await refreshCapabilitySummary();
+    } catch (error) {
+      setCapabilitySummaryError(error instanceof Error ? error.message : "Unable to approve this capability.");
+    } finally {
+      setApprovingCapabilityId(null);
+    }
+  }
+
+  useEffect(() => {
+    setCapabilitySummary(agentInspector?.context.capabilityGapApprovals ?? null);
+  }, [agentInspector?.context.capabilityGapApprovals, conversation.id]);
+
+  useEffect(() => {
+    void refreshCapabilitySummary();
+  }, [refreshCapabilitySummary]);
 
   async function handleCreateProjectAndMove() {
     const nextProjectName = projectName.trim();
@@ -183,6 +262,14 @@ function ThreadDetailsPanel({
       setRenamingThread(false);
     }
   }
+
+  const capabilityRows = capabilitySummary?.rows.slice(0, 4) ?? [];
+  const extraCapabilityRowCount = Math.max(0, (capabilitySummary?.rows.length ?? 0) - capabilityRows.length);
+  const capabilityBlockedCount =
+    (capabilitySummary?.counts.configRequired ?? 0) +
+    (capabilitySummary?.counts.adapterMissing ?? 0) +
+    (capabilitySummary?.counts.missingInput ?? 0) +
+    (capabilitySummary?.counts.policyBlocked ?? 0);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[#101010]">
@@ -667,6 +754,109 @@ function ThreadDetailsPanel({
                     ) : null}
                   </div>
                 ) : null}
+              </div>
+
+              <div className="rounded-2xl border border-[rgba(255,255,255,0.05)] bg-[#111111] px-3 py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[#6F6A64]">Capabilities</p>
+                    <p className="mt-2 text-sm font-semibold text-[#F6F3EE]">Gaps & approvals</p>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-[#B7B0A8]">
+                    {capabilitySummaryLoading ? (
+                      <div className="h-3.5 w-3.5 rounded-full border-2 border-[rgba(255,255,255,0.16)] border-t-[#F6F3EE] animate-spin" />
+                    ) : capabilityBlockedCount > 0 ? (
+                      <AlertTriangle size={14} className="text-[#D7B46A]" />
+                    ) : (
+                      <ShieldCheck size={14} className="text-[#83D6A4]" />
+                    )}
+                    <span>{capabilitySummary?.counts.total ?? 0}</span>
+                  </div>
+                </div>
+
+                <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+                  <div className="rounded-xl border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-2">
+                    <p className="text-sm font-semibold text-[#F6F3EE]">{capabilitySummary?.counts.approvalRequired ?? 0}</p>
+                    <p className="mt-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-[#8D877F]">Approval</p>
+                  </div>
+                  <div className="rounded-xl border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-2">
+                    <p className="text-sm font-semibold text-[#F6F3EE]">{capabilitySummary?.counts.approved ?? 0}</p>
+                    <p className="mt-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-[#8D877F]">Approved</p>
+                  </div>
+                  <div className="rounded-xl border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.03)] px-2 py-2">
+                    <p className="text-sm font-semibold text-[#F6F3EE]">{capabilityBlockedCount}</p>
+                    <p className="mt-0.5 text-[9px] font-semibold uppercase tracking-[0.16em] text-[#8D877F]">Blocked</p>
+                  </div>
+                </div>
+
+                {capabilitySummaryError ? (
+                  <p className="mt-3 text-xs leading-5 text-[#D8B2B2]">{capabilitySummaryError}</p>
+                ) : null}
+
+                {capabilityRows.length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    {capabilityRows.map((row) => {
+                      const primaryBlocker = row.remainingBlockers[0] ?? row.status;
+                      const approvedStillBlocked = row.approvalState.approved && row.remainingBlockers.length > 0;
+                      return (
+                        <div
+                          key={row.summaryId}
+                          className="rounded-xl border border-[rgba(255,255,255,0.05)] bg-[rgba(255,255,255,0.025)] px-3 py-2"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="truncate text-xs font-semibold text-[#F6F3EE]">{row.capabilityLabel}</p>
+                              <p className="mt-1 truncate text-[11px] text-[#8D877F]">
+                                {row.providerLabel ?? row.category.replace(/_/g, " ")} - {row.occurrenceCount} occurrence{row.occurrenceCount === 1 ? "" : "s"}
+                              </p>
+                            </div>
+                            <span className={cn(
+                              "shrink-0 rounded-full border px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[0.14em]",
+                              row.status === "approval_required"
+                                ? "border-[rgba(126,200,227,0.22)] bg-[rgba(126,200,227,0.1)] text-[#9FCBE0]"
+                                : row.status === "approved"
+                                  ? "border-[rgba(131,214,164,0.22)] bg-[rgba(131,214,164,0.1)] text-[#9BDCB5]"
+                                  : "border-[rgba(215,180,106,0.22)] bg-[rgba(215,180,106,0.1)] text-[#D7B46A]"
+                            )}>
+                              {row.status.replace(/_/g, " ")}
+                            </span>
+                          </div>
+                          <p className="mt-2 text-[11px] leading-5 text-[#B7B0A8]">
+                            {approvedStillBlocked
+                              ? `Approved, still blocked by ${row.remainingBlockers.join(", ").replace(/_/g, " ")}.`
+                              : row.approvalState.approved
+                                ? "Approved for this scope; execution still requires evidence when the producer runs later."
+                                : row.recommendedAction}
+                          </p>
+                          <div className="mt-2 flex items-center justify-between gap-2">
+                            <span className="truncate text-[10px] uppercase tracking-[0.16em] text-[#6F6A64]">
+                              {primaryBlocker.replace(/_/g, " ")}
+                            </span>
+                            {row.canApproveNow && !row.approvalState.approved ? (
+                              <Button
+                                variant="secondary"
+                                size="sm"
+                                icon={<ShieldCheck size={13} />}
+                                loading={approvingCapabilityId === row.summaryId}
+                                className="rounded-xl px-2 py-1 text-[11px]"
+                                onClick={() => approveCapability(row)}
+                              >
+                                Approve
+                              </Button>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {extraCapabilityRowCount > 0 ? (
+                      <p className="text-[11px] text-[#8D877F]">+{extraCapabilityRowCount} more in the capability backlog.</p>
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-xs leading-5 text-[#8D877F]">
+                    No open capability gaps are visible for this thread yet.
+                  </p>
+                )}
               </div>
 
               <div className="rounded-2xl border border-[rgba(255,255,255,0.05)] bg-[#111111] px-3 py-3">

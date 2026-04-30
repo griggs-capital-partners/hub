@@ -9,6 +9,7 @@ import type { AgentControlDebugSnapshot } from "./agent-control-surface";
 import type { AsyncAgentWorkDebugSnapshot } from "./async-agent-work-queue";
 import type { ContextTransportDebugSnapshot } from "./adaptive-context-transport";
 import type { ContextRegistryDebugSnapshot } from "./capability-gap-context-debt-registry";
+import type { CapabilityGapApprovalCenterSummary } from "./capability-gap-approval-types";
 import type { ArtifactPromotionDebugSnapshot } from "./source-learning-artifact-promotion";
 import type { SourceObservationProducerDebugSummary } from "./source-observation-producers";
 import type { SourceObservationDebugSummary } from "./source-observations";
@@ -679,6 +680,7 @@ export interface ContextDebugTrace {
   sourceObservationProducers?: SourceObservationProducerDebugSummary | null;
   uploadedDocumentDigestionLocal?: UploadedDocumentDigestionLocalDebugSummary[] | null;
   uploadedDocumentDigestionExternal?: UploadedDocumentDigestionExternalDebugSummary[] | null;
+  capabilityGapApprovals?: CapabilityGapApprovalCenterSummary | null;
   sourceEligibility: ContextSourceEligibility[];
   documents: ContextDebugDocument[];
   chunks: ContextDebugChunk[];

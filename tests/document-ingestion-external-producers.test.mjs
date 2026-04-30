@@ -553,6 +553,77 @@ runTest("external sandbox candidates remain deferred and do not execute", async 
   assert.match(result.producerResults[0].recommendedResolution, /WP4C/);
 });
 
+runTest("scoped provider approvals clear only approval-required status", () => {
+  const policy = evaluateUploadedDocumentExternalEscalationPolicy({
+    taskPrompt: "Describe the visible chart.",
+    contextKind: "image",
+    localObservations: [],
+    localProducerResults: [],
+  });
+  const unapproved = resolveUploadedDocumentExternalProducerStatuses({
+    policy,
+    env: { OPENAI_API_KEY: "test-key", OPENAI_VISION_MODEL: "vision-fixture-model" },
+    approvalGranted: false,
+    policyAllowsExternalProcessing: true,
+    dataClassAllowsExternalProcessing: true,
+    imageInputs: [{ id: "image-1", mimeType: "image/png", dataBase64: "iVBORw0KGgo=" }],
+  });
+  assert.equal(unapproved.find((status) => status.providerId === "openai_vision").availabilityState, "approval_required");
+
+  const approved = resolveUploadedDocumentExternalProducerStatuses({
+    policy,
+    env: { OPENAI_API_KEY: "test-key", OPENAI_VISION_MODEL: "vision-fixture-model" },
+    approvalGranted: false,
+    approvedProviderIds: ["openai_vision"],
+    policyAllowsExternalProcessing: true,
+    dataClassAllowsExternalProcessing: true,
+    imageInputs: [{ id: "image-1", mimeType: "image/png", dataBase64: "iVBORw0KGgo=" }],
+  });
+  assert.equal(approved.find((status) => status.providerId === "openai_vision").availabilityState, "runtime_callable_when_configured");
+});
+
+runTest("approval does not override missing config, missing image input, or policy blocks", () => {
+  const policy = evaluateUploadedDocumentExternalEscalationPolicy({
+    taskPrompt: "Describe the visible chart.",
+    contextKind: "image",
+    localObservations: [],
+    localProducerResults: [],
+  });
+
+  const missingInput = resolveUploadedDocumentExternalProducerStatuses({
+    policy,
+    env: { OPENAI_API_KEY: "test-key", OPENAI_VISION_MODEL: "vision-fixture-model" },
+    approvalGranted: false,
+    approvedProviderIds: ["openai_vision"],
+    policyAllowsExternalProcessing: true,
+    dataClassAllowsExternalProcessing: true,
+    imageInputs: [],
+  });
+  assert.equal(missingInput.find((status) => status.providerId === "openai_vision").availabilityState, "missing_image_input");
+
+  const missingConfig = resolveUploadedDocumentExternalProducerStatuses({
+    policy,
+    env: {},
+    approvalGranted: false,
+    approvedProviderIds: ["openai_vision"],
+    policyAllowsExternalProcessing: true,
+    dataClassAllowsExternalProcessing: true,
+    imageInputs: [{ id: "image-1", mimeType: "image/png", dataBase64: "iVBORw0KGgo=" }],
+  });
+  assert.equal(missingConfig.find((status) => status.providerId === "openai_vision").availabilityState, "config_required");
+
+  const policyBlocked = resolveUploadedDocumentExternalProducerStatuses({
+    policy,
+    env: { OPENAI_API_KEY: "test-key", OPENAI_VISION_MODEL: "vision-fixture-model" },
+    approvalGranted: false,
+    approvedProviderIds: ["openai_vision"],
+    policyAllowsExternalProcessing: false,
+    dataClassAllowsExternalProcessing: false,
+    imageInputs: [{ id: "image-1", mimeType: "image/png", dataBase64: "iVBORw0KGgo=" }],
+  });
+  assert.equal(policyBlocked.find((status) => status.providerId === "openai_vision").availabilityState, "policy_blocked");
+});
+
 for (const { name, fn } of tests) {
   try {
     await fn();

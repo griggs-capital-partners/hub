@@ -55,6 +55,7 @@ type BuildConversationContextDebugTraceParams = {
     sourceObservations?: SourceObservationDebugSummary | null;
     sourceObservationProducers?: SourceObservationProducerDebugSummary | null;
     uploadedDocumentDigestionExternal?: UploadedDocumentDigestionExternalDebugSummary[] | null;
+    capabilityGapApprovals?: ConversationContextBundle["capabilityGapApprovals"];
   };
 };
 
@@ -1016,6 +1017,7 @@ export function buildConversationContextDebugTrace(
     sourceObservationProducers: params.bundle.sourceObservationProducers ?? null,
     uploadedDocumentDigestionLocal: params.bundle.uploadedDocumentDigestionLocal ?? null,
     uploadedDocumentDigestionExternal: params.bundle.uploadedDocumentDigestionExternal ?? null,
+    capabilityGapApprovals: params.bundle.capabilityGapApprovals ?? null,
     sourceEligibility: params.bundle.sourceDecisions.map(buildSourceEligibility),
     documents,
     chunks,

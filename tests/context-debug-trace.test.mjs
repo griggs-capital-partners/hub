@@ -222,6 +222,8 @@ function makeBundle(overrides = {}) {
     sourceObservations: overrides.sourceObservations ?? null,
     sourceObservationProducers: overrides.sourceObservationProducers ?? null,
     uploadedDocumentDigestionLocal: overrides.uploadedDocumentDigestionLocal ?? null,
+    uploadedDocumentDigestionExternal: overrides.uploadedDocumentDigestionExternal ?? null,
+    capabilityGapApprovals: overrides.capabilityGapApprovals ?? null,
   };
 }
 
@@ -411,6 +413,104 @@ await runTest("includes uploaded-document local digestion trace summary", async 
   assert.equal(trace.uploadedDocumentDigestionLocal[0].inventoryInspectedBeforeProducerSelection, true);
   assert.equal(trace.uploadedDocumentDigestionLocal[0].executedLocalProducerCount, 2);
   assert.equal(trace.uploadedDocumentDigestionLocal[0].noExternalCallsMade, true);
+});
+
+await runTest("includes capability gap approval center trace summary", async () => {
+  const capabilityGapApprovals = {
+    generatedAt: "2026-04-05T00:00:00.000Z",
+    rows: [
+      {
+        summaryId: "capability:ocr:provider:mistral_ocr",
+        capabilityId: "ocr",
+        capabilityLabel: "OCR",
+        providerId: "mistral_ocr",
+        providerLabel: "Mistral OCR",
+        category: "ocr",
+        status: "config_required",
+        priority: "medium",
+        occurrenceCount: 2,
+        affectedConversationIds: ["thread-approval"],
+        affectedDocumentIds: ["doc-1"],
+        sourceLocators: [],
+        firstSeenAt: "2026-04-01T00:00:00.000Z",
+        lastSeenAt: "2026-04-04T00:00:00.000Z",
+        evidenceSummary: "OCR remains gated.",
+        recommendedAction: "Configure provider before execution can be considered.",
+        remainingBlockers: ["config_required"],
+        approvalState: {
+          approved: true,
+          decisionId: "approval-1",
+          scope: "conversation",
+          scopeId: "thread-approval",
+          providerId: "mistral_ocr",
+          approvedById: "user-1",
+          reason: "Approved.",
+          updatedAt: "2026-04-03T00:00:00.000Z",
+        },
+        approvalScopesAvailable: ["conversation", "document", "provider", "capability"],
+        canApproveNow: true,
+        approvalWillEnableExecution: false,
+        approvalWillOnlyClearApprovalGate: true,
+        candidateProviders: [],
+        localCandidates: [],
+        traceIds: ["trace-1"],
+        relatedGapRecordIds: ["gap-1"],
+        relatedDebtRecordIds: [],
+        relatedCoverageRecordIds: [],
+      },
+    ],
+    counts: {
+      total: 1,
+      approvalRequired: 0,
+      approved: 1,
+      configRequired: 1,
+      adapterMissing: 0,
+      missingInput: 0,
+      policyBlocked: 0,
+      resolved: 0,
+    },
+    debug: {
+      groupedGapCount: 1,
+      approvalRequiredCount: 0,
+      approvedCount: 1,
+      configRequiredCount: 1,
+      adapterMissingCount: 0,
+      missingInputCount: 0,
+      policyBlockedCount: 0,
+      topCapabilityCategories: [{ category: "ocr", count: 1 }],
+      approvalsConsumedThisTurn: [
+        {
+          capabilityId: "ocr",
+          providerId: "mistral_ocr",
+          scope: "conversation",
+          scopeId: "thread-approval",
+          clearedBlocker: "approval_required",
+          remainingBlockers: ["config_required"],
+        },
+      ],
+      blockersRemainingAfterApproval: [
+        {
+          capabilityId: "ocr",
+          providerId: "mistral_ocr",
+          remainingBlockers: ["config_required"],
+        },
+      ],
+      noExecutionWarning: "Approval is not execution.",
+    },
+    noRawOutputExposed: true,
+    noExecutionClaimed: true,
+  };
+  const trace = buildConversationContextDebugTrace({
+    conversationId: "thread-approval",
+    authority: makeAuthority(),
+    currentUserPrompt: "Can you OCR this?",
+    bundle: makeBundle({ capabilityGapApprovals }),
+  });
+
+  assert.equal(trace.capabilityGapApprovals.counts.approved, 1);
+  assert.equal(trace.capabilityGapApprovals.debug.configRequiredCount, 1);
+  assert.equal(trace.capabilityGapApprovals.rows[0].approvalWillEnableExecution, false);
+  assert.equal(trace.capabilityGapApprovals.noExecutionClaimed, true);
 });
 
 await runTest("maps progressive assembly metadata into the debug trace", async () => {

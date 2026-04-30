@@ -431,6 +431,7 @@ export async function GET(
           documentIntelligence: contextBundle?.documentIntelligence ?? null,
           agentControl: contextBundle?.agentControl ?? null,
           asyncAgentWork: contextBundle?.asyncAgentWork ?? null,
+          capabilityGapApprovals: contextBundle?.capabilityGapApprovals ?? null,
           truthfulExecutionClaims,
           debugTrace: contextBundle?.debugTrace ?? null,
         },

@@ -74,6 +74,15 @@ runTest("capability audit marks OCR vision rendered and document-AI as unavailab
   }
 });
 
+runTest("system instructions treat capability approvals as non-execution evidence", () => {
+  assert.match(TRUTHFUL_EXECUTION_CLAIM_SYSTEM_INSTRUCTIONS, /Capability Gap & Approval Center approvals are governance state only/);
+  const snapshot = makeEmptySnapshot({
+    recommendedCapabilities: ["ocr"],
+    limitations: ["OCR was approved for this conversation, but no OCR tool ran."],
+  });
+  assertViolation("OCR ran after approval and extracted the scanned page.", snapshot, /OCR/);
+});
+
 runTest("capability audit marks fake document_processor and table_extraction_enhanced as non-executable", () => {
   const documentProcessor = getAudit("document_processor");
   const enhanced = getAudit("table_extraction_enhanced");

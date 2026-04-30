@@ -194,6 +194,8 @@ export type RunUploadedDocumentExternalEscalationProducersParams =
       allowExternalProcessing?: boolean;
       dataClassAllowsExternalProcessing?: boolean;
       approvalGranted?: boolean;
+      approvedProviderIds?: UploadedDocumentExternalProviderId[];
+      approvedCapabilityIds?: UploadedDocumentExternalCapabilityId[];
       maxImageInputs?: number | null;
       maxExternalObservations?: number | null;
       maxExternalObservationsPerDocument?: number | null;
@@ -787,15 +789,23 @@ export function resolveUploadedDocumentExternalProducerStatuses(params: {
   policy: UploadedDocumentExternalEscalationPolicyResult;
   env?: EnvLike | null;
   approvalGranted?: boolean;
+  approvedProviderIds?: UploadedDocumentExternalProviderId[] | null;
+  approvedCapabilityIds?: UploadedDocumentExternalCapabilityId[] | null;
   policyAllowsExternalProcessing?: boolean;
   dataClassAllowsExternalProcessing?: boolean;
   imageInputs?: UploadedDocumentExternalImageInput[] | null;
 }): UploadedDocumentExternalProviderStatus[] {
   const env = params.env ?? {};
   const imageInputs = params.imageInputs ?? [];
+  const approvedProviderIds = new Set(params.approvedProviderIds ?? []);
+  const approvedCapabilityIds = new Set(params.approvedCapabilityIds ?? []);
   return APPROVED_UPLOADED_DOCUMENT_EXTERNAL_PRODUCER_MANIFESTS.map((entry) => {
     const config = configuredEnv(env, entry);
     const taskRelevant = capabilityMatches(entry, params.policy);
+    const approvalGrantedForEntry =
+      params.approvalGranted ||
+      approvedProviderIds.has(entry.providerId) ||
+      approvedCapabilityIds.has(entry.capabilityId);
     const localSufficient =
       !taskRelevant && params.policy.localSufficientCapabilities.includes(entry.capabilityId);
     let availabilityState: UploadedDocumentExternalAvailabilityState = "catalog_only";
@@ -805,7 +815,7 @@ export function resolveUploadedDocumentExternalProducerStatuses(params: {
       availabilityState = "policy_blocked";
     } else if (taskRelevant && params.dataClassAllowsExternalProcessing === false) {
       availabilityState = "policy_blocked";
-    } else if (taskRelevant && entry.approvalRequired && !params.approvalGranted) {
+    } else if (taskRelevant && entry.approvalRequired && !approvalGrantedForEntry) {
       availabilityState = "approval_required";
     } else if (taskRelevant && entry.requiresImageInput && imageInputs.length === 0) {
       availabilityState = "missing_image_input";
@@ -833,7 +843,7 @@ export function resolveUploadedDocumentExternalProducerStatuses(params: {
       mockTestedCallable: entry.mockTestedCallableOnly,
       configRequired: taskRelevant && !config.configured,
       unconfigured: taskRelevant && !config.configured,
-      approvalRequired: taskRelevant && entry.approvalRequired && !params.approvalGranted,
+      approvalRequired: taskRelevant && entry.approvalRequired && !approvalGrantedForEntry,
       policyBlocked: availabilityState === "policy_blocked",
       blockedByMissingImageInput: availabilityState === "missing_image_input",
       deferredBecauseSafeAdapterMissing: taskRelevant && entry.deferredBecauseSafeAdapterMissing,
@@ -1039,6 +1049,7 @@ function buildProducerResult(params: {
     status: completed ? "available" : availabilitySignalStatus(params.status.availabilityState),
     producerId: params.manifest.producerId,
     capabilityId: params.manifest.capabilityId,
+    providerId: params.manifest.providerId,
     payloadType: params.manifest.requiredPayloadType,
     observationTypes: params.manifest.expectedOutputObservationTypes,
     sourceId: params.request.sourceId ?? null,
@@ -1364,6 +1375,8 @@ export async function runUploadedDocumentExternalEscalationProducers(
     policy,
     env: params.env ?? {},
     approvalGranted: params.policy?.approvalGranted ?? false,
+    approvedProviderIds: params.policy?.approvedProviderIds ?? [],
+    approvedCapabilityIds: params.policy?.approvedCapabilityIds ?? [],
     policyAllowsExternalProcessing: params.policy?.allowExternalProcessing ?? true,
     dataClassAllowsExternalProcessing: params.policy?.dataClassAllowsExternalProcessing ?? true,
     imageInputs,

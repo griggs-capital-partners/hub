@@ -99,6 +99,7 @@ export type SourceObservationProducerAvailabilitySignal = {
   brokerCapabilityId?: string | null;
   payloadType?: string | null;
   payloadTypes?: string[];
+  providerId?: string | null;
   laneId?: string | null;
   laneIds?: string[];
   observationType?: string | null;
@@ -114,6 +115,8 @@ export type SourceObservationProducerAvailabilitySignal = {
   evidenceSummary?: string | null;
   missingRequirements?: string[];
   approvalPath?: string | null;
+  approvalSatisfied?: boolean | null;
+  approvalDecisionId?: string | null;
   asyncRecommended?: boolean | null;
   noExecutionClaimed: true;
 };
@@ -965,6 +968,7 @@ function availabilitySignal(params: {
   brokerCapabilityId?: string | null;
   payloadType?: string | null;
   payloadTypes?: string[];
+  providerId?: string | null;
   laneId?: string | null;
   laneIds?: string[];
   observationType?: string | null;
@@ -980,6 +984,8 @@ function availabilitySignal(params: {
   evidenceSummary?: string | null;
   missingRequirements?: string[];
   approvalPath?: string | null;
+  approvalSatisfied?: boolean | null;
+  approvalDecisionId?: string | null;
   asyncRecommended?: boolean | null;
 }): SourceObservationProducerAvailabilitySignal {
   return {
@@ -997,6 +1003,7 @@ function availabilitySignal(params: {
     brokerCapabilityId: params.brokerCapabilityId ?? null,
     payloadType: normalizePayloadType(params.payloadType),
     payloadTypes: uniqueStrings((params.payloadTypes ?? []).map(normalizePayloadType)),
+    providerId: params.providerId ?? null,
     laneId: params.laneId ?? null,
     laneIds: uniqueStrings(params.laneIds ?? []),
     observationType: params.observationType ?? null,
@@ -1012,6 +1019,8 @@ function availabilitySignal(params: {
     evidenceSummary: params.evidenceSummary ?? null,
     missingRequirements: uniqueStrings(params.missingRequirements ?? []),
     approvalPath: params.approvalPath ?? null,
+    approvalSatisfied: params.approvalSatisfied ?? null,
+    approvalDecisionId: params.approvalDecisionId ?? null,
     asyncRecommended: params.asyncRecommended ?? null,
     noExecutionClaimed: true,
   };
@@ -1033,6 +1042,7 @@ export function buildSourceObservationProducerAvailabilitySnapshot(params: {
   observations?: SourceObservation[] | null;
   transport?: ContextTransportResult | ContextTransportDebugSnapshot | null;
   manifests?: SourceObservationProducerManifest[] | null;
+  approvalStates?: SourceObservationProducerAvailabilitySignal[] | null;
   traceId?: string | null;
   planId?: string | null;
 }): SourceObservationProducerAvailabilityContext {
@@ -1236,7 +1246,7 @@ export function buildSourceObservationProducerAvailabilitySnapshot(params: {
     runtimeSupport,
     transportSupport,
     policyConstraints: [],
-    approvalStates: [],
+    approvalStates: params.approvalStates ?? [],
     sourceEvidence,
     deterministicEvidence,
     asyncSuitability: [],
@@ -1287,6 +1297,9 @@ function signalAppliesToRequest(params: {
     signal.producerId ? signal.producerId === producerId : null,
     signal.capabilityId ? signal.capabilityId === capabilityId : null,
     signal.brokerCapabilityId ? signal.brokerCapabilityId === capabilityId : null,
+    signal.providerId && typeof request.input?.metadata?.providerId === "string"
+      ? signal.providerId === request.input.metadata.providerId
+      : null,
     signal.payloadType && payloadType ? signal.payloadType === payloadType : null,
     signal.payloadTypes?.length && payloadType ? signal.payloadTypes.includes(payloadType) : null,
     signal.laneId && laneId ? signal.laneId === laneId : null,
@@ -1415,6 +1428,12 @@ function buildProducerAvailabilityAnalysis(params: {
   const sources = uniqueStrings(details.map((signal) => signal.source)) as SourceObservationProducerAvailabilitySource[];
   const blocking = details.find((signal) => signal.status === "blocked_by_policy") ?? null;
   const approval = details.find((signal) => signal.status === "approval_required" || signal.approvalPath) ?? null;
+  const approvalSatisfied = details.some((signal) =>
+    signal.source === "approval" &&
+    signal.status === "available" &&
+    signal.approvalSatisfied === true &&
+    (!params.request.approvalPath || !signal.approvalPath || signal.approvalPath === params.request.approvalPath)
+  );
   const catalogOnly = details.some((signal) => signal.status === "catalog_only");
   const runtimeUnavailable = details.some((signal) =>
     (signal.source === "runtime" || signal.source === "transport") &&
@@ -1432,13 +1451,18 @@ function buildProducerAvailabilityAnalysis(params: {
   return {
     details,
     sources: sources.length > 0 ? sources : ["producer_manifest"],
-    primarySource: blocking?.source ?? approval?.source ?? evidenceSignal?.source ?? details[0]?.source ?? "producer_manifest",
+    primarySource:
+      blocking?.source ??
+      (approvalSatisfied ? evidenceSignal?.source ?? details[0]?.source : approval?.source) ??
+      evidenceSignal?.source ??
+      details[0]?.source ??
+      "producer_manifest",
     evidenceSummary: evidenceSignal?.evidenceSummary ?? null,
     missingRequirements,
     approvalPath: params.request.approvalPath ?? approval?.approvalPath ?? null,
     asyncRecommended: Boolean(asyncSignal),
     asyncReason: asyncSignal?.reason ?? null,
-    requiresApproval: Boolean(params.request.approvalPath || approval),
+    requiresApproval: Boolean(params.request.approvalPath || approval) && !approvalSatisfied,
     blockedByPolicy: Boolean(blocking),
     runtimeUnavailable,
     catalogOnly,

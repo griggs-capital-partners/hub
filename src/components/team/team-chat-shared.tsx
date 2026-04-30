@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { Bot } from "lucide-react";
 import { Avatar } from "@/components/ui/Avatar";
 import { cn } from "@/lib/utils";
+import type { CapabilityGapApprovalCenterSummary } from "@/lib/capability-gap-approval-types";
 
 export interface TeamMember {
   id: string;
@@ -342,6 +343,7 @@ export interface AgentInspectorData {
     documentIntelligence?: unknown;
     agentControl?: unknown;
     asyncAgentWork?: unknown;
+    capabilityGapApprovals?: CapabilityGapApprovalCenterSummary | null;
     truthfulExecutionClaims?: unknown;
     debugTrace?: unknown;
   };

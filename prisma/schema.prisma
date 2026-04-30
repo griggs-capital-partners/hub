@@ -44,6 +44,7 @@ model User {
   conversationMembers ConversationMember[] @relation("ConversationUserMembers")
   chatMessages       ChatMessage[]         @relation("ChatMessageSenderUser")
   conversationDocuments ConversationDocument[]
+  capabilityApprovals CapabilityApprovalDecision[] @relation("CapabilityApprovalApprovedBy")
   triggeredExecutions AgentTaskExecution[] @relation("ExecutionTriggeredBy")
   asyncAgentWorkItems AsyncAgentWorkItem[] @relation("AsyncAgentWorkCreatedBy")
   notificationSettings UserNotificationSettings?
@@ -604,6 +605,7 @@ model Conversation {
     contextDebtRecords ContextDebtRecord[]
     capabilityGapRecords CapabilityGapRecord[]
     sourceCoverageRecords SourceCoverageRecord[]
+    capabilityApprovals CapabilityApprovalDecision[]
 
   @@index([type, updatedAt])
   @@index([archivedAt, updatedAt])
@@ -631,6 +633,7 @@ model ConversationDocument {
   contextDebtRecords ContextDebtRecord[]
   capabilityGapRecords CapabilityGapRecord[]
   sourceCoverageRecords SourceCoverageRecord[]
+  capabilityApprovals CapabilityApprovalDecision[]
 
   @@index([conversationId, createdAt])
   @@index([uploadedBy, createdAt])
@@ -834,6 +837,7 @@ model CapabilityGapRecord {
   conversationDocument ConversationDocument? @relation(fields: [conversationDocumentId], references: [id], onDelete: Cascade)
   asyncAgentWorkItem   AsyncAgentWorkItem?   @relation(fields: [asyncAgentWorkItemId], references: [id], onDelete: SetNull)
   relatedContextDebt   ContextDebtRecord?    @relation(fields: [relatedContextDebtId], references: [id], onDelete: SetNull)
+  approvalDecisions    CapabilityApprovalDecision[]
 
   @@index([neededCapability, status, lastSeenAt], map: "capability_gap_needed_status_idx")
   @@index([conversationId, status, severity, lastSeenAt], map: "capability_gap_conversation_status_idx")
@@ -841,6 +845,36 @@ model CapabilityGapRecord {
   @@index([relatedContextDebtId, status], map: "capability_gap_debt_status_idx")
   @@index([asyncAgentWorkItemId, status], map: "capability_gap_async_work_status_idx")
   @@map("capability_gap_records")
+}
+
+model CapabilityApprovalDecision {
+  id                     String   @id @default(cuid())
+  approvalKey            String   @unique
+  capabilityId           String
+  providerId             String?
+  scope                  String
+  scopeId                String?
+  approved               Boolean  @default(true)
+  reason                 String?
+  approvedById           String?
+  conversationId         String?
+  conversationDocumentId String?
+  relatedGapRecordId     String?
+  traceId                String?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  approvedBy           User?                 @relation("CapabilityApprovalApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  conversation         Conversation?         @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationDocument ConversationDocument? @relation(fields: [conversationDocumentId], references: [id], onDelete: Cascade)
+  relatedGapRecord     CapabilityGapRecord?  @relation(fields: [relatedGapRecordId], references: [id], onDelete: SetNull)
+
+  @@index([capabilityId, providerId, scope, scopeId], map: "capability_approval_scope_idx")
+  @@index([conversationId, approved, updatedAt], map: "capability_approval_conversation_idx")
+  @@index([conversationDocumentId, approved, updatedAt], map: "capability_approval_document_idx")
+  @@index([approvedById, updatedAt], map: "capability_approval_actor_updated_idx")
+  @@index([relatedGapRecordId], map: "capability_approval_gap_idx")
+  @@map("capability_approval_decisions")
 }
 
 model SourceCoverageRecord {

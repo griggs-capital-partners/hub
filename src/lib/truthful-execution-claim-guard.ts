@@ -106,6 +106,7 @@ export const TRUTHFUL_EXECUTION_CLAIM_SYSTEM_INSTRUCTIONS =
   "- Core rule: no trace, no claim.\n" +
   "- Only claim a tool was called, processing ran, extraction completed, memory was updated, or artifacts were persisted when that action is present in executed tool traces, async work results, inspection task results, or persisted artifact records provided in this prompt.\n" +
   "- Deferred capabilities, recommended capabilities, unavailable capabilities, and unmet capability review items are not executed tools.\n" +
+  "- Capability Gap & Approval Center approvals are governance state only; approval does not prove OCR, vision, connector reads, Python, table extraction, or any producer/tool execution.\n" +
   "- Async work item creation, planning, queuing, or completion with limitations is not the same as OCR, vision, rendered-page inspection, document-AI extraction, or high-fidelity ingestion completion.\n" +
   "- SourceObservation producer states catalog_only, unavailable, missing, approval_required, blocked_by_policy, deferred, skipped, or failed are not execution and do not prove table recovery, connector reads, native-file use, OCR, vision, rendered-page inspection, Python analysis, spreadsheet analysis, or document-AI extraction.\n" +
   "- A native file lane being planned or cataloged is not evidence that a native file was attached to a model call or read through a connector.\n" +

@@ -96,6 +96,17 @@ import {
   type SourceObservationProducerResult,
 } from "./source-observation-producers";
 import {
+  buildApprovalAvailabilitySignalsFromDecisions,
+  buildCapabilityGapApprovalCenterSummary,
+  hasCapabilityApprovalDecisionPrismaDelegate,
+  listCapabilityApprovalDecisionsForScopes,
+  resolveUploadedDocumentExternalApprovalGrants,
+} from "./capability-gap-approval-summary";
+import type {
+  CapabilityApprovalDecisionRecord,
+  CapabilityGapApprovalCenterSummary,
+} from "./capability-gap-approval-types";
+import {
   buildAgentWorkPlanFromControlDecision,
   evaluateAgentControlSurface,
   type AgentControlDebugSnapshot,
@@ -321,6 +332,7 @@ export type ConversationContextBundle = {
   sourceObservationProducers: SourceObservationProducerDebugSummary | null;
   uploadedDocumentDigestionLocal: UploadedDocumentDigestionLocalDebugSummary[] | null;
   uploadedDocumentDigestionExternal: UploadedDocumentDigestionExternalDebugSummary[] | null;
+  capabilityGapApprovals: CapabilityGapApprovalCenterSummary | null;
   debugTrace?: ContextDebugTrace | null;
 };
 
@@ -1016,6 +1028,10 @@ type ConversationContextResolverDependencies = {
     request?: string | null;
   }) => Promise<ContextRegistrySelection>;
   upsertContextRegistryRecords?: (batch: ContextRegistryUpsertBatch) => Promise<ContextRegistrySelection>;
+  listCapabilityApprovalDecisions?: (params: {
+    conversationId: string;
+    conversationDocumentIds: string[];
+  }) => Promise<CapabilityApprovalDecisionRecord[]>;
 };
 
 type UploadedDocumentExternalEscalationInput = {
@@ -2153,6 +2169,10 @@ function hasContextRegistryPrismaDelegates() {
       client.capabilityGapRecord &&
       client.sourceCoverageRecord
   );
+}
+
+function canUseCapabilityApprovalDecisions() {
+  return hasCapabilityApprovalDecisionPrismaDelegate(prisma);
 }
 
 function resolvePdfExtractionResult(value: string | PdfContextExtractionResult) {
@@ -4226,6 +4246,15 @@ export async function resolveConversationContextBundle(params: {
           })
       : async () => EMPTY_CONTEXT_REGISTRY_SELECTION
   );
+  const listCapabilityApprovals = dependencies.listCapabilityApprovalDecisions ?? (
+    canUseCapabilityApprovalDecisions()
+      ? async (input: { conversationId: string; conversationDocumentIds: string[] }) =>
+          listCapabilityApprovalDecisionsForScopes({
+            conversationId: input.conversationId,
+            conversationDocumentIds: input.conversationDocumentIds,
+          })
+      : async () => []
+  );
   const persistContextRegistryBatch = dependencies.upsertContextRegistryRecords ?? (
     canUseDefaultContextRegistryPersistence
       ? async (batch: ContextRegistryUpsertBatch) => {
@@ -4269,13 +4298,22 @@ export async function resolveConversationContextBundle(params: {
   const resolvedBudget = resolveConversationContextBudget(params.budget, documents.length);
   const occurrenceQuery = analyzeDocumentOccurrenceQuery(params.currentUserPrompt);
   const documentIds = documents.map((document) => document.id);
-  const [storedKnowledgeArtifacts, storedInspectionTasks, openContextRegistry] = await Promise.all([
+  const [
+    storedKnowledgeArtifacts,
+    storedInspectionTasks,
+    openContextRegistry,
+    capabilityApprovalDecisions,
+  ] = await Promise.all([
     documentIds.length > 0 ? listKnowledgeArtifacts(documentIds) : Promise.resolve([]),
     documentIds.length > 0 ? listInspectionTasks(documentIds) : Promise.resolve([]),
     listContextRegistry({
       conversationId: params.conversationId,
       conversationDocumentIds: documentIds,
       request: params.currentUserPrompt ?? null,
+    }),
+    listCapabilityApprovals({
+      conversationId: params.conversationId,
+      conversationDocumentIds: documentIds,
     }),
   ]);
   const storedKnowledgeArtifactsByDocument = new Map<string, DocumentKnowledgeArtifactRecord[]>();
@@ -5052,6 +5090,11 @@ export async function resolveConversationContextBundle(params: {
     agentControl.externalEscalation.level === "recommended" && !externalApprovalRequired;
 
   for (const externalInput of uploadedDocumentExternalEscalationInputs) {
+    const externalApprovalGrants = resolveUploadedDocumentExternalApprovalGrants({
+      approvals: capabilityApprovalDecisions,
+      conversationId: params.conversationId,
+      conversationDocumentId: externalInput.document.id,
+    });
     const externalDigestion = await runUploadedDocumentExternalEscalationProducers({
       document: externalInput.document,
       contextKind: externalInput.contextKind,
@@ -5067,6 +5110,8 @@ export async function resolveConversationContextBundle(params: {
         allowExternalProcessing: !externalPolicyBlocked,
         dataClassAllowsExternalProcessing: !externalPolicyBlocked,
         approvalGranted: externalApprovalSatisfied,
+        approvedProviderIds: externalApprovalGrants.approvedProviderIds,
+        approvedCapabilityIds: externalApprovalGrants.approvedCapabilityIds,
         maxExternalObservations: 6,
         maxExternalObservationsPerDocument: 4,
       },
@@ -5130,10 +5175,15 @@ export async function resolveConversationContextBundle(params: {
   });
   if (newProducerRequests.length > 0) {
     sourceObservationProducerRequests.push(...newProducerRequests);
+    const approvalStates = buildApprovalAvailabilitySignalsFromDecisions({
+      requests: newProducerRequests,
+      approvals: capabilityApprovalDecisions,
+    });
     const producerAvailability = buildSourceObservationProducerAvailabilitySnapshot({
       requests: newProducerRequests,
       observations: completedSourceObservations,
       transport: progressiveAssembly.contextTransport,
+      approvalStates,
       traceId: agentWorkPlan.traceId,
       planId: agentWorkPlan.planId,
     });
@@ -5363,6 +5413,15 @@ export async function resolveConversationContextBundle(params: {
       ).length,
     missingObservationNeeds: sourceObservationNeeds,
   });
+  const mergedContextRegistrySelection = mergeContextRegistrySelections(openContextRegistry, persistedContextRegistry);
+  const capabilityGapApprovals = buildCapabilityGapApprovalCenterSummary({
+    registry: mergedContextRegistrySelection,
+    producerResults: sourceObservationProducerResults,
+    providerStatuses: uploadedDocumentDigestionExternalSummaries.flatMap((summary) => summary.providerStatuses),
+    approvals: capabilityApprovalDecisions,
+    conversationId: params.conversationId,
+    env: process.env,
+  });
 
   const bundle = {
     text: renderedText,
@@ -5394,6 +5453,7 @@ export async function resolveConversationContextBundle(params: {
     sourceObservationProducers: sourceObservationProducerSummary,
     uploadedDocumentDigestionLocal,
     uploadedDocumentDigestionExternal,
+    capabilityGapApprovals,
   };
 
   return {
