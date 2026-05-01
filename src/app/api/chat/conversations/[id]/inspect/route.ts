@@ -30,6 +30,14 @@ import {
   buildTruthfulExecutionClaimSnapshot,
   renderTruthfulExecutionClaimContext,
 } from "@/lib/truthful-execution-claim-guard";
+import {
+  parseChatMessageRuntimeTraceEnvelope,
+} from "@/lib/chat-message-runtime-trace";
+import {
+  buildNativeRuntimeTraceVerdict,
+  inferNativeRuntimeTraceVerdictSelector,
+  summarizeNativeRuntimePayloadTraces,
+} from "@/lib/native-runtime-payloads";
 
 export const dynamic = "force-dynamic";
 
@@ -347,6 +355,24 @@ export async function GET(
 
     const orgContext = orgContextResult.value ?? "";
     const contextBundle = contextBundleResult.value;
+    const latestPersistedNativeRuntimePayloadTrace = recentMessages
+      .filter((entry) => Boolean(entry.senderAgentId))
+      .map((entry) => parseChatMessageRuntimeTraceEnvelope(entry.toolContext).nativeRuntimePayloadTrace)
+      .find((trace) => trace.length > 0) ?? [];
+    const nativeRuntimePayloadTrace =
+      latestPersistedNativeRuntimePayloadTrace.length > 0
+        ? latestPersistedNativeRuntimePayloadTrace
+        : contextBundle?.progressiveAssembly?.contextTransport?.nativeRuntimePayloadTraces ?? [];
+    const nativeRuntimeTraceSelector = inferNativeRuntimeTraceVerdictSelector({
+      prompt: latestUserPrompt,
+      traces: nativeRuntimePayloadTrace,
+      providerTarget: threadExecutionTarget?.provider ?? null,
+      modelTarget: threadExecutionTarget?.model ?? llmHealth.llmModel ?? null,
+    });
+    const nativeRuntimeTraceCheck = buildNativeRuntimeTraceVerdict({
+      traces: nativeRuntimePayloadTrace,
+      selector: nativeRuntimeTraceSelector,
+    });
     const currentUserName = senderUserResult.value?.displayName || senderUserResult.value?.name || null;
     const history = recentMessages.reverse().map((entry) => ({
       role: entry.senderAgentId ? ("assistant" as const) : ("user" as const),
@@ -359,6 +385,8 @@ export async function GET(
           progressiveAssembly: contextBundle.progressiveAssembly,
           asyncAgentWork: contextBundle.asyncAgentWork,
           debugTrace: contextBundle.debugTrace,
+          nativeRuntimePayloadTrace,
+          nativeRuntimeTraceVerdictSelector: nativeRuntimeTraceSelector,
         })
       : null;
     const truthfulExecutionContext = truthfulExecutionClaims
@@ -433,6 +461,11 @@ export async function GET(
           asyncAgentWork: contextBundle?.asyncAgentWork ?? null,
           capabilityGapApprovals: contextBundle?.capabilityGapApprovals ?? null,
           truthfulExecutionClaims,
+          nativeRuntimePayloadTrace,
+          nativeRuntimeLaneSummary: summarizeNativeRuntimePayloadTraces(nativeRuntimePayloadTrace),
+          nativeRuntimeTraceCheck,
+          nativeRuntimeTraceSource:
+            latestPersistedNativeRuntimePayloadTrace.length > 0 ? "latest_agent_message_tool_context" : "pre_runtime_context",
           debugTrace: contextBundle?.debugTrace ?? null,
         },
         payload: {

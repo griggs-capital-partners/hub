@@ -32,6 +32,10 @@ import type {
   ConversationContextSourceAuthority,
   ConversationContextSourceDecision,
 } from "./conversation-context";
+import {
+  buildNativeRuntimeTraceVerdict,
+  inferNativeRuntimeTraceVerdictSelector,
+} from "./native-runtime-payloads";
 
 type BuildConversationContextDebugTraceParams = {
   conversationId: string;
@@ -1069,6 +1073,21 @@ export function buildConversationContextDebugTrace(
       detail: params.bundle.documentChunking.budget.detail,
       progressive: params.bundle.progressiveAssembly ?? null,
       transport: params.bundle.progressiveAssembly?.contextTransport?.debugSnapshot ?? null,
+      nativeRuntimeLanes:
+        params.bundle.progressiveAssembly?.contextTransport?.debugSnapshot.nativeRuntimeLaneSummary ?? null,
+      nativeRuntimeTraceCheck: params.bundle.progressiveAssembly?.contextTransport?.debugSnapshot.nativeRuntimePayloadTraces
+        ? buildNativeRuntimeTraceVerdict({
+            traces: params.bundle.progressiveAssembly.contextTransport.debugSnapshot.nativeRuntimePayloadTraces,
+            selector: inferNativeRuntimeTraceVerdictSelector({
+              prompt: params.currentUserPrompt,
+              traces: params.bundle.progressiveAssembly.contextTransport.debugSnapshot.nativeRuntimePayloadTraces,
+              providerTarget:
+                params.bundle.progressiveAssembly.contextTransport.debugSnapshot.modelCapabilityManifestUsed.provider,
+              modelTarget:
+                params.bundle.progressiveAssembly.contextTransport.debugSnapshot.modelCapabilityManifestUsed.modelId,
+            }),
+          })
+        : null,
       visualInspection: params.bundle.progressiveAssembly?.visualInspection ?? null,
     },
     renderedContext: {

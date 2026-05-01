@@ -228,6 +228,150 @@ await runTest("messages route uses readable snapshot fallback only when fallback
   assert.equal(deniedFallback.notFoundReason, "readable_snapshot_fallback_not_readable");
 });
 
+await runTest("messages access gate uses readable fallback when direct lookup misses", async () => {
+  const readableSnapshot = makeAccessSnapshot({
+    conversationId: "thread-readable",
+    sessionUserId: "user-1",
+    members: [makeMembership({ userId: "user-1", removedAt: null })],
+  });
+  const readableFallback = {
+    id: "thread-readable",
+    archivedAt: null,
+    chatProjectId: null,
+    members: [
+      {
+        userId: "user-1",
+        removedAt: null,
+      },
+    ],
+  };
+
+  const gate = resolveMessagesRouteAccessGate({
+    accessSnapshot: readableSnapshot,
+    directConversation: null,
+    fallbackConversation: readableFallback,
+    sessionUserId: "user-1",
+  });
+
+  assert.equal(gate.status, "readable");
+  assert.equal(gate.httpStatus, 200);
+  assert.equal(gate.conversation, readableFallback);
+  assert.equal(gate.directConversationReadable, false);
+  assert.equal(gate.fallbackConversationReadable, true);
+  assert.equal(gate.lookupSource, "readable_snapshot_fallback");
+  assert.equal(gate.notFoundReason, null);
+});
+
+await runTest("messages access gate does not 404 structurally readable snapshots with readable fallback", async () => {
+  const readableSnapshot = makeAccessSnapshot({
+    conversationId: "thread-readable",
+    sessionUserId: "user-1",
+    members: [makeMembership({ userId: "user-1", removedAt: null })],
+  });
+  const contradictorySnapshot = {
+    ...readableSnapshot,
+    status: 404,
+    accessStatus: 404,
+    readable: false,
+    readableHelperPassed: false,
+    notFoundReason: "conversation_missing",
+  };
+  const readableFallback = {
+    id: "thread-readable",
+    archivedAt: null,
+    chatProjectId: null,
+    members: [
+      {
+        userId: "user-1",
+        removedAt: null,
+      },
+    ],
+  };
+
+  const gate = resolveMessagesRouteAccessGate({
+    accessSnapshot: contradictorySnapshot,
+    directConversation: null,
+    fallbackConversation: readableFallback,
+    sessionUserId: "user-1",
+  });
+
+  assert.equal(gate.status, "readable");
+  assert.equal(gate.httpStatus, 200);
+  assert.equal(gate.conversation, readableFallback);
+  assert.equal(gate.lookupSource, "readable_snapshot_fallback");
+});
+
+await runTest("messages access gate reports lookup mismatch instead of 404 for contradictory readable snapshots", async () => {
+  const readableSnapshot = makeAccessSnapshot({
+    conversationId: "thread-readable",
+    sessionUserId: "user-1",
+    members: [makeMembership({ userId: "user-1", removedAt: null })],
+  });
+  const contradictorySnapshot = {
+    ...readableSnapshot,
+    status: 404,
+    accessStatus: 404,
+    readable: false,
+    readableHelperPassed: false,
+    notFoundReason: "conversation_missing",
+  };
+
+  const gate = resolveMessagesRouteAccessGate({
+    accessSnapshot: contradictorySnapshot,
+    directConversation: null,
+    sessionUserId: "user-1",
+  });
+
+  assert.equal(gate.status, "lookup_mismatch");
+  assert.equal(gate.httpStatus, 500);
+  assert.equal(gate.notFoundReason, "readable_route_lookup_mismatch");
+  assert.equal(gate.lookupSource, "readable_snapshot_fallback_missing");
+});
+
+await runTest("messages route reconciles stale denied snapshot before readable fallback gate", async () => {
+  const staleDeniedSnapshot = makeAccessSnapshot({
+    conversationId: "thread-readable",
+    sessionUserId: "user-1",
+    members: [
+      makeMembership({
+        userId: "user-1",
+        removedAt: new Date("2026-04-27T12:10:00.000Z"),
+      }),
+    ],
+  });
+  const readableFallback = {
+    id: "thread-readable",
+    archivedAt: null,
+    chatProjectId: null,
+    members: [
+      {
+        userId: "user-1",
+        removedAt: null,
+      },
+    ],
+  };
+
+  assert.equal(staleDeniedSnapshot.status, 404);
+
+  const reconciled = reconcileMessagesRouteAccessWithReadableConversation({
+    accessSnapshot: staleDeniedSnapshot,
+    readableConversation: readableFallback,
+    sessionUserId: "user-1",
+  });
+  const gate = resolveMessagesRouteAccessGate({
+    accessSnapshot: reconciled,
+    directConversation: null,
+    fallbackConversation: readableFallback,
+    sessionUserId: "user-1",
+  });
+
+  assert.equal(reconciled.status, 200);
+  assert.equal(gate.status, "readable");
+  assert.equal(gate.httpStatus, 200);
+  assert.equal(gate.conversation, readableFallback);
+  assert.equal(gate.lookupSource, "readable_snapshot_fallback");
+});
+
 await runTest("messages route never masks a list-readable snapshot as 404", async () => {
   const readableSnapshot = makeAccessSnapshot({
     conversationId: "thread-readable",
@@ -244,6 +388,7 @@ await runTest("messages route never masks a list-readable snapshot as 404", asyn
   assert.equal(gate.status, "lookup_mismatch");
   assert.equal(gate.httpStatus, 500);
   assert.equal(gate.notFoundReason, "readable_route_lookup_mismatch");
+  assert.equal(gate.lookupSource, "readable_snapshot_fallback_missing");
 });
 
 await runTest("mixed shared and direct-agent threads are message-readable for active user", async () => {

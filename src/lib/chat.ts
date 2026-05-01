@@ -287,9 +287,23 @@ export type MessagesRouteAccessGate<TConversation extends ReadableConversationAc
   status: MessagesRouteAccessGateStatus;
   conversation: TConversation | null;
   directConversationReadable: boolean;
+  fallbackConversationReadable: boolean;
+  lookupSource: MessagesRouteConversationLookupSource;
   httpStatus: 200 | 404 | 500;
   notFoundReason: string | null;
 };
+
+export function isTeamChatAccessSnapshotStructurallyReadable(
+  snapshot: TeamChatConversationAccessSnapshot
+) {
+  const hasActiveMembership =
+    snapshot.activeMembershipCountForUser > 0 ||
+    snapshot.userMembershipRemovedAt.some((removedAt) => removedAt === null);
+
+  return snapshot.conversationExists &&
+    snapshot.archivedAt === null &&
+    hasActiveMembership;
+}
 
 function isArchivedInScope(archivedAt: Date | null, scope: ConversationArchiveScope = "exclude") {
   if (scope === "include") {
@@ -505,6 +519,10 @@ export function selectMessagesRouteReadableConversation<
   fallbackConversation?: TConversation | null | undefined;
   sessionUserId: string;
 }): MessagesRouteReadableConversationSelection<TConversation> {
+  const accessSnapshotReadable =
+    (params.accessSnapshot.readable && params.accessSnapshot.status === 200) ||
+    isTeamChatAccessSnapshotStructurallyReadable(params.accessSnapshot);
+
   if (isConversationReadableByUser(params.primaryConversation, params.sessionUserId)) {
     return {
       conversation: params.primaryConversation ?? null,
@@ -514,7 +532,7 @@ export function selectMessagesRouteReadableConversation<
     };
   }
 
-  if (!params.accessSnapshot.readable || params.accessSnapshot.status !== 200) {
+  if (!accessSnapshotReadable) {
     return {
       conversation: null,
       lookupSource: "unreadable_access_snapshot",
@@ -554,39 +572,66 @@ export function resolveMessagesRouteAccessGate<
 >(params: {
   accessSnapshot: TeamChatConversationAccessSnapshot;
   directConversation: TConversation | null | undefined;
+  fallbackConversation?: TConversation | null | undefined;
   sessionUserId: string;
 }): MessagesRouteAccessGate<TConversation> {
-  if (!params.accessSnapshot.readable || params.accessSnapshot.status !== 200) {
-    return {
-      status: "not_found",
-      conversation: null,
-      directConversationReadable: false,
-      httpStatus: 404,
-      notFoundReason: params.accessSnapshot.notFoundReason,
-    };
-  }
-
   const directConversationReadable = isConversationReadableByUser(
     params.directConversation,
     params.sessionUserId
   );
+  const selection = selectMessagesRouteReadableConversation({
+    accessSnapshot: params.accessSnapshot,
+    primaryConversation: params.directConversation,
+    fallbackConversation: params.fallbackConversation,
+    sessionUserId: params.sessionUserId,
+  });
 
-  if (!directConversationReadable) {
+  if (selection.conversation) {
     return {
-      status: "lookup_mismatch",
+      status: "readable",
+      conversation: selection.conversation,
+      directConversationReadable,
+      fallbackConversationReadable: selection.fallbackReadable,
+      lookupSource: selection.lookupSource,
+      httpStatus: 200,
+      notFoundReason: null,
+    };
+  }
+
+  if (!params.accessSnapshot.readable || params.accessSnapshot.status !== 200) {
+    if (isTeamChatAccessSnapshotStructurallyReadable(params.accessSnapshot)) {
+      return {
+        status: "lookup_mismatch",
+        conversation: null,
+        directConversationReadable,
+        fallbackConversationReadable: selection.fallbackReadable,
+        lookupSource: selection.lookupSource,
+        httpStatus: 500,
+        notFoundReason: "readable_route_lookup_mismatch",
+      };
+    }
+
+    return {
+      status: "not_found",
       conversation: null,
-      directConversationReadable: false,
-      httpStatus: 500,
-      notFoundReason: "readable_route_lookup_mismatch",
+      directConversationReadable,
+      fallbackConversationReadable: selection.fallbackReadable,
+      lookupSource: selection.lookupSource,
+      httpStatus: 404,
+      notFoundReason:
+        params.accessSnapshot.notFoundReason ??
+        selection.notFoundReason,
     };
   }
 
   return {
-    status: "readable",
-    conversation: params.directConversation ?? null,
+    status: "lookup_mismatch",
+    conversation: null,
     directConversationReadable,
-    httpStatus: 200,
-    notFoundReason: null,
+    fallbackConversationReadable: selection.fallbackReadable,
+    lookupSource: selection.lookupSource,
+    httpStatus: 500,
+    notFoundReason: "readable_route_lookup_mismatch",
   };
 }
 

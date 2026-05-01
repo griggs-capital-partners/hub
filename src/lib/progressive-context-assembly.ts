@@ -15,6 +15,7 @@ import {
   buildContextPayloadsFromPackingCandidates,
   planAdaptiveContextTransport,
   type ContextPayload,
+  type ModelCapabilityManifest,
   type ContextTransportResult,
 } from "./adaptive-context-transport";
 import type {
@@ -249,6 +250,7 @@ export type ProgressiveContextAssemblyInput = {
   sourceCandidates?: ContextPackingCandidate[];
   rawExcerptCandidates?: ContextPackingCandidate[];
   transportPayloads?: ContextPayload[];
+  modelManifest?: ModelCapabilityManifest | null;
   visualInspection?: VisualInspectionResult | null;
   inspectionInvocations?: InspectionToolInvocation[];
   toolBroker?: InspectionToolBroker | null;
@@ -1204,6 +1206,7 @@ export class ProgressiveContextAssembler {
           agentControl: decision,
           agentWorkPlan: input.agentWorkPlan,
           availablePayloads: availableTransportPayloads,
+          modelManifest: input.modelManifest ?? null,
           a03PackingResults: packingResults,
           visualInspectionDebugSnapshot: input.visualInspection?.debugSnapshot ?? null,
         }),
@@ -1558,6 +1561,7 @@ export class ProgressiveContextAssembler {
       agentControl: decision,
       agentWorkPlan: input.agentWorkPlan,
       availablePayloads: availableTransportPayloads,
+      modelManifest: input.modelManifest ?? null,
       a03PackingResults: packingResults,
       visualInspectionDebugSnapshot: input.visualInspection?.debugSnapshot ?? null,
     });

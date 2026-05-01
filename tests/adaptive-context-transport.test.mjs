@@ -19,6 +19,7 @@ const {
   buildContextPayloadsFromSourceCoverageRecords,
   buildContextPayloadsFromSourceObservations,
   buildDefaultContextPayloadRegistry,
+  buildNativeRuntimeModelCapabilityManifest,
   planAdaptiveContextTransport,
 } = jiti(path.join(__dirname, "..", "src", "lib", "adaptive-context-transport.ts"));
 const { buildAgentWorkPlanFromControlDecision, evaluateAgentControlSurface } = jiti(
@@ -1008,6 +1009,217 @@ runTest("Unavailable OCR vision rendered and document-AI payloads are never exec
     false
   );
   assert.equal(result.noUnavailableToolExecutionClaimed, true);
+});
+
+runTest("rendered image SourceObservations become native runtime image payload candidates", () => {
+  const observation = makeSourceObservation({
+    id: "obs-rendered-1",
+    type: "rendered_page_image",
+    payloadKind: "image_reference",
+    content: "Rendered page image reference produced for page 15.",
+    payload: {
+      imageReferenceId: "rendered-page:doc-t5:15",
+      mimeType: "image/png",
+      byteLength: 128,
+      width: 800,
+      height: 1100,
+      rawBytesIncludedInObservation: false,
+      dataUrlIncludedInObservation: false,
+    },
+  });
+  const payloads = buildContextPayloadsFromSourceObservations([observation]);
+  const nativePayload = payloads.find((payload) => payload.type === "rendered_page_image");
+
+  assert.ok(nativePayload, "expected rendered_page_image payload");
+  assert.equal(nativePayload.representation, "image");
+  assert.equal(nativePayload.metadata.nativeRuntimeEligible, true);
+  assert.equal(JSON.stringify(nativePayload).includes("data:image/png"), false);
+});
+
+runTest("adaptive transport selects and caps native image payloads for supported OpenAI runtime manifest", () => {
+  const nativeManifest = buildNativeRuntimeModelCapabilityManifest({ provider: "openai", model: "gpt-4o" });
+  assert.ok(nativeManifest, "expected native runtime manifest");
+  const manifest = {
+    ...nativeManifest,
+    maxImageInputs: 1,
+  };
+  const observations = [15, 16].map((page) => makeSourceObservation({
+    id: `obs-rendered-${page}`,
+    type: "rendered_page_image",
+    payloadKind: "image_reference",
+    content: `Rendered page image reference produced for page ${page}.`,
+    sourceLocator: {
+      pageNumberStart: page,
+      pageNumberEnd: page,
+      pageLabelStart: String(page),
+      pageLabelEnd: String(page),
+      sourceLocationLabel: `T5 Summary Deck V1.7ext.pdf - page ${page}`,
+    },
+    payload: {
+      imageReferenceId: `rendered-page:doc-t5:${page}`,
+      mimeType: "image/png",
+      byteLength: 128,
+      width: 800,
+      height: 1100,
+      rawBytesIncludedInObservation: false,
+      dataUrlIncludedInObservation: false,
+    },
+  }));
+  const result = planAdaptiveContextTransport({
+    request: "Inspect the rendered pages visually.",
+    agentControl: makeDecision({
+      request: "Inspect the rendered pages visually.",
+      patch: { taskFidelityLevel: "deep_inspection" },
+    }),
+    modelManifest: manifest,
+    availablePayloads: buildContextPayloadsFromSourceObservations(observations),
+    requestedPayloads: [
+      {
+        id: "need:rendered",
+        payloadType: "rendered_page_image",
+        required: false,
+        reason: "Rendered page payloads should be selectable for native runtime inclusion.",
+        acceptedRepresentations: ["image"],
+      },
+    ],
+  });
+
+  assert.equal(result.selectedPayloads.filter((payload) => payload.type === "rendered_page_image").length, 1);
+  assert.equal(result.excludedPayloads.some((payload) => payload.reason === "budget_exhausted"), true);
+  assert.equal(result.nativeRuntimeLaneSummary.selectedCount, 1);
+  assert.equal(result.nativeRuntimeLaneSummary.overBudgetCount, 1);
+  assert.equal(result.nativeRuntimeLaneSummary.diagnosticState, "selected_pending_runtime_trace");
+  assert.equal(result.nativeRuntimeLaneSummary.selectedThenExcludedCount, 0);
+  assert.equal(result.nativeRuntimeLaneSummary.excludedByReason.over_budget, 1);
+  assert.equal(result.nativeRuntimeLaneSummary.excludedBySubreason.over_budget, 1);
+  assert.equal(result.nativeRuntimePayloadTraces.some((trace) => trace.state === "included"), false);
+});
+
+runTest("adaptive transport exposes approval-required native image exclusions", () => {
+  const nativeManifest = buildNativeRuntimeModelCapabilityManifest({ provider: "openai", model: "gpt-4o" });
+  assert.ok(nativeManifest, "expected native runtime manifest");
+  const observation = makeSourceObservation({
+    id: "obs-rendered-approval",
+    type: "rendered_page_image",
+    payloadKind: "image_reference",
+    content: "Rendered page image reference produced for page 15.",
+    payload: {
+      imageReferenceId: "rendered-page:doc-t5:15",
+      mimeType: "image/png",
+      byteLength: 128,
+      width: 800,
+      height: 1100,
+    },
+  });
+  const payloads = buildContextPayloadsFromSourceObservations([observation]).map((payload) =>
+    payload.type === "rendered_page_image"
+      ? { ...payload, requiresApproval: true }
+      : payload
+  );
+  const result = planAdaptiveContextTransport({
+    request: "Inspect page 15 visually.",
+    agentControl: makeDecision(),
+    modelManifest: nativeManifest,
+    availablePayloads: payloads,
+    requestedPayloads: [
+      {
+        id: "need:rendered",
+        payloadType: "rendered_page_image",
+        required: false,
+        reason: "Rendered page payload should remain approval-gated.",
+        acceptedRepresentations: ["image"],
+      },
+    ],
+  });
+
+  assert.equal(result.selectedPayloads.some((payload) => payload.type === "rendered_page_image"), false);
+  assert.equal(result.nativeRuntimeLaneSummary.diagnosticState, "candidate_not_selected");
+  assert.equal(result.nativeRuntimeLaneSummary.excludedByReason.approval_required, 1);
+  assert.equal(result.nativeRuntimeLaneSummary.excludedBySubreason.approval_required, 1);
+});
+
+runTest("adaptive transport exposes model-supported runtime-missing native image exclusions", () => {
+  const nativeManifest = buildNativeRuntimeModelCapabilityManifest({ provider: "openai", model: "gpt-4o" });
+  assert.ok(nativeManifest, "expected native runtime manifest");
+  const observation = makeSourceObservation({
+    id: "obs-rendered-runtime-missing",
+    type: "rendered_page_image",
+    payloadKind: "image_reference",
+    content: "Rendered page image reference produced for page 15.",
+    payload: {
+      imageReferenceId: "rendered-page:doc-t5:15",
+      mimeType: "image/png",
+      byteLength: 128,
+      width: 800,
+      height: 1100,
+    },
+  });
+  const payloads = buildContextPayloadsFromSourceObservations([observation]).map((payload) =>
+    payload.type === "rendered_page_image"
+      ? { ...payload, executable: false }
+      : payload
+  );
+  const result = planAdaptiveContextTransport({
+    request: "Inspect page 15 visually.",
+    agentControl: makeDecision(),
+    modelManifest: nativeManifest,
+    availablePayloads: payloads,
+    requestedPayloads: [
+      {
+        id: "need:rendered",
+        payloadType: "rendered_page_image",
+        required: false,
+        reason: "Rendered page payload should expose runtime-missing state.",
+        acceptedRepresentations: ["image"],
+      },
+    ],
+  });
+
+  assert.equal(result.selectedPayloads.some((payload) => payload.type === "rendered_page_image"), false);
+  assert.equal(result.nativeRuntimeLaneSummary.diagnosticState, "candidate_not_selected");
+  assert.equal(result.nativeRuntimePayloadTraces.some((trace) => trace.state === "model_supported_runtime_missing"), true);
+  assert.equal(
+    result.nativeRuntimePayloadTraces.some((trace) =>
+      trace.runtimeSubreason === "runtime_request_builder_missing_image_support"
+    ),
+    true
+  );
+});
+
+runTest("text-only model treats selected rendered images as unsupported rather than included", () => {
+  const observation = makeSourceObservation({
+    id: "obs-rendered-text-only",
+    type: "rendered_page_image",
+    payloadKind: "image_reference",
+    content: "Rendered page image reference produced for page 15.",
+    payload: {
+      imageReferenceId: "rendered-page:doc-t5:15",
+      mimeType: "image/png",
+      byteLength: 128,
+      width: 800,
+      height: 1100,
+    },
+  });
+  const result = planAdaptiveContextTransport({
+    request: "Inspect page 15 visually.",
+    agentControl: makeDecision(),
+    modelManifest: DEFAULT_MODEL_CAPABILITY_MANIFEST,
+    availablePayloads: buildContextPayloadsFromSourceObservations([observation]),
+    requestedPayloads: [
+      {
+        id: "need:rendered",
+        payloadType: "rendered_page_image",
+        required: false,
+        reason: "Text-only model should not accept native images.",
+        acceptedRepresentations: ["image"],
+      },
+    ],
+  });
+
+  assert.equal(result.selectedPayloads.some((payload) => payload.type === "rendered_page_image"), false);
+  assert.equal(result.nativeRuntimeLaneSummary.includedCount, 0);
+  assert.equal(result.nativeRuntimeLaneSummary.diagnosticState, "candidate_not_selected");
+  assert.equal(result.nativeRuntimePayloadTraces.some((trace) => trace.exclusionReason === "unsupported_by_model"), true);
 });
 
 let failures = 0;

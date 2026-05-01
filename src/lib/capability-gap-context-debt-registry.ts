@@ -13,6 +13,7 @@ import type {
   ContextPayload,
   ContextTransportExclusion,
 } from "./adaptive-context-transport";
+import type { NativeRuntimePayloadTrace } from "./native-runtime-payloads";
 import type { ContextPackingCandidate } from "./context-packing-kernel";
 import type { InspectionCapability, ToolRuntimeClass } from "./inspection-tool-broker";
 import { prisma } from "./prisma";
@@ -3036,6 +3037,82 @@ export function buildRegistryUpsertsFromContextTransport(params: {
   };
 }
 
+export function buildRegistryUpsertsFromNativeRuntimePayloadTraces(params: {
+  conversationId?: string | null;
+  conversationDocumentId?: string | null;
+  traces: NativeRuntimePayloadTrace[] | null | undefined;
+}): ContextRegistryUpsertBatch {
+  const gapInputs: CapabilityGapUpsertInput[] = [];
+  const relevantTraces = (params.traces ?? []).filter((trace) =>
+    trace.state !== "included" &&
+    trace.state !== "candidate" &&
+    trace.state !== "selected"
+  );
+
+  for (const trace of relevantTraces) {
+    if (
+      trace.exclusionReason !== "runtime_missing" &&
+      trace.exclusionReason !== "model_supported_runtime_missing" &&
+      trace.exclusionReason !== "missing_input" &&
+      trace.exclusionReason !== "provider_request_unsupported" &&
+      trace.exclusionReason !== "failed_to_include" &&
+      trace.exclusionReason !== "runtime_trace_missing_after_request" &&
+      trace.exclusionReason !== "request_failed_after_image_inclusion" &&
+      trace.exclusionReason !== "stream_failed_after_image_inclusion" &&
+      trace.exclusionReason !== "no_provider_support"
+    ) {
+      continue;
+    }
+
+    gapInputs.push(
+      buildCapabilityGapFromNeed({
+        conversationId: params.conversationId ?? null,
+        conversationDocumentId: trace.conversationDocumentId ?? params.conversationDocumentId ?? null,
+        sourceId: trace.sourceId,
+        status: "detected",
+        severity:
+          trace.exclusionReason === "model_supported_runtime_missing" ||
+          trace.exclusionReason === "runtime_missing"
+            ? "high"
+            : "medium",
+        need: {
+          capability: `native_runtime_payload:${trace.payloadType}`,
+          kind: "missing_context_transport",
+          reason: trace.detail,
+          sourceId: trace.sourceId,
+          requiresApproval: false,
+          asyncRecommended: false,
+          benchmarkFixtureIds: benchmarkFixturesForCapability(payloadTypeToCapability(trace.payloadType)),
+          missingPayloadType: trace.payloadType,
+          candidateContextLanes: uniqueStrings([
+            trace.payloadType,
+            "native_main_model_runtime_lane",
+            trace.kind,
+          ]),
+        } satisfies MissingContextLaneNeed,
+        evidence: {
+          nativeRuntimePayloadTrace: trace,
+          runtimeTraceState: trace.state,
+          runtimeExclusionReason: trace.exclusionReason,
+          runtimeSubreason: trace.runtimeSubreason,
+          modelTarget: trace.modelTarget,
+          providerTarget: trace.providerTarget,
+          transportPlanId: trace.planId,
+          noRawPayloadIncludedInTrace: trace.noRawPayloadIncludedInTrace,
+          executed: false,
+          executionClaimed: false,
+        },
+      })
+    );
+  }
+
+  return {
+    contextDebtRecords: [],
+    capabilityGapRecords: mergeCapabilityGapInputs(gapInputs),
+    sourceCoverageRecords: [],
+  };
+}
+
 export async function upsertTruthfulExecutionRegistryCandidates(params: {
   conversationId?: string | null;
   conversationDocumentId?: string | null;
@@ -3431,12 +3508,14 @@ export async function selectOpenContextRegistryRecords(params: {
   conversationId?: string | null;
   conversationDocumentIds?: string[];
   client?: ContextRegistryPrismaClient;
+  maxRecords?: number;
 }): Promise<ContextRegistrySelection> {
   const client = params.client ?? (prisma as unknown as ContextRegistryPrismaClient);
+  const maxRecords = params.maxRecords;
   const [contextDebtRecords, capabilityGapRecords, sourceCoverageRecords] = await Promise.all([
-    new ContextDebtRegistry(client).selectOpen(params),
-    new CapabilityGapRegistry(client).selectOpen(params),
-    new SourceCoverageRegistry(client).selectOpen(params),
+    new ContextDebtRegistry(client).selectOpen({ ...params, policy: maxRecords ? { maxRecords } : undefined }),
+    new CapabilityGapRegistry(client).selectOpen({ ...params, policy: maxRecords ? { maxRecords } : undefined }),
+    new SourceCoverageRegistry(client).selectOpen({ ...params, maxRecords }),
   ]);
 
   return {

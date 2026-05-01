@@ -583,6 +583,30 @@ await runTest("maps progressive assembly metadata into the debug trace", async (
             { laneId: "ocr_lane", payloadTypes: ["ocr_text"], reason: "No OCR lane is executable in this pass." },
           ],
         },
+        nativeRuntimeLaneSummary: {
+          candidateCount: 1,
+          selectedCount: 1,
+          includedCount: 0,
+          excludedCount: 1,
+          selectedThenIncludedCount: 0,
+          selectedThenExcludedCount: 1,
+          diagnosticState: "selected_but_excluded",
+          diagnosticReasons: ["selected_but_excluded: runtime_missing:1"],
+          includedByKind: {},
+          excludedByReason: { runtime_missing: 1 },
+          excludedBySubreason: {},
+          runtimeMissingCount: 1,
+          modelSupportedRuntimeMissingCount: 0,
+          missingInputCount: 0,
+          overBudgetCount: 0,
+          approvalOrPolicyBlockedCount: 0,
+          approvalConsumedAsGovernanceInputCount: 1,
+          providerTargets: ["local"],
+          modelTargets: ["text-model"],
+          sourceAttributions: [],
+          noExecutionWarnings: ["selected_but_excluded: runtime_missing:1"],
+          noRawPayloadIncludedInTrace: true,
+        },
       },
     },
     traceEvents: [{ type: "sufficiency_assessed" }],
@@ -612,6 +636,8 @@ await runTest("maps progressive assembly metadata into the debug trace", async (
   assert.equal(trace.agentWorkPlan.unavailableLanes.includes("ocr_lane"), true);
   assert.equal(trace.agentWorkPlan.scopedPlanLinks.assemblyPlanId, "assembly:decision-1");
   assert.equal(trace.agentWorkPlan.scopedPlanLinks.transportPlanId, "context-transport:decision-1");
+  assert.equal(trace.assembly.nativeRuntimeLanes.includedCount, 0);
+  assert.equal(trace.assembly.nativeRuntimeLanes.runtimeMissingCount, 1);
   assert.equal(trace.renderedContext.text, null);
 });
 

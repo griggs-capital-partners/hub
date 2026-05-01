@@ -13,6 +13,15 @@ import {
   estimateTextTokens,
   estimateThreadMessagesTokens,
 } from "./context-token-budget";
+import {
+  isNativeImagePayloadType,
+  traceNativeRuntimePayload,
+  type NativeRuntimePayload,
+  type NativeRuntimePayloadExclusionReason,
+  type NativeRuntimePayloadInclusionState,
+  type NativeRuntimePayloadRuntimeSubreason,
+  type NativeRuntimePayloadTrace,
+} from "./native-runtime-payloads";
 import { TRUTHFUL_EXECUTION_CLAIM_SYSTEM_INSTRUCTIONS } from "./truthful-execution-claim-guard";
 
 type LlmEndpointKind = "ollama" | "openai";
@@ -114,7 +123,20 @@ type AnthropicMessage = {
   content: string;
 };
 
+export type AgentNativeRuntimePayloadTraceHandler = (
+  traces: NativeRuntimePayloadTrace[]
+) => void;
+
+type OpenAiChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string; detail?: "auto" | "low" | "high" } };
+
+type OpenAiChatRequestMessage = Omit<LlmMessage, "content"> & {
+  content: string | null | OpenAiChatContentPart[];
+};
+
 type AgentLlmDiagnosticStage = "probe" | "generate";
+type OpenAiOutputTokenApi = "chat_completions" | "responses";
 
 function trimTrailingSlash(value: string) {
   return value.replace(/\/+$/, "");
@@ -193,6 +215,29 @@ function buildOpenAiUrls(rawUrl: string) {
     modelsUrl: `${url}/v1/models`,
     chatUrl: `${url}/v1/chat/completions`,
   };
+}
+
+export function requiresOpenAiChatCompletionsMaxCompletionTokens(model: string | null | undefined) {
+  const normalized = model?.trim().toLowerCase() ?? "";
+  return /^(gpt-5|o\d)(?:\b|[-_.])/.test(normalized);
+}
+
+export function buildOpenAiOutputTokenParams(params: {
+  api: OpenAiOutputTokenApi;
+  model?: string | null;
+  maxOutputTokens: number;
+}) {
+  const maxOutputTokens = Math.max(1, Math.floor(params.maxOutputTokens));
+
+  if (params.api === "responses") {
+    return { max_output_tokens: maxOutputTokens };
+  }
+
+  if (requiresOpenAiChatCompletionsMaxCompletionTokens(params.model)) {
+    return { max_completion_tokens: maxOutputTokens };
+  }
+
+  return { max_tokens: maxOutputTokens };
 }
 
 function resolveProvider(config: AgentLlmConfig): AgentLlmProvider {
@@ -389,6 +434,198 @@ function toAnthropicMessages(messages: LlmMessage[]) {
   }
 
   return alternating;
+}
+
+function nativePayloadDataUrl(payload: NativeRuntimePayload) {
+  if (payload.dataUrl?.startsWith("data:")) {
+    return payload.dataUrl;
+  }
+  if (payload.dataBase64 && payload.mimeType) {
+    return `data:${payload.mimeType};base64,${payload.dataBase64}`;
+  }
+  if (payload.uri?.startsWith("data:")) {
+    return payload.uri;
+  }
+  return null;
+}
+
+function hasNativePayloadProvenance(payload: NativeRuntimePayload) {
+  return Boolean(payload.sourceObservationId || payload.conversationDocumentId || payload.sourceId);
+}
+
+function supportsOpenAiChatCompletionsNativeImageInput(model: string | null | undefined) {
+  const normalized = model?.trim().toLowerCase() ?? "";
+  return /^(gpt-4o|gpt-4\.1|gpt-5|o3|o4)(?:\b|[-_.])/.test(normalized) ||
+    /\bvision\b/.test(normalized);
+}
+
+function emitNativeRuntimePayloadTraces(
+  handler: AgentNativeRuntimePayloadTraceHandler | null | undefined,
+  traces: NativeRuntimePayloadTrace[]
+) {
+  if (traces.length === 0) return;
+  handler?.(traces);
+}
+
+function includedNativeRuntimePayloadTraces(traces: NativeRuntimePayloadTrace[]) {
+  return traces.filter((trace) => trace.state === "included");
+}
+
+function nonIncludedNativeRuntimePayloadTraces(traces: NativeRuntimePayloadTrace[]) {
+  return traces.filter((trace) => trace.state !== "included");
+}
+
+function failedNativeRuntimePayloadTracesFromIncluded(
+  traces: NativeRuntimePayloadTrace[],
+  params: {
+    exclusionReason: NativeRuntimePayloadExclusionReason;
+    runtimeSubreason: NativeRuntimePayloadRuntimeSubreason;
+    detail: string;
+  }
+) {
+  return includedNativeRuntimePayloadTraces(traces).map((trace) => ({
+    ...trace,
+    state: "failed" as const,
+    exclusionReason: params.exclusionReason,
+    runtimeSubreason: params.runtimeSubreason,
+    detail: params.detail,
+    noRawPayloadIncludedInTrace: true as const,
+  }));
+}
+
+function unsupportedNativeRuntimePayloadTraces(params: {
+  payloads?: NativeRuntimePayload[] | null;
+  provider: string;
+  model: string | null;
+  state?: NativeRuntimePayloadInclusionState;
+  reason?: NativeRuntimePayloadExclusionReason;
+  runtimeSubreason?: NativeRuntimePayloadRuntimeSubreason | null;
+  requestFormat?: string | null;
+  detail: string;
+}) {
+  return (params.payloads ?? []).map((payload) =>
+    traceNativeRuntimePayload(payload, {
+      state: params.state ?? "runtime_missing",
+      exclusionReason: params.reason ?? "runtime_missing",
+      runtimeSubreason: params.runtimeSubreason ?? null,
+      detail: params.detail,
+      providerTarget: params.provider,
+      modelTarget: params.model,
+      requestFormat: params.requestFormat ?? null,
+    })
+  );
+}
+
+function buildOpenAiMessagesWithNativePayloads(params: {
+  messages: LlmMessage[];
+  payloads?: NativeRuntimePayload[] | null;
+  provider: string;
+  model: string;
+  requestFormat: string;
+}) {
+  const nativePayloads = (params.payloads ?? []).filter((payload) =>
+    isNativeImagePayloadType(payload.payloadType)
+  );
+  if (nativePayloads.length === 0) {
+    return { messages: params.messages as OpenAiChatRequestMessage[], traces: [] as NativeRuntimePayloadTrace[] };
+  }
+
+  if (!supportsOpenAiChatCompletionsNativeImageInput(params.model)) {
+    return {
+      messages: params.messages as OpenAiChatRequestMessage[],
+      traces: unsupportedNativeRuntimePayloadTraces({
+        payloads: nativePayloads,
+        provider: params.provider,
+        model: params.model,
+        state: "unsupported",
+        reason: "unsupported_by_model",
+        runtimeSubreason: "model_family_not_marked_image_runtime_supported",
+        requestFormat: params.requestFormat,
+        detail:
+          "Native image payloads were selected, but this OpenAI model family is not marked safe for Chat Completions image_url input in WP4B.",
+      }),
+    };
+  }
+
+  const messages = params.messages.map((message) => ({ ...message })) as OpenAiChatRequestMessage[];
+  const lastUserMessageIndex = messages.reduce((matchedIndex, message, index) =>
+    message.role === "user" ? index : matchedIndex
+  , -1);
+  const traces: NativeRuntimePayloadTrace[] = [];
+
+  if (lastUserMessageIndex < 0) {
+    for (const payload of nativePayloads) {
+      traces.push(traceNativeRuntimePayload(payload, {
+        state: "excluded",
+        exclusionReason: "missing_input",
+        runtimeSubreason: "no_user_message_anchor",
+        detail: "No user message was available to anchor native image payloads in the OpenAI request.",
+        providerTarget: params.provider,
+        modelTarget: params.model,
+        requestFormat: params.requestFormat,
+      }));
+    }
+    return { messages, traces };
+  }
+
+  const contentParts: OpenAiChatContentPart[] = [];
+  const originalContent = messages[lastUserMessageIndex]?.content;
+  if (typeof originalContent === "string" && originalContent.trim()) {
+    contentParts.push({ type: "text", text: originalContent });
+  }
+
+  for (const payload of nativePayloads) {
+    if (!hasNativePayloadProvenance(payload)) {
+      traces.push(traceNativeRuntimePayload(payload, {
+        state: "excluded",
+        exclusionReason: "missing_provenance",
+        runtimeSubreason: "missing_provenance",
+        detail: "Native image payload was selected but lacked SourceObservation or uploaded-document provenance.",
+        providerTarget: params.provider,
+        modelTarget: params.model,
+        requestFormat: params.requestFormat,
+      }));
+      continue;
+    }
+
+    const dataUrl = nativePayloadDataUrl(payload);
+    if (!dataUrl) {
+      traces.push(traceNativeRuntimePayload(payload, {
+        state: "excluded",
+        exclusionReason: "missing_input",
+        runtimeSubreason: "payload_missing_safe_image_data",
+        detail: "Native image payload was selected but no runtime data URL/base64 image input was available.",
+        providerTarget: params.provider,
+        modelTarget: params.model,
+        requestFormat: params.requestFormat,
+      }));
+      continue;
+    }
+
+    contentParts.push({
+      type: "image_url",
+      image_url: {
+        url: dataUrl,
+        detail: "auto",
+      },
+    });
+    traces.push(traceNativeRuntimePayload(payload, {
+      state: "included",
+      detail: "Native image payload included in the actual OpenAI Chat Completions message body as an image_url content part.",
+      providerTarget: params.provider,
+      modelTarget: params.model,
+      requestFormat: params.requestFormat,
+    }));
+  }
+
+  if (contentParts.some((part) => part.type === "image_url")) {
+    messages[lastUserMessageIndex] = {
+      ...messages[lastUserMessageIndex],
+      content: contentParts,
+    };
+  }
+
+  return { messages, traces };
 }
 
 function sha256Hex(value: string) {
@@ -1215,7 +1452,11 @@ async function probeResolvedEndpoint(
     headers: buildJsonHeaders(config),
     body: JSON.stringify({
       model: resolved.model,
-      max_tokens: 8,
+      ...buildOpenAiOutputTokenParams({
+        api: "chat_completions",
+        model: resolved.model,
+        maxOutputTokens: 8,
+      }),
       messages: [{ role: "user", content: "Ping" }],
     }),
     signal: AbortSignal.timeout(30000),
@@ -1507,7 +1748,12 @@ async function generateBedrockReply(
 }
 
 export async function generateAgentReply(
-  config: AgentLlmConfig & { history: ChatMessageInput[]; enableThinking?: boolean }
+  config: AgentLlmConfig & {
+    history: ChatMessageInput[];
+    enableThinking?: boolean;
+    nativeRuntimePayloads?: NativeRuntimePayload[];
+    onNativeRuntimePayloadTrace?: AgentNativeRuntimePayloadTraceHandler;
+  }
 ) {
   try {
     const systemPrompt = buildSystemPrompt(config);
@@ -1518,16 +1764,53 @@ export async function generateAgentReply(
     const provider = resolveProvider(config);
 
     if (provider === "anthropic") {
+      emitNativeRuntimePayloadTraces(
+        config.onNativeRuntimePayloadTrace,
+        unsupportedNativeRuntimePayloadTraces({
+          payloads: config.nativeRuntimePayloads,
+          provider,
+          model: config.llmModel?.trim() || null,
+          state: "model_supported_runtime_missing",
+          reason: "model_supported_runtime_missing",
+          runtimeSubreason: "runtime_request_builder_missing_image_support",
+          requestFormat: "anthropic_messages_non_stream",
+          detail: "Native image payloads were selected, but the current Anthropic runtime path still constructs text-only messages.",
+        })
+      );
       return generateAnthropicReply(config, messages, systemPrompt);
     }
 
     if (provider === "bedrock") {
+      emitNativeRuntimePayloadTraces(
+        config.onNativeRuntimePayloadTrace,
+        unsupportedNativeRuntimePayloadTraces({
+          payloads: config.nativeRuntimePayloads,
+          provider,
+          model: config.llmModel?.trim() || null,
+          state: "model_supported_runtime_missing",
+          reason: "model_supported_runtime_missing",
+          runtimeSubreason: "runtime_request_builder_missing_image_support",
+          requestFormat: "bedrock_converse_non_stream",
+          detail: "Native image payloads were selected, but the current Bedrock runtime path still constructs text-only Converse messages.",
+        })
+      );
       return generateBedrockReply(config, messages, systemPrompt);
     }
 
     const resolved = await resolveEndpoint(config);
 
     if (resolved.kind === "ollama") {
+      emitNativeRuntimePayloadTraces(
+        config.onNativeRuntimePayloadTrace,
+        unsupportedNativeRuntimePayloadTraces({
+          payloads: config.nativeRuntimePayloads,
+          provider,
+          model: resolved.model,
+          runtimeSubreason: "unsupported_endpoint_for_native_images",
+          requestFormat: "ollama_chat_non_stream",
+          detail: "Native image payloads were selected, but the Ollama runtime path has no safe image request builder in WP4B.",
+        })
+      );
       const response = await fetch(resolved.chatUrl, {
         method: "POST",
         headers: buildJsonHeaders(config),
@@ -1553,31 +1836,77 @@ export async function generateAgentReply(
       return { content, model: resolved.model };
     }
 
-    const response = await fetch(resolved.chatUrl, {
-      method: "POST",
-      headers: buildJsonHeaders(config),
-      body: JSON.stringify({
+    const openAiRequest = provider === "openai"
+      ? buildOpenAiMessagesWithNativePayloads({
+          messages,
+          payloads: config.nativeRuntimePayloads,
+          provider,
+          model: resolved.model,
+          requestFormat: "openai_chat_completions_non_stream",
+        })
+      : {
+          messages: messages as OpenAiChatRequestMessage[],
+          traces: unsupportedNativeRuntimePayloadTraces({
+            payloads: config.nativeRuntimePayloads,
+            provider,
+            model: resolved.model,
+            runtimeSubreason: "provider_branch_not_direct_openai",
+            requestFormat: "openai_compatible_chat_completions_non_stream",
+            detail: "Native image payloads were selected, but this OpenAI-compatible local/custom runtime is not marked safe for image payloads in WP4B.",
+          }),
+        };
+    emitNativeRuntimePayloadTraces(
+      config.onNativeRuntimePayloadTrace,
+      nonIncludedNativeRuntimePayloadTraces(openAiRequest.traces)
+    );
+    const requestBody = {
+      model: resolved.model,
+      ...buildOpenAiOutputTokenParams({
+        api: "chat_completions",
         model: resolved.model,
-        max_tokens: CHAT_REPLY_MAX_OUTPUT_TOKENS,
-        messages,
+        maxOutputTokens: CHAT_REPLY_MAX_OUTPUT_TOKENS,
       }),
-      signal: AbortSignal.timeout(CHAT_REPLY_REQUEST_TIMEOUT_MS),
-    });
+      messages: openAiRequest.messages,
+    };
 
-    if (!response.ok) {
-      throw new Error(`Chat completion request failed (${response.status})`);
+    try {
+      const response = await fetch(resolved.chatUrl, {
+        method: "POST",
+        headers: buildJsonHeaders(config),
+        body: JSON.stringify(requestBody),
+        signal: AbortSignal.timeout(CHAT_REPLY_REQUEST_TIMEOUT_MS),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Chat completion request failed (${response.status})`);
+      }
+
+      const payload = await response.json();
+      const content = typeof payload?.choices?.[0]?.message?.content === "string"
+        ? payload.choices[0].message.content.trim()
+        : "";
+
+      if (!content) {
+        throw new Error("The LLM returned an empty response");
+      }
+
+      emitNativeRuntimePayloadTraces(
+        config.onNativeRuntimePayloadTrace,
+        includedNativeRuntimePayloadTraces(openAiRequest.traces)
+      );
+      return { content, model: resolved.model };
+    } catch (error) {
+      emitNativeRuntimePayloadTraces(
+        config.onNativeRuntimePayloadTrace,
+        failedNativeRuntimePayloadTracesFromIncluded(openAiRequest.traces, {
+          exclusionReason: "request_failed_after_image_inclusion",
+          runtimeSubreason: "request_failed_after_image_inclusion",
+          detail:
+            "Native image payload was placed in the OpenAI Chat Completions request body, but the non-streaming request did not complete successfully.",
+        })
+      );
+      throw error;
     }
-
-    const payload = await response.json();
-    const content = typeof payload?.choices?.[0]?.message?.content === "string"
-      ? payload.choices[0].message.content.trim()
-      : "";
-
-    if (!content) {
-      throw new Error("The LLM returned an empty response");
-    }
-
-    return { content, model: resolved.model };
   } catch (error) {
     logLlmInvocationFailure("generate", config, error);
     throw error;
@@ -1590,6 +1919,8 @@ export async function* streamAgentReply(
     enableThinking?: boolean;
     tools?: AgentToolDefinition[];
     executeTool?: (name: string, args: Record<string, unknown>) => Promise<string>;
+    nativeRuntimePayloads?: NativeRuntimePayload[];
+    onNativeRuntimePayloadTrace?: AgentNativeRuntimePayloadTraceHandler;
   }
 ): AsyncGenerator<AgentReplyStreamEvent> {
   const systemPrompt = buildSystemPrompt(config);
@@ -1602,6 +1933,19 @@ export async function* streamAgentReply(
   ];
 
   if (provider === "anthropic") {
+    emitNativeRuntimePayloadTraces(
+      config.onNativeRuntimePayloadTrace,
+      unsupportedNativeRuntimePayloadTraces({
+        payloads: config.nativeRuntimePayloads,
+        provider,
+        model: config.llmModel?.trim() || null,
+        state: "model_supported_runtime_missing",
+        reason: "model_supported_runtime_missing",
+        runtimeSubreason: "runtime_request_builder_missing_image_support",
+        requestFormat: "anthropic_messages_stream",
+        detail: "Native image payloads were selected, but the current Anthropic runtime path still constructs text-only messages.",
+      })
+    );
     const response = await generateAnthropicReply(config, messages, systemPrompt);
     yield { type: "content_delta", delta: response.content };
     yield { type: "done", model: response.model };
@@ -1609,6 +1953,19 @@ export async function* streamAgentReply(
   }
 
   if (provider === "bedrock") {
+    emitNativeRuntimePayloadTraces(
+      config.onNativeRuntimePayloadTrace,
+      unsupportedNativeRuntimePayloadTraces({
+        payloads: config.nativeRuntimePayloads,
+        provider,
+        model: config.llmModel?.trim() || null,
+        state: "model_supported_runtime_missing",
+        reason: "model_supported_runtime_missing",
+        runtimeSubreason: "runtime_request_builder_missing_image_support",
+        requestFormat: "bedrock_converse_stream",
+        detail: "Native image payloads were selected, but the current Bedrock runtime path still constructs text-only Converse messages.",
+      })
+    );
     yield* streamBedrockReply(config, messages, systemPrompt);
     return;
   }
@@ -1623,7 +1980,8 @@ export async function* streamAgentReply(
   // We skip the tool loop entirely when the message has no signal that tools
   // are needed — routing those straight to streaming so the user gets fast
   // first-token response instead of waiting for a full non-streaming round.
-  const messageNeedsTools = shouldEnterToolLoop(config.history);
+  const nativeRuntimePayloads = config.nativeRuntimePayloads ?? [];
+  const messageNeedsTools = nativeRuntimePayloads.length === 0 && shouldEnterToolLoop(config.history);
 
   // Track tool interaction messages so they can be persisted and re-injected
   // as history in subsequent turns, giving the model continuity across turns.
@@ -1747,46 +2105,119 @@ export async function* streamAgentReply(
   }
 
   if (resolved.kind === "openai") {
-    const response = await fetch(resolved.chatUrl, {
-      method: "POST",
-      headers: buildJsonHeaders(config),
-      body: JSON.stringify({
+    const openAiRequest = provider === "openai"
+      ? buildOpenAiMessagesWithNativePayloads({
+          messages,
+          payloads: nativeRuntimePayloads,
+          provider,
+          model: resolved.model,
+          requestFormat: "openai_chat_completions_stream",
+        })
+      : {
+          messages: messages as OpenAiChatRequestMessage[],
+          traces: unsupportedNativeRuntimePayloadTraces({
+            payloads: nativeRuntimePayloads,
+            provider,
+            model: resolved.model,
+            runtimeSubreason: "provider_branch_not_direct_openai",
+            requestFormat: "openai_compatible_chat_completions_stream",
+            detail: "Native image payloads were selected, but this OpenAI-compatible local/custom runtime is not marked safe for image payloads in WP4B.",
+          }),
+        };
+    emitNativeRuntimePayloadTraces(
+      config.onNativeRuntimePayloadTrace,
+      nonIncludedNativeRuntimePayloadTraces(openAiRequest.traces)
+    );
+    const requestBody = {
+      model: resolved.model,
+      messages: openAiRequest.messages,
+      stream: true,
+      ...buildOpenAiOutputTokenParams({
+        api: "chat_completions",
         model: resolved.model,
-        messages,
-        stream: true,
-        max_tokens: CHAT_REPLY_MAX_OUTPUT_TOKENS,
+        maxOutputTokens: CHAT_REPLY_MAX_OUTPUT_TOKENS,
       }),
-      signal: AbortSignal.timeout(CHAT_REPLY_STREAM_TIMEOUT_MS),
-    });
+    };
 
-    if (!response.ok) {
-      throw new Error(`Chat completion request failed (${response.status})`);
-    }
+    try {
+      const response = await fetch(resolved.chatUrl, {
+        method: "POST",
+        headers: buildJsonHeaders(config),
+        body: JSON.stringify(requestBody),
+        signal: AbortSignal.timeout(CHAT_REPLY_STREAM_TIMEOUT_MS),
+      });
 
-    if (!response.body) {
-      throw new Error("OpenAI-compatible stream body was empty");
-    }
+      if (!response.ok) {
+        throw new Error(`Chat completion request failed (${response.status})`);
+      }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
+      if (!response.body) {
+        throw new Error("OpenAI-compatible stream body was empty");
+      }
 
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
 
-      buffer += decoder.decode(value, { stream: true });
-      const events = buffer.split("\n\n");
-      buffer = events.pop() ?? "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
 
-      for (const rawEvent of events) {
-        const lines = rawEvent
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+
+        for (const rawEvent of events) {
+          const lines = rawEvent
+            .split("\n")
+            .map((line) => line.trim())
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.replace(/^data:\s*/, ""));
+
+          for (const line of lines) {
+            if (!line || line === "[DONE]") {
+              if (line === "[DONE]") {
+                yield { type: "done", model: resolved.model };
+              }
+              continue;
+            }
+
+            const payload = JSON.parse(line) as {
+              choices?: Array<{
+                delta?: {
+                  content?: unknown;
+                  reasoning_content?: unknown;
+                };
+                finish_reason?: unknown;
+              }>;
+            };
+
+            const delta = payload.choices?.[0]?.delta;
+            const finishReason = payload.choices?.[0]?.finish_reason;
+
+            if (typeof delta?.reasoning_content === "string" && delta.reasoning_content.length > 0) {
+              yield { type: "thinking_delta", delta: delta.reasoning_content };
+            }
+
+            if (typeof delta?.content === "string" && delta.content.length > 0) {
+              yield { type: "content_delta", delta: delta.content };
+            }
+
+            if (finishReason) {
+              yield { type: "done", model: resolved.model };
+            }
+          }
+        }
+      }
+
+      if (buffer.trim()) {
+        const trailingLines = buffer
           .split("\n")
           .map((line) => line.trim())
           .filter((line) => line.startsWith("data:"))
           .map((line) => line.replace(/^data:\s*/, ""));
 
-        for (const line of lines) {
+        for (const line of trailingLines) {
           if (!line || line === "[DONE]") {
             if (line === "[DONE]") {
               yield { type: "done", model: resolved.model };
@@ -1820,53 +2251,38 @@ export async function* streamAgentReply(
           }
         }
       }
-    }
 
-    if (buffer.trim()) {
-      const trailingLines = buffer
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.replace(/^data:\s*/, ""));
-
-      for (const line of trailingLines) {
-        if (!line || line === "[DONE]") {
-          if (line === "[DONE]") {
-            yield { type: "done", model: resolved.model };
-          }
-          continue;
-        }
-
-        const payload = JSON.parse(line) as {
-          choices?: Array<{
-            delta?: {
-              content?: unknown;
-              reasoning_content?: unknown;
-            };
-            finish_reason?: unknown;
-          }>;
-        };
-
-        const delta = payload.choices?.[0]?.delta;
-        const finishReason = payload.choices?.[0]?.finish_reason;
-
-        if (typeof delta?.reasoning_content === "string" && delta.reasoning_content.length > 0) {
-          yield { type: "thinking_delta", delta: delta.reasoning_content };
-        }
-
-        if (typeof delta?.content === "string" && delta.content.length > 0) {
-          yield { type: "content_delta", delta: delta.content };
-        }
-
-        if (finishReason) {
-          yield { type: "done", model: resolved.model };
-        }
-      }
+      emitNativeRuntimePayloadTraces(
+        config.onNativeRuntimePayloadTrace,
+        includedNativeRuntimePayloadTraces(openAiRequest.traces)
+      );
+    } catch (error) {
+      emitNativeRuntimePayloadTraces(
+        config.onNativeRuntimePayloadTrace,
+        failedNativeRuntimePayloadTracesFromIncluded(openAiRequest.traces, {
+          exclusionReason: "stream_failed_after_image_inclusion",
+          runtimeSubreason: "stream_failed_after_image_inclusion",
+          detail:
+            "Native image payload was placed in the OpenAI Chat Completions streaming request body, but the stream did not complete successfully.",
+        })
+      );
+      throw error;
     }
 
     return;
   }
 
+  emitNativeRuntimePayloadTraces(
+    config.onNativeRuntimePayloadTrace,
+    unsupportedNativeRuntimePayloadTraces({
+      payloads: nativeRuntimePayloads,
+      provider,
+      model: resolved.model,
+      runtimeSubreason: "unsupported_endpoint_for_native_images",
+      requestFormat: "ollama_chat_stream",
+      detail: "Native image payloads were selected, but the Ollama runtime path has no safe image request builder in WP4B.",
+    })
+  );
   const response = await fetch(resolved.chatUrl, {
     method: "POST",
     headers: buildJsonHeaders(config),

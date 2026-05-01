@@ -49,11 +49,27 @@ import {
 import {
   buildTruthfulExecutionClaimSnapshot,
   enforceTruthfulExecutionClaims,
-  renderTruthfulExecutionClaimContext,
+  renderTruthfulExecutionAnswerGuidance,
   shouldUseBufferedTruthfulExecutionResponse,
   type TruthfulExecutionClaimSnapshot,
 } from "@/lib/truthful-execution-claim-guard";
-import { upsertTruthfulExecutionRegistryCandidates } from "@/lib/capability-gap-context-debt-registry";
+import {
+  buildRegistryUpsertsFromNativeRuntimePayloadTraces,
+  upsertContextRegistryBatch,
+  upsertTruthfulExecutionRegistryCandidates,
+} from "@/lib/capability-gap-context-debt-registry";
+import {
+  buildNativeRuntimeTraceVerdict,
+  finalizeNativeRuntimePayloadTracesAfterRequest,
+  inferNativeRuntimeTraceVerdictSelector,
+  summarizeNativeRuntimePayloadTraces,
+  type NativeRuntimePayloadTrace,
+  type NativeRuntimeTraceVerdict,
+} from "@/lib/native-runtime-payloads";
+import {
+  buildChatMessageRuntimeTraceEnvelope,
+  parseChatMessageRuntimeTraceEnvelope,
+} from "@/lib/chat-message-runtime-trace";
 
 export const dynamic = "force-dynamic";
 
@@ -145,6 +161,11 @@ type RuntimeSnapshot = {
     asyncAgentWork: Awaited<ReturnType<typeof resolveConversationContextBundle>>["asyncAgentWork"];
     debugTrace: Awaited<ReturnType<typeof resolveConversationContextBundle>>["debugTrace"];
     truthfulExecutionClaims: TruthfulExecutionClaimSnapshot;
+    nativeRuntimePayloadTrace: NativeRuntimePayloadTrace[];
+    nativeRuntimeLaneSummary: ReturnType<typeof summarizeNativeRuntimePayloadTraces>;
+    nativeRuntimeTraceCheck: NativeRuntimeTraceVerdict;
+    nativeRuntimeHandoffPayloadCount: number;
+    nativeRuntimeHandoffPayloadIds: string[];
   };
   payload: {
     currentUserName: string | null;
@@ -317,6 +338,99 @@ function buildMessagesAccessLogPayload(params: {
   };
 }
 
+function getNativeRuntimeTransportTraces(
+  contextBundle: Awaited<ReturnType<typeof resolveConversationContextBundle>> | null | undefined
+) {
+  return contextBundle?.progressiveAssembly?.contextTransport?.nativeRuntimePayloadTraces ?? [];
+}
+
+function getNativeRuntimeHandoffPayloadIds(
+  contextBundle: Awaited<ReturnType<typeof resolveConversationContextBundle>> | null | undefined
+) {
+  return (contextBundle?.nativeRuntimePayloads ?? []).map((payload) => payload.id);
+}
+
+function mergeNativeRuntimePayloadTraces(traceSets: NativeRuntimePayloadTrace[][]) {
+  const seen = new Set<string>();
+  const merged: NativeRuntimePayloadTrace[] = [];
+  for (const trace of traceSets.flat()) {
+    const key = [
+      trace.payloadId,
+      trace.state,
+      trace.exclusionReason ?? "none",
+      trace.requestFormat ?? "none",
+      trace.detail,
+    ].join(":");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(trace);
+  }
+  return merged;
+}
+
+function buildNativeRuntimeTraceCheck(params: {
+  traces: NativeRuntimePayloadTrace[];
+  prompt: string;
+  providerTarget?: string | null;
+  modelTarget?: string | null;
+}) {
+  const selector = inferNativeRuntimeTraceVerdictSelector({
+    prompt: params.prompt,
+    traces: params.traces,
+    providerTarget: params.providerTarget,
+    modelTarget: params.modelTarget,
+  });
+  return buildNativeRuntimeTraceVerdict({
+    traces: params.traces,
+    selector,
+  });
+}
+
+function finalizeNativeRuntimeTraceForCompletedTurn(params: {
+  transportTrace: NativeRuntimePayloadTrace[];
+  runtimeTrace: NativeRuntimePayloadTrace[];
+  handoffPayloadIds: string[];
+  providerTarget?: string | null;
+  modelTarget?: string | null;
+  requestFormat?: string | null;
+}) {
+  return finalizeNativeRuntimePayloadTracesAfterRequest(
+    mergeNativeRuntimePayloadTraces([params.transportTrace, params.runtimeTrace]),
+    {
+      runtimeReceivedPayloadIds: params.handoffPayloadIds,
+      providerTarget: params.providerTarget,
+      modelTarget: params.modelTarget,
+      requestFormat: params.requestFormat,
+    }
+  );
+}
+
+function replaceRuntimeSnapshotNativeTrace(
+  snapshot: RuntimeSnapshot | null,
+  trace: NativeRuntimePayloadTrace[],
+  traceCheck: NativeRuntimeTraceVerdict
+): RuntimeSnapshot | null {
+  if (!snapshot) return null;
+  return {
+    ...snapshot,
+    context: {
+      ...snapshot.context,
+      nativeRuntimePayloadTrace: trace,
+      nativeRuntimeLaneSummary: summarizeNativeRuntimePayloadTraces(trace),
+      nativeRuntimeTraceCheck: traceCheck,
+    },
+  };
+}
+
+function parsePersistedToolContextMessages(raw: string | null | undefined): LlmMessage[] {
+  const parsed = parseChatMessageRuntimeTraceEnvelope(raw);
+  return parsed.messages.filter((message): message is LlmMessage => {
+    if (!message || typeof message !== "object" || Array.isArray(message)) return false;
+    const role = (message as { role?: unknown }).role;
+    return role === "system" || role === "user" || role === "assistant" || role === "tool";
+  });
+}
+
 function buildRuntimeSnapshot(params: {
   runtimePreview: ReturnType<typeof buildAgentRuntimePreview>;
   sourceSelection: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sourceSelection"];
@@ -328,6 +442,9 @@ function buildRuntimeSnapshot(params: {
   asyncAgentWork: Awaited<ReturnType<typeof resolveConversationContextBundle>>["asyncAgentWork"];
   debugTrace: Awaited<ReturnType<typeof resolveConversationContextBundle>>["debugTrace"];
   truthfulExecutionClaims: TruthfulExecutionClaimSnapshot;
+  nativeRuntimePayloadTrace: NativeRuntimePayloadTrace[];
+  nativeRuntimeTraceCheck: NativeRuntimeTraceVerdict;
+  nativeRuntimeHandoffPayloadIds?: string[];
   currentUserName: string | null;
   history: LlmMessage[];
   orgContext: string;
@@ -350,6 +467,11 @@ function buildRuntimeSnapshot(params: {
       asyncAgentWork: params.asyncAgentWork,
       debugTrace: params.debugTrace,
       truthfulExecutionClaims: params.truthfulExecutionClaims,
+      nativeRuntimePayloadTrace: params.nativeRuntimePayloadTrace,
+      nativeRuntimeLaneSummary: summarizeNativeRuntimePayloadTraces(params.nativeRuntimePayloadTrace),
+      nativeRuntimeTraceCheck: params.nativeRuntimeTraceCheck,
+      nativeRuntimeHandoffPayloadCount: params.nativeRuntimeHandoffPayloadIds?.length ?? 0,
+      nativeRuntimeHandoffPayloadIds: params.nativeRuntimeHandoffPayloadIds ?? [],
     },
     payload: {
       currentUserName: params.currentUserName,
@@ -382,26 +504,30 @@ export async function GET(
   }
 
   try {
-    const [accessSnapshotRaw, conversation] = await Promise.all([
+    const [accessSnapshotRaw, conversation, readableFallbackConversation] = await Promise.all([
       getTeamChatConversationAccessSnapshot({
         conversationId: id,
         sessionUserId: session.user.id,
       }),
       getConversationForMessagesRoute(id),
+      getReadableConversationForUser(id, session.user.id),
     ]);
 
+    const reconciledAccessSnapshot = reconcileMessagesRouteAccessWithReadableConversation({
+      accessSnapshot: accessSnapshotRaw,
+      readableConversation: conversation ?? readableFallbackConversation,
+      sessionUserId: session.user.id,
+    });
     const accessGate = resolveMessagesRouteAccessGate({
-      accessSnapshot: accessSnapshotRaw,
+      accessSnapshot: reconciledAccessSnapshot,
       directConversation: conversation,
+      fallbackConversation: readableFallbackConversation,
       sessionUserId: session.user.id,
     });
-    const conversationReadable = accessGate.directConversationReadable;
-    const accessSnapshot = reconcileMessagesRouteAccessWithReadableConversation({
-      accessSnapshot: accessSnapshotRaw,
-      readableConversation: accessGate.conversation,
-      sessionUserId: session.user.id,
-    });
-    if (!conversation || !conversationReadable || !accessSnapshotRaw.readable) {
+    const directConversationReadable = accessGate.directConversationReadable;
+    const routeConversationReadable = accessGate.status === "readable" && Boolean(accessGate.conversation);
+    const accessSnapshot = reconciledAccessSnapshot;
+    if (!routeConversationReadable || !accessSnapshotRaw.readable) {
       console.info(
         "[chat/messages][GET][access_lookup]",
         JSON.stringify({
@@ -414,8 +540,11 @@ export async function GET(
           accessSnapshotReadable: accessSnapshotRaw.readable,
           accessSnapshotStatus: accessSnapshotRaw.status,
           directConversationFound: Boolean(conversation),
-          directConversationReadable: conversationReadable,
-          conversationLookupSource: "access_snapshot_authorized_direct_lookup",
+          directConversationReadable,
+          routeConversationReadable,
+          readableFallbackConversationFound: Boolean(readableFallbackConversation),
+          readableFallbackConversationReadable: accessGate.fallbackConversationReadable,
+          conversationLookupSource: accessGate.lookupSource,
           notFoundReason: accessSnapshotRaw.notFoundReason,
         })
       );
@@ -427,7 +556,7 @@ export async function GET(
         email: session.user.email ?? null,
       },
       conversationId: id,
-      accessFound: Boolean(conversation),
+      accessFound: Boolean(accessGate.conversation),
       accessSnapshot,
       readableHelperPassed: accessSnapshot.readableHelperPassed,
       postHelperLookupFailed: false,
@@ -450,6 +579,8 @@ export async function GET(
           accessGate.notFoundReason ??
           accessSnapshot.notFoundReason ??
           accessDiagnostic.notFoundReason,
+        conversationLookupSource: accessGate.lookupSource,
+        readableSnapshotFallbackPassed: accessGate.fallbackConversationReadable,
       });
       console.warn(
         "[chat/messages][GET][not_found]",
@@ -469,7 +600,8 @@ export async function GET(
         access: accessSnapshot,
         routeTopMarkerReached,
         paramsIdResolved,
-        conversationLookupSource: "access_snapshot_authorized_direct_lookup",
+        conversationLookupSource: accessGate.lookupSource,
+        readableSnapshotFallbackPassed: accessGate.fallbackConversationReadable,
         notFoundReason: accessGate.notFoundReason,
       });
       console.error(
@@ -478,7 +610,10 @@ export async function GET(
           ...diagnostic,
           accessSnapshotReadable: accessSnapshotRaw.readable,
           directConversationFound: Boolean(conversation),
-          directConversationReadable: conversationReadable,
+          directConversationReadable,
+          routeConversationReadable,
+          readableFallbackConversationFound: Boolean(readableFallbackConversation),
+          readableFallbackConversationReadable: accessGate.fallbackConversationReadable,
         })
       );
       return NextResponse.json(
@@ -496,7 +631,8 @@ export async function GET(
         access: accessSnapshot,
         routeTopMarkerReached,
         paramsIdResolved,
-        conversationLookupSource: "access_snapshot_authorized_direct_lookup",
+        conversationLookupSource: accessGate.lookupSource,
+        readableSnapshotFallbackPassed: accessGate.fallbackConversationReadable,
         notFoundReason: "readable_route_lookup_mismatch",
       });
       console.error(
@@ -741,7 +877,6 @@ export async function POST(
             controller.enqueue(encoder.encode(`${JSON.stringify(payload)}\n`));
           };
           let retrievalSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"] = [];
-          let truthfulExecutionClaims: TruthfulExecutionClaimSnapshot | null = null;
           let selectedTargetSummary: {
             connectionId: string;
             provider: string;
@@ -749,6 +884,11 @@ export async function POST(
             region: string | null;
           } | null = null;
           let failureStage = "message_history";
+          let runtimeSnapshot: RuntimeSnapshot | null = null;
+          let nativeRuntimePayloadTrace: NativeRuntimePayloadTrace[] = [];
+          let nativeRuntimeTransportTrace: NativeRuntimePayloadTrace[] = [];
+          let nativeRuntimeHandoffPayloadIds: string[] = [];
+          let capturedToolContext: LlmMessage[] | null = null;
 
           try {
             const recentMessages = await prisma.chatMessage.findMany({
@@ -845,6 +985,8 @@ export async function POST(
             const contextBundle = contextBundleResult.value;
             retrievalSources = contextBundle?.sources ?? [];
             const currentUserName = senderUserResult.value?.displayName || senderUserResult.value?.name || null;
+            nativeRuntimeTransportTrace = getNativeRuntimeTransportTraces(contextBundle);
+            nativeRuntimeHandoffPayloadIds = getNativeRuntimeHandoffPayloadIds(contextBundle);
             const runtimeTruthfulExecutionClaims = contextBundle
               ? buildTruthfulExecutionClaimSnapshot({
                   documentIntelligence: contextBundle.documentIntelligence,
@@ -852,9 +994,15 @@ export async function POST(
                   progressiveAssembly: contextBundle.progressiveAssembly,
                   asyncAgentWork: contextBundle.asyncAgentWork,
                   debugTrace: contextBundle.debugTrace,
+                  nativeRuntimePayloadTrace: nativeRuntimeTransportTrace,
+                  nativeRuntimeTraceVerdictSelector: inferNativeRuntimeTraceVerdictSelector({
+                    prompt: message,
+                    traces: nativeRuntimeTransportTrace,
+                    providerTarget: selectedTarget?.provider ?? null,
+                    modelTarget: selectedTarget?.model ?? null,
+                  }),
                 })
               : null;
-            truthfulExecutionClaims = runtimeTruthfulExecutionClaims;
             if (runtimeTruthfulExecutionClaims) {
               await upsertTruthfulExecutionRegistryCandidates({
                 conversationId: conversation.id,
@@ -873,7 +1021,7 @@ export async function POST(
               });
             }
             const truthfulExecutionContext = runtimeTruthfulExecutionClaims
-              ? renderTruthfulExecutionClaimContext(runtimeTruthfulExecutionClaims)
+              ? renderTruthfulExecutionAnswerGuidance(runtimeTruthfulExecutionClaims)
               : "";
             const bufferExecutionSensitiveResponse = runtimeTruthfulExecutionClaims
               ? shouldUseBufferedTruthfulExecutionResponse({
@@ -908,8 +1056,6 @@ export async function POST(
             let finalThinking = "";
             let finalContent = "";
             let resolvedModel = llmHealth.llmModel ?? selectedTarget?.model ?? agent.llmModel ?? null;
-            let capturedToolContext: LlmMessage[] | null = null;
-            let runtimeSnapshot: RuntimeSnapshot | null = null;
 
             // Filter the tool catalog to only tools this agent has enabled.
             let disabledToolNames: string[] = [];
@@ -921,13 +1067,13 @@ export async function POST(
             // final assistant reply.
             const history = recentMessages.reverse().flatMap((entry) => {
               if (entry.senderAgentId && entry.toolContext) {
-                try {
-                  const toolMsgs = JSON.parse(entry.toolContext) as LlmMessage[];
+                const toolMsgs = parsePersistedToolContextMessages(entry.toolContext);
+                if (toolMsgs.length > 0) {
                   return [
                     ...toolMsgs,
                     { role: "assistant" as const, content: entry.body },
                   ];
-                } catch { /* fall through to plain entry */ }
+                }
               }
               return [{ role: (entry.senderAgentId ? "assistant" : "user") as "assistant" | "user", content: entry.body }];
             });
@@ -971,6 +1117,14 @@ export async function POST(
                   asyncAgentWork: contextBundle.asyncAgentWork,
                   debugTrace: contextBundle.debugTrace,
                   truthfulExecutionClaims: runtimeTruthfulExecutionClaims,
+                  nativeRuntimePayloadTrace: nativeRuntimeTransportTrace,
+                  nativeRuntimeTraceCheck: buildNativeRuntimeTraceCheck({
+                    traces: nativeRuntimeTransportTrace,
+                    prompt: message,
+                    providerTarget: selectedTarget?.provider ?? null,
+                    modelTarget: selectedTarget?.model ?? null,
+                  }),
+                  nativeRuntimeHandoffPayloadIds,
                   currentUserName,
                   history,
                   orgContext: runtimeOrgContext,
@@ -984,6 +1138,10 @@ export async function POST(
               enableThinking,
               tools: enabledTools,
               executeTool: executeAgentTool,
+              nativeRuntimePayloads: contextBundle?.nativeRuntimePayloads ?? [],
+              onNativeRuntimePayloadTrace: (traces) => {
+                nativeRuntimePayloadTrace = [...nativeRuntimePayloadTrace, ...traces];
+              },
               history,
             })) {
               if (event.type === "thinking_delta") {
@@ -1014,9 +1172,78 @@ export async function POST(
             if (!trimmedContent) {
               throw new Error("The LLM returned an empty response");
             }
+            const finalNativeRuntimePayloadTrace = finalizeNativeRuntimeTraceForCompletedTurn({
+              transportTrace: nativeRuntimeTransportTrace,
+              runtimeTrace: nativeRuntimePayloadTrace,
+              handoffPayloadIds: nativeRuntimeHandoffPayloadIds,
+              providerTarget: selectedTarget?.provider ?? null,
+              modelTarget: resolvedModel,
+              requestFormat: selectedTarget?.provider === "openai" ? "openai_chat_completions_stream" : null,
+            });
+            const finalTruthfulExecutionClaims = contextBundle
+              ? buildTruthfulExecutionClaimSnapshot({
+                  documentIntelligence: contextBundle.documentIntelligence,
+                  agentControl: contextBundle.agentControl,
+                  progressiveAssembly: contextBundle.progressiveAssembly,
+                  asyncAgentWork: contextBundle.asyncAgentWork,
+                  debugTrace: contextBundle.debugTrace,
+                  nativeRuntimePayloadTrace: finalNativeRuntimePayloadTrace,
+                  nativeRuntimeTraceVerdictSelector: inferNativeRuntimeTraceVerdictSelector({
+                    prompt: message,
+                    traces: finalNativeRuntimePayloadTrace,
+                    providerTarget: selectedTarget?.provider ?? null,
+                    modelTarget: resolvedModel,
+                  }),
+                })
+              : runtimeTruthfulExecutionClaims;
+            runtimeSnapshot = contextBundle && finalTruthfulExecutionClaims
+              ? buildRuntimeSnapshot({
+                  runtimePreview,
+                  sourceSelection: contextBundle.sourceSelection,
+                  sourceDecisions: contextBundle.sourceDecisions,
+                  resolvedSources: contextBundle.sources,
+                  documentChunking: contextBundle.documentChunking,
+                  documentIntelligence: contextBundle.documentIntelligence,
+                  agentControl: contextBundle.agentControl,
+                  asyncAgentWork: contextBundle.asyncAgentWork,
+                  debugTrace: contextBundle.debugTrace,
+                  truthfulExecutionClaims: finalTruthfulExecutionClaims,
+                  nativeRuntimePayloadTrace: finalNativeRuntimePayloadTrace,
+                  nativeRuntimeTraceCheck: buildNativeRuntimeTraceCheck({
+                    traces: finalNativeRuntimePayloadTrace,
+                    prompt: message,
+                    providerTarget: selectedTarget?.provider ?? null,
+                    modelTarget: resolvedModel,
+                  }),
+                  nativeRuntimeHandoffPayloadIds,
+                  currentUserName,
+                  history,
+                  orgContext: runtimeOrgContext,
+                  resolvedContextText: contextBundle.text,
+                })
+              : runtimeSnapshot;
+            const nativeRuntimeGapBatch = buildRegistryUpsertsFromNativeRuntimePayloadTraces({
+              conversationId: conversation.id,
+              conversationDocumentId: null,
+              traces: finalNativeRuntimePayloadTrace,
+            });
+            if (nativeRuntimeGapBatch.capabilityGapRecords.length > 0) {
+              await upsertContextRegistryBatch(nativeRuntimeGapBatch).catch((error) => {
+                const registryError = describeUnknownRuntimeError(error);
+                console.warn(
+                  "[chat/messages][native-runtime-registry]",
+                  JSON.stringify({
+                    conversationId: conversation.id,
+                    agentId: agent.id,
+                    errorName: registryError.name,
+                    errorMessage: registryError.message,
+                  })
+                );
+              });
+            }
             failureStage = "truthfulness_guard";
-            const guarded = truthfulExecutionClaims
-              ? enforceTruthfulExecutionClaims(trimmedContent, truthfulExecutionClaims)
+            const guarded = finalTruthfulExecutionClaims
+              ? enforceTruthfulExecutionClaims(trimmedContent, finalTruthfulExecutionClaims)
               : { answer: trimmedContent, validation: { ok: true, violations: [] } };
             if (!guarded.validation.ok) {
               console.warn(
@@ -1041,7 +1268,10 @@ export async function POST(
                 conversationId: conversation.id,
                 senderAgentId: agent.id,
                 body: guarded.answer,
-                toolContext: capturedToolContext ? JSON.stringify(capturedToolContext) : undefined,
+                toolContext: buildChatMessageRuntimeTraceEnvelope({
+                  messages: capturedToolContext ?? [],
+                  nativeRuntimePayloadTrace: finalNativeRuntimePayloadTrace,
+                }),
               },
               include: {
                 senderUser: {
@@ -1131,6 +1361,25 @@ export async function POST(
               }
             }
 
+            const finalNativeRuntimePayloadTrace = finalizeNativeRuntimeTraceForCompletedTurn({
+              transportTrace: nativeRuntimeTransportTrace,
+              runtimeTrace: nativeRuntimePayloadTrace,
+              handoffPayloadIds: nativeRuntimeHandoffPayloadIds,
+              providerTarget: selectedTargetSummary?.provider ?? null,
+              modelTarget: selectedTargetSummary?.model ?? null,
+              requestFormat: selectedTargetSummary?.provider === "openai" ? "openai_chat_completions_stream" : null,
+            });
+            runtimeSnapshot = replaceRuntimeSnapshotNativeTrace(
+              runtimeSnapshot,
+              finalNativeRuntimePayloadTrace,
+              buildNativeRuntimeTraceCheck({
+                traces: finalNativeRuntimePayloadTrace,
+                prompt: message,
+                providerTarget: selectedTargetSummary?.provider ?? null,
+                modelTarget: selectedTargetSummary?.model ?? null,
+              })
+            );
+
             let fallbackMessage: CreatedChatMessage | null = null;
             const fallbackBody = isLlmFailure
               ? `I couldn't reach my configured LLM brain just now. Please check my endpoint settings and try again.\n\nDetails: ${details}`
@@ -1141,6 +1390,10 @@ export async function POST(
                   conversationId: conversation.id,
                   senderAgentId: agent.id,
                   body: fallbackBody,
+                  toolContext: buildChatMessageRuntimeTraceEnvelope({
+                    messages: capturedToolContext ?? [],
+                    nativeRuntimePayloadTrace: finalNativeRuntimePayloadTrace,
+                  }),
                 },
                 include: {
                   senderUser: {
@@ -1204,6 +1457,7 @@ export async function POST(
     let agentMessage = null;
     let retrievalSources: Awaited<ReturnType<typeof resolveConversationContextBundle>>["sources"] = [];
     let runtimeSnapshot: RuntimeSnapshot | null = null;
+    let nativeRuntimePayloadTrace: NativeRuntimePayloadTrace[] = [];
     if (agent) {
       const recentMessages = await prisma.chatMessage.findMany({
         where: { conversationId: conversation.id },
@@ -1245,6 +1499,9 @@ export async function POST(
             region: selectedTarget.region,
           }
         : null;
+      let agentToolContext: string | undefined;
+      let nativeRuntimeTransportTrace: NativeRuntimePayloadTrace[] = [];
+      let nativeRuntimeHandoffPayloadIds: string[] = [];
       let failureStage = "llm_health";
       try {
         const selectedRuntimeConfig = selectedTarget ? buildExecutionTargetRuntimeConfig(selectedTarget) : null;
@@ -1293,6 +1550,8 @@ export async function POST(
         const orgContext = orgContextResult.value ?? "";
         const contextBundle = contextBundleResult.value;
         const currentUserName = senderUserResult.value?.displayName || senderUserResult.value?.name || null;
+        nativeRuntimeTransportTrace = getNativeRuntimeTransportTraces(contextBundle);
+        nativeRuntimeHandoffPayloadIds = getNativeRuntimeHandoffPayloadIds(contextBundle);
         const truthfulExecutionClaims = contextBundle
           ? buildTruthfulExecutionClaimSnapshot({
               documentIntelligence: contextBundle.documentIntelligence,
@@ -1300,6 +1559,13 @@ export async function POST(
               progressiveAssembly: contextBundle.progressiveAssembly,
               asyncAgentWork: contextBundle.asyncAgentWork,
               debugTrace: contextBundle.debugTrace,
+              nativeRuntimePayloadTrace: nativeRuntimeTransportTrace,
+              nativeRuntimeTraceVerdictSelector: inferNativeRuntimeTraceVerdictSelector({
+                prompt: message,
+                traces: nativeRuntimeTransportTrace,
+                providerTarget: selectedTarget?.provider ?? null,
+                modelTarget: selectedTarget?.model ?? null,
+              }),
             })
           : null;
         if (truthfulExecutionClaims) {
@@ -1320,7 +1586,7 @@ export async function POST(
           });
         }
         const truthfulExecutionContext = truthfulExecutionClaims
-          ? renderTruthfulExecutionClaimContext(truthfulExecutionClaims)
+          ? renderTruthfulExecutionAnswerGuidance(truthfulExecutionClaims)
           : "";
         retrievalSources = contextBundle?.sources ?? [];
         const history: Array<{ role: "user" | "assistant"; content: string }> = recentMessages.reverse().map((entry) => ({
@@ -1362,6 +1628,14 @@ export async function POST(
               asyncAgentWork: contextBundle.asyncAgentWork,
               debugTrace: contextBundle.debugTrace,
               truthfulExecutionClaims,
+              nativeRuntimePayloadTrace: nativeRuntimeTransportTrace,
+              nativeRuntimeTraceCheck: buildNativeRuntimeTraceCheck({
+                traces: nativeRuntimeTransportTrace,
+                prompt: message,
+                providerTarget: selectedTarget?.provider ?? null,
+                modelTarget: selectedTarget?.model ?? null,
+              }),
+              nativeRuntimeHandoffPayloadIds,
               currentUserName,
               history,
               orgContext: runtimeOrgContext,
@@ -1391,12 +1665,85 @@ export async function POST(
         const response = await generateAgentReply({
           ...runtimeConfig,
           enableThinking: resolveThinkingMode({ ...agent, llmThinkingMode: selectedThinkingMode }, message),
+          nativeRuntimePayloads: contextBundle?.nativeRuntimePayloads ?? [],
+          onNativeRuntimePayloadTrace: (traces) => {
+            nativeRuntimePayloadTrace = [...nativeRuntimePayloadTrace, ...traces];
+          },
           history,
         });
 
         failureStage = "truthfulness_guard";
-        const guarded = truthfulExecutionClaims
-          ? enforceTruthfulExecutionClaims(response.content, truthfulExecutionClaims)
+        const finalNativeRuntimePayloadTrace = finalizeNativeRuntimeTraceForCompletedTurn({
+          transportTrace: nativeRuntimeTransportTrace,
+          runtimeTrace: nativeRuntimePayloadTrace,
+          handoffPayloadIds: nativeRuntimeHandoffPayloadIds,
+          providerTarget: selectedTarget?.provider ?? null,
+          modelTarget: response.model,
+          requestFormat: selectedTarget?.provider === "openai" ? "openai_chat_completions_non_stream" : null,
+        });
+        const finalTruthfulExecutionClaims = contextBundle
+          ? buildTruthfulExecutionClaimSnapshot({
+              documentIntelligence: contextBundle.documentIntelligence,
+              agentControl: contextBundle.agentControl,
+              progressiveAssembly: contextBundle.progressiveAssembly,
+              asyncAgentWork: contextBundle.asyncAgentWork,
+              debugTrace: contextBundle.debugTrace,
+              nativeRuntimePayloadTrace: finalNativeRuntimePayloadTrace,
+              nativeRuntimeTraceVerdictSelector: inferNativeRuntimeTraceVerdictSelector({
+                prompt: message,
+                traces: finalNativeRuntimePayloadTrace,
+                providerTarget: selectedTarget?.provider ?? null,
+                modelTarget: response.model,
+              }),
+            })
+          : truthfulExecutionClaims;
+        runtimeSnapshot = contextBundle && finalTruthfulExecutionClaims
+          ? buildRuntimeSnapshot({
+              runtimePreview,
+              sourceSelection: contextBundle.sourceSelection,
+              sourceDecisions: contextBundle.sourceDecisions,
+              resolvedSources: contextBundle.sources,
+              documentChunking: contextBundle.documentChunking,
+              documentIntelligence: contextBundle.documentIntelligence,
+              agentControl: contextBundle.agentControl,
+              asyncAgentWork: contextBundle.asyncAgentWork,
+              debugTrace: contextBundle.debugTrace,
+              truthfulExecutionClaims: finalTruthfulExecutionClaims,
+              nativeRuntimePayloadTrace: finalNativeRuntimePayloadTrace,
+              nativeRuntimeTraceCheck: buildNativeRuntimeTraceCheck({
+                traces: finalNativeRuntimePayloadTrace,
+                prompt: message,
+                providerTarget: selectedTarget?.provider ?? null,
+                modelTarget: response.model,
+              }),
+              nativeRuntimeHandoffPayloadIds,
+              currentUserName,
+              history,
+              orgContext: runtimeOrgContext,
+              resolvedContextText: contextBundle.text,
+            })
+          : runtimeSnapshot;
+        const nativeRuntimeGapBatch = buildRegistryUpsertsFromNativeRuntimePayloadTraces({
+          conversationId: conversation.id,
+          conversationDocumentId: null,
+          traces: finalNativeRuntimePayloadTrace,
+        });
+        if (nativeRuntimeGapBatch.capabilityGapRecords.length > 0) {
+          await upsertContextRegistryBatch(nativeRuntimeGapBatch).catch((error) => {
+            const registryError = describeUnknownRuntimeError(error);
+            console.warn(
+              "[chat/messages][native-runtime-registry]",
+              JSON.stringify({
+                conversationId: conversation.id,
+                agentId: agent.id,
+                errorName: registryError.name,
+                errorMessage: registryError.message,
+              })
+            );
+          });
+        }
+        const guarded = finalTruthfulExecutionClaims
+          ? enforceTruthfulExecutionClaims(response.content, finalTruthfulExecutionClaims)
           : { answer: response.content, validation: { ok: true, violations: [] } };
         if (!guarded.validation.ok) {
           console.warn(
@@ -1409,6 +1756,9 @@ export async function POST(
           );
         }
         agentReply = guarded.answer;
+        agentToolContext = buildChatMessageRuntimeTraceEnvelope({
+          nativeRuntimePayloadTrace: finalNativeRuntimePayloadTrace,
+        });
 
         failureStage = "agent_status_persistence";
         await prisma.aIAgent.update({
@@ -1458,6 +1808,28 @@ export async function POST(
           });
         }
 
+        const finalNativeRuntimePayloadTrace = finalizeNativeRuntimeTraceForCompletedTurn({
+          transportTrace: nativeRuntimeTransportTrace,
+          runtimeTrace: nativeRuntimePayloadTrace,
+          handoffPayloadIds: nativeRuntimeHandoffPayloadIds,
+          providerTarget: selectedTarget?.provider ?? null,
+          modelTarget: selectedTarget?.model ?? null,
+          requestFormat: selectedTarget?.provider === "openai" ? "openai_chat_completions_non_stream" : null,
+        });
+        runtimeSnapshot = replaceRuntimeSnapshotNativeTrace(
+          runtimeSnapshot,
+          finalNativeRuntimePayloadTrace,
+          buildNativeRuntimeTraceCheck({
+            traces: finalNativeRuntimePayloadTrace,
+            prompt: message,
+            providerTarget: selectedTarget?.provider ?? null,
+            modelTarget: selectedTarget?.model ?? null,
+          })
+        );
+        agentToolContext = buildChatMessageRuntimeTraceEnvelope({
+          nativeRuntimePayloadTrace: finalNativeRuntimePayloadTrace,
+        });
+
         agentReply = isLlmFailure
           ? `I couldn't reach my configured LLM brain just now. Please check my endpoint settings and try again.\n\nDetails: ${details}`
           : `I couldn't finish this chat turn because the ${formatRuntimeFailureStage(failureStage)} step failed. Please try again.\n\nDetails: ${details}`;
@@ -1468,6 +1840,7 @@ export async function POST(
           conversationId: conversation.id,
           senderAgentId: agent.id,
           body: agentReply,
+          toolContext: agentToolContext,
         },
         include: {
           senderUser: {

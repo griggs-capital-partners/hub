@@ -20,6 +20,7 @@ const {
 } = jiti(path.join(__dirname, "..", "src", "lib", "context-document-chunks.ts"));
 const {
   MAX_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS,
+  buildNativeImageTransportPayloadsFromImageInputs,
   resolveConversationContextBundle: resolveConversationContextBundleBase,
 } = jiti(path.join(__dirname, "..", "src", "lib", "conversation-context.ts"));
 const {
@@ -673,6 +674,79 @@ await runTest("marks image attachments as unavailable when the current runtime c
     unavailableCount: 1,
     excludedCategories: ["availability"],
   });
+});
+
+await runTest("preserves rendered page 15 image input as a native candidate outside generic observation caps", async () => {
+  const sourceObservationId = "t5-doc:rendered-page:15";
+  const payloads = buildNativeImageTransportPayloadsFromImageInputs({
+    observations: [
+      {
+        id: sourceObservationId,
+        type: "rendered_page_image",
+        traceId: "trace-1",
+        planId: "plan-1",
+        conversationId: "thread-1",
+        messageId: null,
+        conversationDocumentId: "t5-doc",
+        sourceId: "t5-doc",
+        sourceDocumentId: "t5-doc",
+        sourceKind: "pdf_page",
+        sourceVersion: null,
+        sourceLocator: {
+          pageNumberStart: 15,
+          pageNumberEnd: 15,
+          pageLabelStart: "15",
+          pageLabelEnd: "15",
+          sourceLocationLabel: "T5 Summary Deck page 15",
+        },
+        content: "Rendered page image reference produced for page 15.",
+        payloadKind: "image_reference",
+        payload: {
+          imageReferenceId: "rendered-page:t5-doc:15",
+          mimeType: "image/png",
+          byteLength: 256,
+          width: 1024,
+          height: 768,
+          storage: "runtime_memory_only",
+          rawBytesIncludedInObservation: false,
+          dataUrlIncludedInObservation: false,
+        },
+        producer: {
+          producerId: "rendered_page_renderer",
+          producerKind: "tool",
+          capabilityId: "rendered_page_inspection",
+          executionState: "executed",
+          executionEvidence: { pageNumber: 15 },
+          noUnavailableToolExecutionClaimed: true,
+        },
+        extractionMethod: "PDFParse.getScreenshot",
+        confidence: 1,
+        limitations: [],
+        createdAt: null,
+      },
+    ],
+    imageInputs: [
+      {
+        id: "rendered-page:t5-doc:15",
+        mimeType: "image/png",
+        dataBase64: "aW1hZ2U=",
+        dataUrl: "data:image/png;base64,aW1hZ2U=",
+        sourceLocator: { pageNumberStart: 15, pageNumberEnd: 15 },
+        pageNumber: 15,
+        sourceLocationLabel: "T5 Summary Deck page 15",
+        sourceObservationId,
+        producerId: "rendered_page_renderer",
+        renderedPageImage: true,
+      },
+    ],
+  });
+
+  assert.equal(payloads.length, 1);
+  assert.equal(payloads[0].type, "rendered_page_image");
+  assert.equal(payloads[0].metadata.sourceObservationId, sourceObservationId);
+  assert.equal(payloads[0].metadata.imageReferenceId, "rendered-page:t5-doc:15");
+  assert.equal(payloads[0].provenance.location.pageNumberStart, 15);
+  assert.equal(JSON.stringify(payloads).includes("data:image/png"), false);
 });
 
 await runTest("uses supported PDF attachments when extraction succeeds", async () => {

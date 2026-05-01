@@ -122,6 +122,7 @@ import {
   buildContextPayloadsFromArtifactPromotionDecisions,
   buildContextPayloadsFromSourceCoverageRecords,
   buildContextPayloadsFromSourceObservations,
+  buildNativeRuntimeModelCapabilityManifest,
   type ContextPayload,
 } from "./adaptive-context-transport";
 import {
@@ -156,6 +157,11 @@ import {
   type ContextRegistrySelection,
   type ContextRegistryUpsertBatch,
 } from "./capability-gap-context-debt-registry";
+import {
+  isNativeImagePayloadType,
+  nativeRuntimeKindForPayloadType,
+  type NativeRuntimePayload,
+} from "./native-runtime-payloads";
 import { DEFAULT_APPROX_CHARS_PER_TOKEN } from "./context-token-budget";
 import {
   DEFAULT_MODEL_BUDGET_PROFILE,
@@ -325,6 +331,7 @@ export type ConversationContextBundle = {
   agentControl: AgentControlDebugSnapshot;
   agentWorkPlan: AgentWorkPlan;
   progressiveAssembly: ProgressiveContextAssemblyResult;
+  nativeRuntimePayloads: NativeRuntimePayload[];
   asyncAgentWork: AsyncAgentWorkDebugSnapshot | null;
   contextRegistry: ContextRegistryDebugSnapshot;
   artifactPromotion: ArtifactPromotionDebugSnapshot | null;
@@ -1044,6 +1051,118 @@ type UploadedDocumentExternalEscalationInput = {
   selectedPages: number[];
   imageInputs: UploadedDocumentExternalImageInput[];
 };
+
+function contextRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function contextString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function contextNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function buildNativeRuntimePayloadsFromTransport(params: {
+  transport: ProgressiveContextAssemblyResult["contextTransport"];
+  imageInputs: UploadedDocumentExternalImageInput[];
+  traceId?: string | null;
+}) {
+  const imageInputByObservationId = new Map<string, UploadedDocumentExternalImageInput>();
+  const imageInputById = new Map<string, UploadedDocumentExternalImageInput>();
+  for (const imageInput of params.imageInputs) {
+    if (imageInput.sourceObservationId) {
+      imageInputByObservationId.set(imageInput.sourceObservationId, imageInput);
+    }
+    imageInputById.set(imageInput.id, imageInput);
+  }
+
+  return params.transport.selectedPayloads.flatMap((payload): NativeRuntimePayload[] => {
+    if (!isNativeImagePayloadType(payload.type)) return [];
+    const data = contextRecord(payload.data);
+    const sourceObservationId =
+      payload.provenance.observationIds?.[0] ??
+      contextString(payload.metadata.sourceObservationId);
+    const imageReferenceId =
+      contextString(data?.imageReferenceId) ??
+      contextString(payload.metadata.imageReferenceId) ??
+      null;
+    const imageInput =
+      (sourceObservationId ? imageInputByObservationId.get(sourceObservationId) : null) ??
+      (imageReferenceId ? imageInputById.get(imageReferenceId) : null) ??
+      null;
+
+    return [
+      {
+        id: payload.id,
+        payloadType: payload.type,
+        kind: nativeRuntimeKindForPayloadType(payload.type),
+        sourceObservationId: sourceObservationId ?? imageInput?.sourceObservationId ?? null,
+        conversationDocumentId: payload.provenance.sourceDocumentId ?? payload.sourceId ?? null,
+        sourceId: payload.sourceId,
+        sourceType: payload.sourceType,
+        locator: payload.provenance.location ?? imageInput?.sourceLocator ?? null,
+        mimeType: imageInput?.mimeType ?? payload.mimeType ?? contextString(data?.mimeType) ?? null,
+        byteSize:
+          contextNumber(data?.byteLength) ??
+          contextNumber(payload.metadata.byteLength) ??
+          (imageInput?.dataBase64 ? Buffer.byteLength(imageInput.dataBase64, "base64") : null),
+        width: contextNumber(data?.width) ?? contextNumber(payload.metadata.width),
+        height: contextNumber(data?.height) ?? contextNumber(payload.metadata.height),
+        providerTarget: params.transport.plan.modelCapabilityManifest.provider,
+        modelTarget: params.transport.plan.modelCapabilityManifest.modelId,
+        traceId: params.traceId ?? params.transport.plan.agentWorkPlanTraceId ?? null,
+        planId: params.transport.plan.planId,
+        budgetImpact: {
+          tokenEstimate: payload.approxTokenCount,
+          byteSize:
+            contextNumber(data?.byteLength) ??
+            contextNumber(payload.metadata.byteLength) ??
+            (imageInput?.dataBase64 ? Buffer.byteLength(imageInput.dataBase64, "base64") : null),
+          imageCount: 1,
+        },
+        approvalState: payload.requiresApproval ? "required" : "not_required",
+        transportPayloadId: payload.id,
+        dataUrl: imageInput?.dataUrl ?? null,
+        dataBase64: imageInput?.dataBase64 ?? null,
+        metadata: {
+          imageInputId: imageInput?.id ?? null,
+          imageReferenceId,
+          selectedByAdaptiveTransport: true,
+          noRawPayloadIncludedInTrace: true,
+        },
+      },
+    ];
+  });
+}
+
+export function buildNativeImageTransportPayloadsFromImageInputs(params: {
+  observations: SourceObservation[];
+  imageInputs: UploadedDocumentExternalImageInput[];
+}) {
+  const sourceObservationIds = new Set(
+    params.imageInputs
+      .map((input) => input.sourceObservationId)
+      .filter((id): id is string => Boolean(id))
+  );
+  if (sourceObservationIds.size === 0) return [] satisfies ContextPayload[];
+
+  return buildContextPayloadsFromSourceObservations(
+    params.observations.filter((observation) => sourceObservationIds.has(observation.id))
+  ).filter((payload) => isNativeImagePayloadType(payload.type));
+}
+
+function mergeContextPayloadsById(payloads: ContextPayload[]) {
+  const seen = new Set<string>();
+  return payloads.filter((payload) => {
+    if (seen.has(payload.id)) return false;
+    seen.add(payload.id);
+    return true;
+  });
+}
 
 export const MAX_THREAD_DOCUMENT_CONTEXT_CHARS = CHAT_THREAD_DOCUMENT_CONTEXT_CHARS;
 export const MAX_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS = CHAT_THREAD_DOCUMENT_CONTEXT_BUNDLE_CHARS;
@@ -4346,6 +4465,7 @@ export async function resolveConversationContextBundle(params: {
   const uploadedDocumentDigestionLocalSummaries: UploadedDocumentDigestionLocalDebugSummary[] = [];
   const uploadedDocumentExternalEscalationInputs: UploadedDocumentExternalEscalationInput[] = [];
   const uploadedDocumentDigestionExternalSummaries: UploadedDocumentDigestionExternalDebugSummary[] = [];
+  const nativeRuntimeImageInputs: UploadedDocumentExternalImageInput[] = [];
   const artifactPromotionTraces: ArtifactPromotionDebugSnapshot["traces"] = [];
   let artifactPromotionCandidateCount = 0;
   let artifactPromotionAcceptedCount = 0;
@@ -4919,8 +5039,15 @@ export async function resolveConversationContextBundle(params: {
     sourceObservationProducerRequests.push(...localDigestion.producerRequests);
     sourceObservationProducerResults.push(...localDigestion.producerResults);
     uploadedDocumentDigestionLocalSummaries.push(localDigestion.debugSummary);
+    nativeRuntimeImageInputs.push(...localToolEnablement.imageInputs);
     progressiveTransportPayloads.push(
-      ...buildContextPayloadsFromSourceObservations(transportSelection.selectedObservations)
+      ...mergeContextPayloadsById([
+        ...buildContextPayloadsFromSourceObservations(transportSelection.selectedObservations),
+        ...buildNativeImageTransportPayloadsFromImageInputs({
+          observations: localToolEnablement.observations,
+          imageInputs: localToolEnablement.imageInputs,
+        }),
+      ])
     );
     const tableProducerRequests = buildProducerRequestsFromTableSignals({
       observations: currentSourceObservations,
@@ -5138,16 +5265,29 @@ export async function resolveConversationContextBundle(params: {
     );
   }
 
+  const nativeRuntimeModelManifest = resolvedBudget.budgetInputProvided
+    ? buildNativeRuntimeModelCapabilityManifest({
+        provider: resolvedBudget.provider,
+        protocol: resolvedBudget.protocol,
+        model: resolvedBudget.model,
+      })
+    : null;
   const progressiveAssembly = assembleProgressiveContext({
     request: params.currentUserPrompt ?? null,
     agentControl,
     agentWorkPlan,
+    modelManifest: nativeRuntimeModelManifest,
     artifactCandidates: [...progressiveArtifactCandidates, ...contextRegistryPackingCandidates],
     rawExcerptCandidates: progressiveRawExcerptCandidates,
     transportPayloads: [
       ...progressiveTransportPayloads,
       ...buildContextPayloadsFromSourceCoverageRecords(openContextRegistry.sourceCoverageRecords),
     ],
+  });
+  const nativeRuntimePayloads = buildNativeRuntimePayloadsFromTransport({
+    transport: progressiveAssembly.contextTransport,
+    imageInputs: nativeRuntimeImageInputs,
+    traceId: agentWorkPlan.traceId,
   });
   const sourceObservationNeeds = buildSourceObservationNeeds({
     sourceNeeds: agentWorkPlan.sourceNeeds,
@@ -5446,6 +5586,7 @@ export async function resolveConversationContextBundle(params: {
     agentControl,
     agentWorkPlan,
     progressiveAssembly,
+    nativeRuntimePayloads,
     asyncAgentWork,
     contextRegistry,
     artifactPromotion,

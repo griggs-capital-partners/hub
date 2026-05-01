@@ -18,6 +18,10 @@ import type { UploadedDocumentDigestionLocalDebugSummary } from "./upload-docume
 import type { ProgressiveContextAssemblyResult } from "./progressive-context-assembly";
 import type { VisualInspectionDebugSnapshot } from "./visual-inspection-pack";
 import type {
+  NativeRuntimeLaneSummary,
+  NativeRuntimeTraceVerdict,
+} from "./native-runtime-payloads";
+import type {
   ContextBudgetMode,
   ContextCompactionStrategy,
   ContextPromptCacheStrategy,
@@ -728,6 +732,8 @@ export interface ContextDebugTrace {
     detail?: string | null;
     progressive?: ProgressiveContextAssemblyResult | null;
     transport?: ContextTransportDebugSnapshot | null;
+    nativeRuntimeLanes?: NativeRuntimeLaneSummary | null;
+    nativeRuntimeTraceCheck?: NativeRuntimeTraceVerdict | null;
     visualInspection?: VisualInspectionDebugSnapshot | null;
   };
   renderedContext: {

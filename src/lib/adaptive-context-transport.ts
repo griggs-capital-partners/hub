@@ -40,6 +40,19 @@ import {
   type CatalogDebugSnapshot,
   type CatalogResolutionResult,
 } from "./context-catalog-bootstrap";
+import {
+  isNativeFilePayloadType,
+  isNativeImagePayloadType,
+  nativeRuntimeKindForPayloadType,
+  summarizeNativeRuntimePayloadTraces,
+  traceNativeRuntimePayload,
+  type NativeRuntimeLaneSummary,
+  type NativeRuntimePayload,
+  type NativeRuntimePayloadExclusionReason,
+  type NativeRuntimePayloadInclusionState,
+  type NativeRuntimePayloadRuntimeSubreason,
+  type NativeRuntimePayloadTrace,
+} from "./native-runtime-payloads";
 
 export type ContextPayloadType = string;
 
@@ -419,6 +432,8 @@ export type ContextTransportResult = {
   selectedPayloads: ContextPayload[];
   compactedPayloads: CompactedContextPayload[];
   excludedPayloads: ContextTransportExclusion[];
+  nativeRuntimePayloadTraces: NativeRuntimePayloadTrace[];
+  nativeRuntimeLaneSummary: NativeRuntimeLaneSummary;
   eligibilityDecisions: TransportEligibilityDecision[];
   negotiationDecisions: TransportNegotiationDecision[];
   missingPayloadCapabilities: MissingPayloadCapability[];
@@ -442,6 +457,8 @@ export type ContextTransportDebugSnapshot = {
   compactedPayloads: CompactedContextPayload[];
   excludedPayloads: ContextTransportExclusion[];
   exclusionReasons: PayloadExclusionReason[];
+  nativeRuntimePayloadTraces: NativeRuntimePayloadTrace[];
+  nativeRuntimeLaneSummary: NativeRuntimeLaneSummary;
   modelCapabilityManifestUsed: ModelCapabilityManifest;
   toolOutputManifestsConsidered: ToolOutputManifest[];
   missingPayloadCapabilities: MissingPayloadCapability[];
@@ -510,6 +527,20 @@ function shortHash(value: string) {
     hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
   }
   return hash.toString(36);
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringValue(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function numberValue(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function payloadTokenCount(payload: ContextPayload) {
@@ -932,6 +963,125 @@ export const DEFAULT_MODEL_CAPABILITY_MANIFEST =
 export const DEFAULT_TOOL_OUTPUT_MANIFESTS =
   DEFAULT_CATALOG_RESOLUTION.toolOutputManifests satisfies ToolOutputManifest[];
 
+function likelyOpenAiNativeImageModel(model: string | null | undefined) {
+  const normalized = model?.trim().toLowerCase() ?? "";
+  return /^(gpt-4o|gpt-4\.1|gpt-5|o3|o4)(?:\b|[-_.])/.test(normalized) ||
+    /\bvision\b/.test(normalized);
+}
+
+export function buildNativeRuntimeModelCapabilityManifest(input: {
+  provider?: string | null;
+  protocol?: string | null;
+  model?: string | null;
+}): ModelCapabilityManifest | null {
+  if (input.provider !== "openai" || !likelyOpenAiNativeImageModel(input.model)) {
+    return null;
+  }
+
+  const modelId = input.model?.trim() || "openai-native-image-chat-model";
+  const textAcceptedPayloads = DEFAULT_MODEL_CAPABILITY_MANIFEST.acceptedPayloadTypes;
+  const acceptedPayloadTypes = unique([
+    ...textAcceptedPayloads,
+    "rendered_page_image",
+    "page_crop_image",
+  ]);
+  const nativePayloadSupport = [
+    ...DEFAULT_MODEL_CAPABILITY_MANIFEST.nativePayloadSupport.filter((support) =>
+      support.payloadType !== "rendered_page_image" &&
+      support.payloadType !== "page_crop_image" &&
+      support.payloadType !== "native_file_reference"
+    ),
+    {
+      payloadType: "rendered_page_image",
+      supported: true,
+      reason:
+        "Selected OpenAI main-model runtime can encode rendered page images as Chat Completions image_url content parts.",
+    },
+    {
+      payloadType: "page_crop_image",
+      supported: true,
+      reason:
+        "Selected OpenAI main-model runtime can encode page crop images as Chat Completions image_url content parts.",
+    },
+    {
+      payloadType: "native_file_reference",
+      supported: false,
+      reason:
+        "WP4B does not attach native file references to the main model request.",
+    },
+  ];
+
+  return {
+    ...DEFAULT_MODEL_CAPABILITY_MANIFEST,
+    manifestId: `runtime-model:openai:${modelId}`,
+    consumerId: `runtime-openai:${modelId}`,
+    modelId,
+    modelProfileId: `runtime-openai:${modelId}`,
+    provider: "openai",
+    protocol: input.protocol ?? null,
+    availabilityStatus: "available",
+    inputModalities: unique([...DEFAULT_MODEL_CAPABILITY_MANIFEST.inputModalities, "image_input"]),
+    acceptedPayloadTypes,
+    preferredRepresentations: unique([
+      ...DEFAULT_MODEL_CAPABILITY_MANIFEST.preferredRepresentations,
+      "image",
+      "binary_reference",
+    ]),
+    maxImageInputs: 4,
+    maxFileInputs: 0,
+    supportedFileTypes: ["image/png", "image/jpeg", "image/webp", "image/gif"],
+    supportedPayloadLanes: unique([
+      ...DEFAULT_MODEL_CAPABILITY_MANIFEST.supportedPayloadLanes,
+      "native_main_model_image_lane",
+    ]),
+    unavailableLanes: [
+      ...DEFAULT_MODEL_CAPABILITY_MANIFEST.unavailableLanes,
+      {
+        laneId: "native_file_reference_lane",
+        payloadTypes: ["native_file_reference"],
+        reason: "WP4B does not include native file references in the main model request.",
+      },
+    ],
+    nativePayloadSupport,
+    capabilityFlags: {
+      ...DEFAULT_MODEL_CAPABILITY_MANIFEST.capabilityFlags,
+      image_input: {
+        status: "supported",
+        reason:
+          "Runtime target is a direct OpenAI Chat Completions path with image_url request construction.",
+        noExecutionClaimed: true,
+      },
+      rendered_page_image: {
+        status: "supported",
+        reason:
+          "Rendered-page image support is available only when runtime trace proves image_url inclusion.",
+        noExecutionClaimed: true,
+      },
+      file_payload: {
+        status: "unsupported",
+        reason: "Native file references remain runtime_missing in WP4B.",
+        noExecutionClaimed: true,
+      },
+    },
+    supportsVision: true,
+    supportsNativePdf: false,
+    costClass: "variable",
+    latencyClass: "sync_safe",
+    policyRestrictions: [
+      ...DEFAULT_MODEL_CAPABILITY_MANIFEST.policyRestrictions,
+      "Native image payload use requires selected/capped transport payloads and included runtime trace.",
+    ],
+    notes: [
+      ...DEFAULT_MODEL_CAPABILITY_MANIFEST.notes,
+      "WP4B native main-model image support is request-construction evidence, not external vision producer execution.",
+    ],
+    limitations: [
+      ...DEFAULT_MODEL_CAPABILITY_MANIFEST.limitations,
+      "Native image inclusion does not imply OCR, document-AI, or external vision producer execution.",
+    ],
+  };
+}
+
 function basePayload(params: {
   id: string;
   type: ContextPayloadType;
@@ -1003,6 +1153,100 @@ function basePayload(params: {
     },
     metadata: params.metadata ?? {},
   };
+}
+
+function sourceObservationNativeImagePayload(
+  observation: SourceObservation,
+  shared: {
+    sourceId: string | null;
+    sourceType: string | null;
+    label: string;
+    confidence: number | null;
+    provenance: ContextPayloadProvenance;
+    persistence: Partial<ContextPayload["persistence"]>;
+    metadata: Record<string, unknown>;
+  }
+): ContextPayload[] {
+  if (
+    observation.type !== "rendered_page_image" &&
+    observation.type !== "page_crop_image" &&
+    observation.payloadKind !== "image_reference"
+  ) {
+    return [];
+  }
+
+  const payload = recordValue(observation.payload);
+  const payloadType =
+    observation.type === "page_crop_image" ? "page_crop_image" : "rendered_page_image";
+  const imageReferenceId =
+    stringValue(payload?.imageReferenceId) ??
+    stringValue(payload?.imageInputId) ??
+    stringValue(payload?.id) ??
+    observation.id;
+  const byteLength =
+    numberValue(payload?.byteLength) ??
+    numberValue(payload?.byteSize) ??
+    numberValue(payload?.bytes);
+  const width = numberValue(payload?.width);
+  const height = numberValue(payload?.height);
+  const mimeType = stringValue(payload?.mimeType) ?? "image/png";
+
+  return [
+    basePayload({
+      id: `${payloadType}:${observation.id}`,
+      type: payloadType,
+      payloadClass: "runtime",
+      label: shared.label,
+      sourceId: shared.sourceId,
+      sourceType: shared.sourceType,
+      representation: "image",
+      text: null,
+      data: {
+        imageReferenceId,
+        sourceObservationId: observation.id,
+        conversationDocumentId: observation.conversationDocumentId ?? null,
+        sourceLocator: observation.sourceLocator,
+        byteLength,
+        width,
+        height,
+        storage: stringValue(payload?.storage) ?? "runtime_reference",
+        rawBytesIncludedInTrace: false,
+        dataUrlIncludedInTrace: false,
+        semanticVisionExecuted: payload?.semanticVisionExecuted === true,
+        ocrExecuted: payload?.ocrExecuted === true,
+        tableExtractionExecuted: payload?.tableExtractionExecuted === true,
+      },
+      mimeType,
+      approxTokenCount: 0,
+      priority: 92,
+      confidence: shared.confidence,
+      available: true,
+      executable: true,
+      requiresApproval: false,
+      provenance: shared.provenance,
+      ownership: {
+        scope: "thread",
+        policyMode: "native_runtime_reference",
+      },
+      persistence: {
+        artifactEligible: false,
+        sourceObservationEligible: true,
+        alreadyPersisted: true,
+        policy: "source_observation_native_runtime_reference",
+      },
+      metadata: {
+        ...shared.metadata,
+        sourceObservationId: observation.id,
+        imageReferenceId,
+        byteLength,
+        width,
+        height,
+        nativeRuntimeEligible: true,
+        noRawImageBytesInTrace: true,
+        dataUrlIncludedInTrace: false,
+      },
+    }),
+  ];
 }
 
 export function buildContextPayloadsFromPackingCandidates(
@@ -1132,6 +1376,7 @@ export function buildContextPayloadsFromSourceObservations(
           policy: "derived_text_excerpt_from_source_observation",
         },
       }),
+      ...sourceObservationNativeImagePayload(observation, shared),
     ];
   });
 }
@@ -1651,11 +1896,202 @@ function canModelConsume(params: {
   if (!params.modelManifest.acceptedPayloadTypes.includes(params.payload.type)) {
     return false;
   }
+  if (isNativeImagePayloadType(params.payload.type) && params.modelManifest.maxImageInputs === 0) {
+    return false;
+  }
+  if (isNativeFilePayloadType(params.payload.type) && params.modelManifest.maxFileInputs === 0) {
+    return false;
+  }
   const acceptedRepresentations = params.requirement?.acceptedRepresentations;
   if (acceptedRepresentations && acceptedRepresentations.length > 0) {
     return acceptedRepresentations.includes(params.payload.representation);
   }
   return params.modelManifest.preferredRepresentations.includes(params.payload.representation);
+}
+
+function modelCatalogSupportsNativePayload(
+  modelManifest: ModelCapabilityManifest,
+  payloadType: string
+) {
+  return Boolean(
+    modelManifest.nativePayloadSupport.some((support) =>
+      support.payloadType === payloadType && support.supported
+    ) ||
+    (
+      modelManifest.acceptedPayloadTypes.includes(payloadType) &&
+      (
+        isNativeImagePayloadType(payloadType)
+          ? modelManifest.supportsVision && modelManifest.maxImageInputs !== 0
+          : isNativeFilePayloadType(payloadType)
+            ? modelManifest.supportsNativePdf || modelManifest.maxFileInputs !== 0
+            : false
+      )
+    )
+  );
+}
+
+function contextPayloadToNativeRuntimePayload(params: {
+  payload: ContextPayload;
+  planId: string;
+  modelManifest: ModelCapabilityManifest;
+}): NativeRuntimePayload {
+  const data = recordValue(params.payload.data);
+  const byteSize =
+    numberValue(data?.byteLength) ??
+    numberValue(data?.byteSize) ??
+    numberValue(params.payload.metadata.byteLength) ??
+    numberValue(params.payload.metadata.byteSize);
+  return {
+    id: params.payload.id,
+    payloadType: params.payload.type,
+    kind: nativeRuntimeKindForPayloadType(params.payload.type),
+    sourceObservationId:
+      params.payload.provenance.observationIds?.[0] ??
+      stringValue(params.payload.metadata.sourceObservationId) ??
+      null,
+    conversationDocumentId: params.payload.provenance.sourceDocumentId ?? null,
+    sourceId: params.payload.sourceId,
+    sourceType: params.payload.sourceType,
+    locator: params.payload.provenance.location ?? null,
+    mimeType: params.payload.mimeType,
+    byteSize,
+    width: numberValue(data?.width) ?? numberValue(params.payload.metadata.width),
+    height: numberValue(data?.height) ?? numberValue(params.payload.metadata.height),
+    providerTarget: params.modelManifest.provider,
+    modelTarget: params.modelManifest.modelId,
+    planId: params.planId,
+    budgetImpact: {
+      tokenEstimate: payloadTokenCount(params.payload),
+      byteSize,
+      imageCount: isNativeImagePayloadType(params.payload.type) ? 1 : 0,
+    },
+    approvalState: params.payload.requiresApproval ? "required" : "not_required",
+    transportPayloadId: params.payload.id,
+    uri: params.payload.uri,
+    metadata: {
+      nativeRuntimeEligible: true,
+      modelCatalogSupportsPayload: modelCatalogSupportsNativePayload(params.modelManifest, params.payload.type),
+    },
+  };
+}
+
+function nativeReasonFromExclusion(params: {
+  reason: PayloadExclusionReason;
+  payloadType: string;
+  modelManifest: ModelCapabilityManifest;
+}): {
+  state: NativeRuntimePayloadInclusionState;
+  exclusionReason: NativeRuntimePayloadExclusionReason;
+  runtimeSubreason: NativeRuntimePayloadRuntimeSubreason;
+} {
+  if (params.reason === "model_payload_unsupported" || params.reason === "representation_unsupported") {
+    return {
+      state: "unsupported",
+      exclusionReason: "unsupported_by_model",
+      runtimeSubreason: "model_family_not_marked_image_runtime_supported",
+    };
+  }
+  if (params.reason === "payload_unavailable" || params.reason === "not_registered") {
+    return { state: "excluded", exclusionReason: "missing_input", runtimeSubreason: "missing_input" };
+  }
+  if (params.reason === "budget_exhausted" || params.reason === "a03_budget_exhausted") {
+    return { state: "excluded", exclusionReason: "over_budget", runtimeSubreason: "over_budget" };
+  }
+  if (params.reason === "policy_blocked") {
+    return { state: "excluded", exclusionReason: "policy_blocked", runtimeSubreason: "policy_blocked" };
+  }
+  if (params.reason === "approval_required") {
+    return { state: "excluded", exclusionReason: "approval_required", runtimeSubreason: "approval_required" };
+  }
+  if (
+    params.reason === "execution_not_available" ||
+    params.reason === "non_text_lane_not_executable" ||
+    params.reason === "transport_lane_missing" ||
+    params.reason === "producer_missing"
+  ) {
+    return modelCatalogSupportsNativePayload(params.modelManifest, params.payloadType)
+      ? {
+          state: "model_supported_runtime_missing",
+          exclusionReason: "model_supported_runtime_missing",
+          runtimeSubreason: "runtime_request_builder_missing_image_support",
+        }
+      : {
+          state: "runtime_missing",
+          exclusionReason: "runtime_missing",
+          runtimeSubreason: "runtime_request_builder_missing_image_support",
+        };
+  }
+  return {
+    state: "runtime_missing",
+    exclusionReason: "no_provider_support",
+    runtimeSubreason: "unsupported_endpoint_for_native_images",
+  };
+}
+
+function buildNativeRuntimePayloadTraces(params: {
+  plan: Pick<ContextTransportPlan, "planId" | "availablePayloads" | "modelCapabilityManifest">;
+  selectedPayloads: ContextPayload[];
+  excludedPayloads: ContextTransportExclusion[];
+}) {
+  const traces: NativeRuntimePayloadTrace[] = [];
+  const selectedIds = new Set(params.selectedPayloads.map((payload) => payload.id));
+  const payloadById = new Map(params.plan.availablePayloads.map((payload) => [payload.id, payload]));
+
+  for (const payload of params.plan.availablePayloads.filter((candidate) =>
+    isNativeImagePayloadType(candidate.type) || isNativeFilePayloadType(candidate.type)
+  )) {
+    const nativePayload = contextPayloadToNativeRuntimePayload({
+      payload,
+      planId: params.plan.planId,
+      modelManifest: params.plan.modelCapabilityManifest,
+    });
+    traces.push(traceNativeRuntimePayload(nativePayload, {
+      state: "candidate",
+      detail: "Native runtime payload candidate discovered by adaptive transport.",
+    }));
+    if (selectedIds.has(payload.id)) {
+      traces.push(traceNativeRuntimePayload(nativePayload, {
+        state: "selected",
+        detail:
+          "Native runtime payload selected for possible main-model inclusion; runtime request construction must still prove inclusion.",
+      }));
+    }
+  }
+
+  for (const exclusion of params.excludedPayloads.filter((candidate) =>
+    isNativeImagePayloadType(candidate.payloadType) || isNativeFilePayloadType(candidate.payloadType)
+  )) {
+    const payload = exclusion.payloadId ? payloadById.get(exclusion.payloadId) : null;
+    const nativePayload = payload
+      ? contextPayloadToNativeRuntimePayload({
+          payload,
+          planId: params.plan.planId,
+          modelManifest: params.plan.modelCapabilityManifest,
+        })
+      : {
+          id: `missing:${exclusion.payloadType}:${exclusion.requirementId ?? shortHash(exclusion.detail)}`,
+          payloadType: exclusion.payloadType,
+          kind: nativeRuntimeKindForPayloadType(exclusion.payloadType),
+          planId: params.plan.planId,
+          providerTarget: params.plan.modelCapabilityManifest.provider,
+          modelTarget: params.plan.modelCapabilityManifest.modelId,
+          approvalState: exclusion.reason === "approval_required" ? "required" : "unknown",
+          metadata: {},
+        } satisfies NativeRuntimePayload;
+    const reason = nativeReasonFromExclusion({
+      reason: exclusion.reason,
+      payloadType: exclusion.payloadType,
+      modelManifest: params.plan.modelCapabilityManifest,
+    });
+    traces.push(traceNativeRuntimePayload(nativePayload, {
+      state: reason.state,
+      exclusionReason: reason.exclusionReason,
+      runtimeSubreason: reason.runtimeSubreason,
+      detail: exclusion.detail,
+    }));
+  }
+
+  return traces;
 }
 
 function buildMissingCapability(params: {
@@ -1795,6 +2231,7 @@ function debugSnapshot(params: {
   selectedPayloads: ContextPayload[];
   compactedPayloads: CompactedContextPayload[];
   excludedPayloads: ContextTransportExclusion[];
+  nativeRuntimePayloadTraces: NativeRuntimePayloadTrace[];
   missingPayloadCapabilities: MissingPayloadCapability[];
   missingContextLaneProposals: MissingContextLaneProposal[];
   traceEvents: ContextTransportTrace[];
@@ -1824,6 +2261,8 @@ function debugSnapshot(params: {
     compactedPayloads: params.compactedPayloads,
     excludedPayloads: params.excludedPayloads,
     exclusionReasons: unique(params.excludedPayloads.map((excluded) => excluded.reason)),
+    nativeRuntimePayloadTraces: params.nativeRuntimePayloadTraces,
+    nativeRuntimeLaneSummary: summarizeNativeRuntimePayloadTraces(params.nativeRuntimePayloadTraces),
     modelCapabilityManifestUsed: params.plan.modelCapabilityManifest,
     toolOutputManifestsConsidered: params.plan.toolOutputManifestsConsidered,
     missingPayloadCapabilities: params.missingPayloadCapabilities,
@@ -2105,15 +2544,77 @@ export function planAdaptiveContextTransport(
   }
 
   if (nonTextPayloads.length > 0) {
+    const selectedNonTextPayloads: ContextPayload[] = [];
+    const sortedNonTextPayloads = [...nonTextPayloads].sort((left, right) =>
+      right.priority - left.priority || left.id.localeCompare(right.id)
+    );
+    let selectedImageCount = 0;
+    let selectedFileCount = 0;
+    const maxImageInputs = modelCapabilityManifest.maxImageInputs;
+    const maxFileInputs = modelCapabilityManifest.maxFileInputs;
+
+    for (const payload of sortedNonTextPayloads) {
+      if (
+        isNativeImagePayloadType(payload.type) &&
+        maxImageInputs != null &&
+        selectedImageCount >= Math.max(0, maxImageInputs)
+      ) {
+        const detail = `Native image payload ${payload.id} exceeded model manifest image cap ${maxImageInputs}.`;
+        excludedPayloads.push({
+          payloadId: payload.id,
+          payloadType: payload.type,
+          reason: "budget_exhausted",
+          detail,
+          estimatedTokensNeeded: payloadTokenCount(payload),
+          boundary: "in_memory",
+        });
+        traceEvents.push(traceEvent({
+          type: "payload_excluded",
+          payloadId: payload.id,
+          payloadType: payload.type,
+          detail,
+          metadata: { reason: "over_budget", maxImageInputs },
+        }, input.now));
+        continue;
+      }
+      if (
+        isNativeFilePayloadType(payload.type) &&
+        maxFileInputs != null &&
+        selectedFileCount >= Math.max(0, maxFileInputs)
+      ) {
+        const detail = `Native file payload ${payload.id} exceeded model manifest file cap ${maxFileInputs}.`;
+        excludedPayloads.push({
+          payloadId: payload.id,
+          payloadType: payload.type,
+          reason: "budget_exhausted",
+          detail,
+          estimatedTokensNeeded: payloadTokenCount(payload),
+          boundary: "in_memory",
+        });
+        traceEvents.push(traceEvent({
+          type: "payload_excluded",
+          payloadId: payload.id,
+          payloadType: payload.type,
+          detail,
+          metadata: { reason: "over_budget", maxFileInputs },
+        }, input.now));
+        continue;
+      }
+
+      selectedNonTextPayloads.push(payload);
+      if (isNativeImagePayloadType(payload.type)) selectedImageCount += 1;
+      if (isNativeFilePayloadType(payload.type)) selectedFileCount += 1;
+    }
+
     steps.push({
       stepId: `${planId}:non-text`,
       kind: "select_non_text_payloads",
       status: "completed",
       boundary: "in_memory",
-      payloadIds: nonTextPayloads.map((payload) => payload.id),
-      detail: "Non-text payloads selected only when available, supported by the model manifest, and executable inside current boundaries.",
+      payloadIds: selectedNonTextPayloads.map((payload) => payload.id),
+      detail: "Non-text payloads selected only when available, supported by the model manifest, executable inside current boundaries, and within native payload caps.",
     });
-    selectedPayloads.push(...nonTextPayloads);
+    selectedPayloads.push(...selectedNonTextPayloads);
   }
 
   const selectedByType = new Map<ContextPayloadType, ContextPayload[]>();
@@ -2261,12 +2762,20 @@ export function planAdaptiveContextTransport(
         "A-03 remains the deterministic text/artifact packing lane. A-04h negotiates payload transport across registry-driven lanes and routes only text-like payloads through A-03.",
     },
   };
+  const nativeRuntimePayloadTraces = buildNativeRuntimePayloadTraces({
+    plan,
+    selectedPayloads,
+    excludedPayloads,
+  });
+  const nativeRuntimeLaneSummary = summarizeNativeRuntimePayloadTraces(nativeRuntimePayloadTraces);
 
   const result = {
     plan,
     selectedPayloads,
     compactedPayloads,
     excludedPayloads,
+    nativeRuntimePayloadTraces,
+    nativeRuntimeLaneSummary,
     eligibilityDecisions,
     negotiationDecisions,
     missingPayloadCapabilities,
@@ -2292,6 +2801,7 @@ export function planAdaptiveContextTransport(
       selectedPayloads,
       compactedPayloads,
       excludedPayloads,
+      nativeRuntimePayloadTraces,
       missingPayloadCapabilities,
       missingContextLaneProposals,
       traceEvents,

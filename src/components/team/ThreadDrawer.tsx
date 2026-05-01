@@ -144,6 +144,7 @@ function ThreadDetailsPanel({
   const [capabilitySummaryLoading, setCapabilitySummaryLoading] = useState(false);
   const [capabilitySummaryError, setCapabilitySummaryError] = useState<string | null>(null);
   const [approvingCapabilityId, setApprovingCapabilityId] = useState<string | null>(null);
+  const [showAllCapabilityRows, setShowAllCapabilityRows] = useState(false);
 
   useEffect(() => {
     setSelectedProjectId(currentProjectId);
@@ -162,7 +163,7 @@ function ThreadDetailsPanel({
     setCapabilitySummaryLoading(true);
     setCapabilitySummaryError(null);
     try {
-      const response = await fetch(`/api/capabilities/gaps?conversationId=${encodeURIComponent(conversation.id)}`, {
+      const response = await fetch(`/api/capabilities/gaps?conversationId=${encodeURIComponent(conversation.id)}&limit=100&detail=true`, {
         cache: "no-store",
       });
       const payload = await response.json().catch(() => null) as { summary?: CapabilityGapApprovalCenterSummary; error?: string } | null;
@@ -216,6 +217,7 @@ function ThreadDetailsPanel({
 
   useEffect(() => {
     setCapabilitySummary(agentInspector?.context.capabilityGapApprovals ?? null);
+    setShowAllCapabilityRows(false);
   }, [agentInspector?.context.capabilityGapApprovals, conversation.id]);
 
   useEffect(() => {
@@ -263,7 +265,8 @@ function ThreadDetailsPanel({
     }
   }
 
-  const capabilityRows = capabilitySummary?.rows.slice(0, 4) ?? [];
+  const loadedCapabilityRows = capabilitySummary?.rows ?? [];
+  const capabilityRows = showAllCapabilityRows ? loadedCapabilityRows : loadedCapabilityRows.slice(0, 4);
   const extraCapabilityRowCount = Math.max(0, (capabilitySummary?.rows.length ?? 0) - capabilityRows.length);
   const capabilityBlockedCount =
     (capabilitySummary?.counts.configRequired ?? 0) +
@@ -849,7 +852,21 @@ function ThreadDetailsPanel({
                       );
                     })}
                     {extraCapabilityRowCount > 0 ? (
-                      <p className="text-[11px] text-[#8D877F]">+{extraCapabilityRowCount} more in the capability backlog.</p>
+                      <button
+                        type="button"
+                        onClick={() => setShowAllCapabilityRows(true)}
+                        className="text-left text-[11px] font-medium text-[#B7B0A8] underline decoration-[rgba(183,176,168,0.32)] underline-offset-4 transition-colors hover:text-[#F6F3EE]"
+                      >
+                        Show {extraCapabilityRowCount} more capability backlog rows
+                      </button>
+                    ) : showAllCapabilityRows && loadedCapabilityRows.length > 4 ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowAllCapabilityRows(false)}
+                        className="text-left text-[11px] font-medium text-[#B7B0A8] underline decoration-[rgba(183,176,168,0.32)] underline-offset-4 transition-colors hover:text-[#F6F3EE]"
+                      >
+                        Show fewer capability backlog rows
+                      </button>
                     ) : null}
                   </div>
                 ) : (

@@ -1,6 +1,14 @@
 import { getDefaultCapabilityCards } from "./capability-evaluation";
 import { buildDefaultInspectionToolRegistry } from "./document-intelligence";
 import type { InspectionCapability } from "./inspection-tool-broker";
+import {
+  buildNativeRuntimeTraceVerdict,
+  summarizeNativeRuntimePayloadTraces,
+  type NativeRuntimeLaneSummary,
+  type NativeRuntimePayloadTrace,
+  type NativeRuntimeTraceVerdict,
+  type NativeRuntimeTraceVerdictSelector,
+} from "./native-runtime-payloads";
 
 type CapabilityAvailabilityStatus =
   | "executable"
@@ -70,6 +78,11 @@ export type TruthfulExecutionClaimSnapshot = {
   inspectionTaskResults: string[];
   contextGapKinds: string[];
   limitations: string[];
+  nativeRuntimePayloads: {
+    traces: NativeRuntimePayloadTrace[];
+    summary: NativeRuntimeLaneSummary;
+    traceCheck: NativeRuntimeTraceVerdict;
+  };
   capabilityAudit: CapabilityAvailabilityAuditEntry[];
 };
 
@@ -107,6 +120,8 @@ export const TRUTHFUL_EXECUTION_CLAIM_SYSTEM_INSTRUCTIONS =
   "- Only claim a tool was called, processing ran, extraction completed, memory was updated, or artifacts were persisted when that action is present in executed tool traces, async work results, inspection task results, or persisted artifact records provided in this prompt.\n" +
   "- Deferred capabilities, recommended capabilities, unavailable capabilities, and unmet capability review items are not executed tools.\n" +
   "- Capability Gap & Approval Center approvals are governance state only; approval does not prove OCR, vision, connector reads, Python, table extraction, or any producer/tool execution.\n" +
+  "- Main-model native image/file use requires native runtime payload trace with state included; model support, approval, selected transport payloads, or external vision producer execution are not proof that the main answer model received native payloads.\n" +
+  "- OpenAI vision external producer execution and native image payload inclusion in the main answer model are separate evidence paths; do not treat either one as proof of the other.\n" +
   "- Async work item creation, planning, queuing, or completion with limitations is not the same as OCR, vision, rendered-page inspection, document-AI extraction, or high-fidelity ingestion completion.\n" +
   "- SourceObservation producer states catalog_only, unavailable, missing, approval_required, blocked_by_policy, deferred, skipped, or failed are not execution and do not prove table recovery, connector reads, native-file use, OCR, vision, rendered-page inspection, Python analysis, spreadsheet analysis, or document-AI extraction.\n" +
   "- A native file lane being planned or cataloged is not evidence that a native file was attached to a model call or read through a connector.\n" +
@@ -683,11 +698,14 @@ export function buildTruthfulExecutionClaimSnapshot(params: {
   progressiveAssembly?: unknown;
   asyncAgentWork?: unknown;
   debugTrace?: unknown;
+  nativeRuntimePayloadTrace?: NativeRuntimePayloadTrace[];
+  nativeRuntimeTraceVerdictSelector?: NativeRuntimeTraceVerdictSelector | null;
 }): TruthfulExecutionClaimSnapshot {
   const capabilityAudit = buildCapabilityAvailabilityAudit();
   const asyncRecord = asRecord(params.asyncAgentWork);
   const createdArtifactKeys = collectCreatedArtifactKeys(params.documentIntelligence, params.asyncAgentWork);
   const reusedArtifactKeys = collectReusedArtifactKeys(params.asyncAgentWork);
+  const nativeRuntimePayloadTraces = params.nativeRuntimePayloadTrace ?? [];
   const unavailableCapabilities = capabilityAudit
     .filter((entry) => !entry.executionEnabled)
     .map((entry) => entry.id);
@@ -713,6 +731,14 @@ export function buildTruthfulExecutionClaimSnapshot(params: {
     inspectionTaskResults: collectInspectionTaskResultIds(params.documentIntelligence),
     contextGapKinds: collectContextGapKinds(params.progressiveAssembly, params.asyncAgentWork, params.debugTrace),
     limitations: collectLimitations(params.asyncAgentWork, params.debugTrace),
+    nativeRuntimePayloads: {
+      traces: nativeRuntimePayloadTraces,
+      summary: summarizeNativeRuntimePayloadTraces(nativeRuntimePayloadTraces),
+      traceCheck: buildNativeRuntimeTraceVerdict({
+        traces: nativeRuntimePayloadTraces,
+        selector: params.nativeRuntimeTraceVerdictSelector,
+      }),
+    },
     capabilityAudit,
   };
 }
@@ -752,16 +778,170 @@ export function buildPersistedMemoryUpdateSummary(snapshot: TruthfulExecutionCla
   ].join("\n");
 }
 
+function getNativeRuntimePayloadEvidence(snapshot: TruthfulExecutionClaimSnapshot) {
+  return snapshot.nativeRuntimePayloads ?? {
+    traces: [],
+    summary: summarizeNativeRuntimePayloadTraces([]),
+    traceCheck: buildNativeRuntimeTraceVerdict({ traces: [] }),
+  };
+}
+
+function isNativeImagePayloadType(payloadType: string | null | undefined) {
+  return payloadType === "image" ||
+    payloadType === "rendered_page_image" ||
+    payloadType === "uploaded_image" ||
+    payloadType === "source_observation_image" ||
+    payloadType === "page_crop_image";
+}
+
+function getRequestedNativeRuntimeIncludedImage(snapshot: TruthfulExecutionClaimSnapshot) {
+  const traceCheck = getNativeRuntimePayloadEvidence(snapshot).traceCheck;
+  if (traceCheck.status !== "included" || !isNativeImagePayloadType(traceCheck.payloadType)) {
+    return null;
+  }
+  return traceCheck;
+}
+
+function buildRequestedNativeRuntimeIncludedGuidance(snapshot: TruthfulExecutionClaimSnapshot) {
+  const traceCheck = getRequestedNativeRuntimeIncludedImage(snapshot);
+  if (!traceCheck) return null;
+
+  const pageLabel = typeof traceCheck.pageNumber === "number" ? ` page ${traceCheck.pageNumber}` : "";
+  const payloadLabel = traceCheck.payloadType ?? "native image payload";
+  const requestFormat = traceCheck.requestFormat ? ` via ${traceCheck.requestFormat}` : "";
+  const provider = traceCheck.providerTarget ? ` Provider: ${traceCheck.providerTarget}.` : "";
+  const model = traceCheck.modelTarget ? ` Model: ${traceCheck.modelTarget}.` : "";
+
+  return `Requested native main-model payload verdict: included. The main answer model received the ${payloadLabel}${pageLabel}${requestFormat}.${provider}${model} You may answer visual questions about that included image. Do not claim OCR, external vision producer, document-AI, enhanced table extraction, or table-tool structural recovery ran unless separate completed_with_evidence or executed-tool traces exist.`;
+}
+
+function formatRequestedNativeRuntimePayload(traceCheck: NativeRuntimeTraceVerdict) {
+  const payloadLabel = traceCheck.payloadType ?? "native image payload";
+  const pageLabel = typeof traceCheck.pageNumber === "number" ? ` page ${traceCheck.pageNumber}` : "";
+  const requestFormat = traceCheck.requestFormat ? ` through ${traceCheck.requestFormat}` : "";
+  return `${payloadLabel}${pageLabel}${requestFormat}`;
+}
+
+function formatNativeTraceTarget(traceCheck: NativeRuntimeTraceVerdict) {
+  return [
+    traceCheck.providerTarget ? `provider ${traceCheck.providerTarget}` : null,
+    traceCheck.modelTarget ? `model ${traceCheck.modelTarget}` : null,
+  ].filter((value): value is string => Boolean(value)).join("; ");
+}
+
+export function renderTruthfulExecutionAnswerGuidance(snapshot: TruthfulExecutionClaimSnapshot) {
+  const evidence = getNativeRuntimePayloadEvidence(snapshot);
+  const traceCheck = evidence.traceCheck;
+  const includedNativeImage = getRequestedNativeRuntimeIncludedImage(snapshot);
+  const target = formatNativeTraceTarget(traceCheck);
+
+  if (includedNativeImage) {
+    return [
+      "## Answer Guidance From Execution Evidence",
+      "- Requested native image payload verdict: included.",
+      `- The main answer model received ${formatRequestedNativeRuntimePayload(includedNativeImage)}${
+        target ? ` (${target})` : ""
+      }. Answer the user's visual/document question from that included image first.`,
+      "- If the user asks for both an answer and a runtime trace check, provide the answer first, then a separator line `---`, then a concise `Runtime trace / diagnostics` section.",
+      "- Keep diagnostics concise by default: native payload verdict, provider/model/request format, and whether separate OCR, external OpenAI vision producer, document-AI, enhanced table extraction, or table-tool structural recovery ran.",
+      "- Do not lead with `I can only report execution that appears in the runtime trace.`",
+      "- Do not dump full executed-tool, deferred/recommended capability, async work, artifact key, or capability backlog details by default; those remain available in Inspect Context.",
+      "- Unrelated native lane gaps such as page_crop_image must not override the requested rendered_page_image included verdict.",
+      "- Native main-model image inclusion supports visual answer content from that included image, but it remains separate from OCR, external OpenAI vision producer execution, document-AI, enhanced table extraction, and table-tool structural recovery.",
+      "- No raw payload bytes, data URLs, file contents, provider raw responses, or secrets are included in this answer guidance.",
+    ].join("\n");
+  }
+
+  if (traceCheck.status !== "unavailable") {
+    const reasonParts = [
+      traceCheck.exclusionReason ? `reason: ${traceCheck.exclusionReason}` : null,
+      traceCheck.runtimeSubreason ? `subreason: ${traceCheck.runtimeSubreason}` : null,
+      traceCheck.detail ? `detail: ${traceCheck.detail}` : null,
+    ].filter((value): value is string => Boolean(value));
+    return [
+      "## Answer Guidance From Execution Evidence",
+      `- Requested native image payload verdict: ${traceCheck.status}.`,
+      reasonParts.length > 0 ? `- ${reasonParts.join("; ")}.` : "- No final included native image trace is available.",
+      "- Do not answer as if the main model saw the image. Explain the exact native payload status/blocker before any visual answer.",
+      "- Keep diagnostics concise unless the user explicitly asks for detailed trace output.",
+      "- No raw payload bytes, data URLs, file contents, provider raw responses, or secrets are included in this answer guidance.",
+    ].join("\n");
+  }
+
+  return [
+    "## Answer Guidance From Execution Evidence",
+    "- No requested native image payload inclusion is proven. Do not claim the main model saw a native image unless an included native runtime trace is present.",
+    "- Keep diagnostics concise unless the user explicitly asks for detailed trace output.",
+    "- No raw payload bytes, data URLs, file contents, provider raw responses, or secrets are included in this answer guidance.",
+  ].join("\n");
+}
+
+function buildNativeRuntimePayloadSummary(snapshot: TruthfulExecutionClaimSnapshot) {
+  const evidence = getNativeRuntimePayloadEvidence(snapshot);
+  const summary = evidence.summary;
+  const traceCheck = evidence.traceCheck;
+  const includedGuidance = buildRequestedNativeRuntimeIncludedGuidance(snapshot);
+  const unrelatedExcluded =
+    traceCheck.unrelatedExcludedPayloads.length > 0
+      ? traceCheck.unrelatedExcludedPayloads
+          .map((payload) =>
+            `${payload.payloadType}:${payload.reason ?? "unknown"}${
+              payload.subreason ? `/${payload.subreason}` : ""
+            }`
+          )
+          .join(", ")
+      : "none";
+  return [
+    `- nativeRuntimeTraceCheck.status: ${traceCheck.status}`,
+    traceCheck.payloadId ? `- nativeRuntimeTraceCheck.payloadId: ${traceCheck.payloadId}` : null,
+    traceCheck.payloadType ? `- nativeRuntimeTraceCheck.payloadType: ${traceCheck.payloadType}` : null,
+    typeof traceCheck.pageNumber === "number" ? `- nativeRuntimeTraceCheck.pageNumber: ${traceCheck.pageNumber}` : null,
+    traceCheck.providerTarget ? `- nativeRuntimeTraceCheck.provider: ${traceCheck.providerTarget}` : null,
+    traceCheck.modelTarget ? `- nativeRuntimeTraceCheck.model: ${traceCheck.modelTarget}` : null,
+    traceCheck.requestFormat ? `- nativeRuntimeTraceCheck.requestFormat: ${traceCheck.requestFormat}` : null,
+    traceCheck.exclusionReason ? `- nativeRuntimeTraceCheck.exclusionReason: ${traceCheck.exclusionReason}` : null,
+    traceCheck.runtimeSubreason ? `- nativeRuntimeTraceCheck.runtimeSubreason: ${traceCheck.runtimeSubreason}` : null,
+    `- nativeRuntimeTraceCheck.unrelatedExcludedPayloads: ${unrelatedExcluded}`,
+    `- candidate: ${summary.candidateCount}; selected: ${summary.selectedCount}; included: ${summary.includedCount}; excluded: ${summary.excludedCount}`,
+    `- diagnosticState: ${summary.diagnosticState}`,
+    `- diagnosticReasons: ${summary.diagnosticReasons.length > 0 ? summary.diagnosticReasons.join("; ") : "none"}`,
+    `- includedKinds: ${
+      Object.keys(summary.includedByKind).length > 0
+        ? Object.entries(summary.includedByKind).map(([kind, count]) => `${kind}:${count}`).join(", ")
+        : "none"
+    }`,
+    `- excludedReasons: ${
+      Object.keys(summary.excludedByReason).length > 0
+        ? Object.entries(summary.excludedByReason).map(([reason, count]) => `${reason}:${count}`).join(", ")
+        : "none"
+    }`,
+    includedGuidance
+      ? `- ${includedGuidance}`
+      : summary.includedCount > 0
+        ? "- Native payload inclusion is main-model request evidence only; it is not external vision producer execution."
+        : summary.selectedCount > 0
+        ? "- Native payload selection is not inclusion proof; an included runtime request trace is still required for main-model image/file-use claims."
+        : "- No main-model native image/file payload inclusion is proven.",
+  ].filter((line): line is string => Boolean(line)).join("\n");
+}
+
 export function renderTruthfulExecutionClaimContext(snapshot: TruthfulExecutionClaimSnapshot) {
   const asyncLine = snapshot.asyncWorkCreated
     ? `- asyncWorkCreated: true; asyncWorkStatus: ${snapshot.asyncWorkStatus ?? "unknown"}; asyncWorkType: ${snapshot.asyncWorkType ?? "unknown"}`
     : "- asyncWorkCreated: false";
+  const includedNativeGuidance = buildRequestedNativeRuntimeIncludedGuidance(snapshot);
+  const nativeAnsweringConsequence = includedNativeGuidance
+    ? "- Requested native payload verdict is included, so answer visual questions from the included native image payload when the user asks for visual content. Separately note OCR, external vision producer, document-AI, enhanced table extraction, or table-tool structural recovery did not run only when relevant to the user's request."
+    : "- If native payload inclusion lists included images, you may say those images were included in the main model request; do not describe that as OpenAI vision or an external vision producer.";
 
   return [
     "## Execution Claim Evidence",
     "Use this section as authoritative evidence for what the final answer may claim about execution.",
     TRUTHFUL_EXECUTION_CLAIM_SYSTEM_INSTRUCTIONS,
     "",
+    includedNativeGuidance ? "Requested native runtime payload verdict:" : null,
+    includedNativeGuidance,
+    includedNativeGuidance ? "" : null,
     "Executed tools:",
     buildExecutedCapabilitySummary(snapshot),
     "",
@@ -785,6 +965,9 @@ export function renderTruthfulExecutionClaimContext(snapshot: TruthfulExecutionC
     "Inspection task results:",
     formatList(snapshot.inspectionTaskResults, "none recorded"),
     "",
+    "Native main-model payload inclusion:",
+    buildNativeRuntimePayloadSummary(snapshot),
+    "",
     "Context gaps:",
     formatList(snapshot.contextGapKinds, "none recorded"),
     "",
@@ -792,10 +975,13 @@ export function renderTruthfulExecutionClaimContext(snapshot: TruthfulExecutionC
     formatList(snapshot.limitations, "none recorded"),
     "",
     "Answering consequence:",
-    "- If OCR, vision, rendered-page inspection, document-AI, document_processor, or table_extraction_enhanced are not listed under Executed tools, say they did not run.",
+    includedNativeGuidance
+      ? "- Do not let deferred OCR, external vision, document-AI, enhanced table extraction, or unrelated native lane gaps override an included requested native image verdict."
+      : "- If OCR, vision, rendered-page inspection, document-AI, document_processor, or table_extraction_enhanced are not listed under Executed tools, say they did not run.",
+    nativeAnsweringConsequence,
     "- If async work exists, report only its actual status and steps; do not describe it as completed extraction unless extraction is listed under Executed tools or persisted artifacts.",
     "- If producer requests are unresolved, describe them as needs/gaps/proposals, not as completed source inspection.",
-  ].join("\n");
+  ].filter((line): line is string => line !== null).join("\n");
 }
 
 export function buildTruthfulExecutionClaimContext(params: {
@@ -804,6 +990,8 @@ export function buildTruthfulExecutionClaimContext(params: {
   progressiveAssembly?: unknown;
   asyncAgentWork?: unknown;
   debugTrace?: unknown;
+  nativeRuntimePayloadTrace?: NativeRuntimePayloadTrace[];
+  nativeRuntimeTraceVerdictSelector?: NativeRuntimeTraceVerdictSelector | null;
 }) {
   return renderTruthfulExecutionClaimContext(buildTruthfulExecutionClaimSnapshot(params));
 }
@@ -845,6 +1033,20 @@ function hasHighFidelityCompletionEvidence(snapshot: TruthfulExecutionClaimSnaps
     snapshot.limitations.length === 0;
 }
 
+function hasNativeMainModelImageInclusion(snapshot: TruthfulExecutionClaimSnapshot) {
+  if (getRequestedNativeRuntimeIncludedImage(snapshot)) {
+    return true;
+  }
+
+  return getNativeRuntimePayloadEvidence(snapshot).traces.some((trace) =>
+    trace.state === "included" &&
+    (trace.kind === "image" ||
+      trace.kind === "rendered_page_image" ||
+      trace.kind === "uploaded_image" ||
+      trace.kind === "source_observation_image")
+  );
+}
+
 export function validateAnswerExecutionClaims(
   answer: string,
   snapshot: TruthfulExecutionClaimSnapshot
@@ -884,6 +1086,13 @@ export function validateAnswerExecutionClaims(
   }
 
   if (
+    hasPositiveExecutionPhrase(normalized, /\b(?:external\s+)?(?:openai\s+)?vision\s+producer\b/i) &&
+    !hasAnyExecutedTool(snapshot, ["openai_vision", "openai_vision_inspector", "vision_page_understanding", "model_vision_inspector"])
+  ) {
+    violations.push("External vision producer execution is claimed without completed external vision producer evidence.");
+  }
+
+  if (
     hasPositiveExecutionPhrase(normalized, /\bvision(?:[-_\s]page[-_\s]understanding)?\b/i) &&
     !hasExecutedCapability(snapshot, "vision_page_understanding") &&
     !hasAnyExecutedTool(snapshot, ["vision_page_understanding", "model_vision_inspector"])
@@ -892,8 +1101,30 @@ export function validateAnswerExecutionClaims(
   }
 
   if (
-    hasPositiveExecutionPhrase(normalized, /\brendered[-\s]page\b/i) &&
+    /\b(?:main\s+model|answer\s+model|llm|model\s+request|chat\s+completion)\b.{0,120}\b(?:saw|received|included|attached|sent|used)\b.{0,80}\b(?:image|page\s+image|rendered\s+page|native\s+payload|file)\b/i.test(normalized) &&
+    !hasNativeMainModelImageInclusion(snapshot)
+  ) {
+    violations.push("Main-model native image/file inclusion is claimed without included native runtime payload trace.");
+  }
+
+  if (
+    getNativeRuntimePayloadEvidence(snapshot).traceCheck.status === "included" &&
+    /\b(?:runtime\s+trace\s+check|nativeRuntimeTraceCheck|native\s+main[-\s]model|main[-\s]model\s+receipt)\b[\s\S]{0,240}\b(?:selected_but_excluded|no_candidate|unavailable|not\s+proven|none\s+proven|model_supported_runtime_missing)\b/i.test(normalized)
+  ) {
+    violations.push("Requested native runtime payload verdict is included, but the answer reports it as excluded or unproven.");
+  }
+
+  if (
+    hasPositiveExecutionPhrase(normalized, /\brendered[-\s]page\s+inspection\b/i) &&
     !hasAnyExecutedTool(snapshot, ["rendered_page_inspection", "rendered_page_renderer"])
+  ) {
+    violations.push("Rendered-page inspection is claimed without rendered-page execution trace.");
+  }
+
+  if (
+    hasPositiveExecutionPhrase(normalized, /\brendered[-\s]page\b/i) &&
+    !hasAnyExecutedTool(snapshot, ["rendered_page_inspection", "rendered_page_renderer"]) &&
+    !hasNativeMainModelImageInclusion(snapshot)
   ) {
     violations.push("Rendered-page inspection is claimed without rendered-page execution trace.");
   }
@@ -1006,6 +1237,16 @@ export function validateAnswerExecutionClaims(
   }
 
   if (
+    hasPositiveExecutionPhrase(
+      normalized,
+      /\b(?:table\s+extraction\s+tool|table\s+tool|structured\s+table\s+body|table\s+body)\b/i
+    ) &&
+    !hasTableBodyEvidence(snapshot)
+  ) {
+    violations.push("Table-tool structural recovery is claimed without table body extraction evidence.");
+  }
+
+  if (
     snapshot.contextGapKinds.includes("missing_table_body") &&
     /\bpage\s*15\b/i.test(normalized) &&
     /(?:650\s*ppm\s*Li|235\s*(?:F|\u00b0F)|250,?000\s*ppm\s*TDS)/i.test(normalized) &&
@@ -1026,7 +1267,10 @@ export function buildTruthfulExecutionCorrection(
 ) {
   const mentionsOcrOrVision = violations.some((violation) => /OCR|vision|table_extraction_enhanced/i.test(violation));
   const mentionsHighFidelity = violations.some((violation) => /high-fidelity|document_processor/i.test(violation));
-  const opening = mentionsOcrOrVision
+  const includedNativeGuidance = buildRequestedNativeRuntimeIncludedGuidance(snapshot);
+  const opening = includedNativeGuidance
+    ? "The requested native image payload was included in the main-model request, so I can answer visual questions from that image. I still cannot claim separate OCR, external vision producer, document-AI, enhanced table extraction, or table-tool structural recovery unless those traces exist."
+    : mentionsOcrOrVision
     ? "I cannot run OCR/vision-enhanced extraction yet because those capabilities are not approved, configured, or execution-enabled in the current tool registry."
     : mentionsHighFidelity
       ? "I cannot complete highest-fidelity ingestion with the currently approved tools."
@@ -1054,8 +1298,15 @@ export function buildTruthfulExecutionCorrection(
     snapshot.persistedMemoryUpdates.length > 0
       ? `- Persisted artifact keys available: ${snapshot.persistedMemoryUpdates.join(", ")}.`
       : "- No turn-created persisted artifact keys are available for a memory-updated claim.",
+    getNativeRuntimePayloadEvidence(snapshot).traceCheck.status === "included"
+      ? `- Requested native main-model payload verdict: included (${getNativeRuntimePayloadEvidence(snapshot).traceCheck.payloadId ?? "matching payload"}).`
+      : getNativeRuntimePayloadEvidence(snapshot).summary.includedCount > 0
+        ? `- Native main-model payloads included globally: ${getNativeRuntimePayloadEvidence(snapshot).summary.includedCount}. Requested verdict: ${getNativeRuntimePayloadEvidence(snapshot).traceCheck.status}.`
+        : `- Native main-model payload inclusion: none proven in the runtime trace. Diagnostic: ${getNativeRuntimePayloadEvidence(snapshot).summary.diagnosticState}; ${getNativeRuntimePayloadEvidence(snapshot).summary.diagnosticReasons.join("; ") || "no diagnostic reason recorded"}.`,
     "",
-    "No OCR, vision, rendered-page inspection, document-AI, document_processor, or table_extraction_enhanced tool has run unless it is listed above as an executed tool trace.",
+    includedNativeGuidance
+      ? "Native main-model image inclusion supports visual answer content from that included image. It remains separate from OCR, external OpenAI vision producer execution, document-AI, document_processor, and table_extraction_enhanced tool execution."
+      : "No OCR, vision, rendered-page inspection, document-AI, document_processor, or table_extraction_enhanced tool has run unless it is listed above as an executed tool trace.",
   ].filter((line): line is string => Boolean(line));
 
   return lines.join("\n");
